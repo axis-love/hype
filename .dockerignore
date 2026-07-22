@@ -1,0 +1,15 @@
+.git
+.gitignore
+.idea
+.vscode
+.claude
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+.venv
+venv
+data
+deploy/docker/state
+tests

@@ -1,0 +1,75 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+
+# Virtual environments
+venv/
+.env/
+.env.*
+!.env.example
+.venv/
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.local
+.env.production
+
+# =========================
+# Ollama
+# =========================
+# Models are huge, never push them
+ollama_models/
+*.gguf
+*.bin
+
+# =========================
+# LM Studio
+# =========================
+# LM Studio model cache
+models/
+*.gguf
+*.safetensors
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+deploy/docker/state/
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+*.swp
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Temporary
+# =========================
+*.tmp
+*.bak
+*.old
+
+# =========================
+# Node (if you ever add frontend)
+# =========================
+node_modules/
+dist/
+build/
+girllm.egg-info/
+data/

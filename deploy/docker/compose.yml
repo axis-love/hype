@@ -1,0 +1,58 @@
+name: girllm
+
+services:
+  jessica:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["python", "bot.py"]
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ./state/data:/state/data
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DEPLOY_MODE: docker
+      REPO_DIR: /app
+      BOT_TOKEN: ${BOT_TOKEN:?BOT_TOKEN is required}
+      ADMIN_IDS: ${ADMIN_IDS:-}
+      GIRLLM_DB: /state/data/${GIRLLM_DB_BASENAME:-girllm.sqlite}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-1}
+      LM_TIMEOUT: ${LM_TIMEOUT:-300}
+      LM_BASE: ${LM_BASE:-}
+      LM_MODEL: ${LM_MODEL:-}
+      JESSICA_OPENROUTER_API_KEY: ${JESSICA_OPENROUTER_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-}
+      OPENROUTER_TITLE: ${OPENROUTER_TITLE:-}
+      UPDATE_PULL_COMMAND: ${UPDATE_PULL_COMMAND:-disabled}
+      UPDATE_RESTART_COMMAND: ${UPDATE_RESTART_COMMAND:-}
+
+  natalie:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["python", "natalie_worker.py"]
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ./state/data:/state/data
+      - ./state/telethon:/state/telethon
+    environment:
+      PYTHONUNBUFFERED: "1"
+      GIRLLM_DB: /state/data/${GIRLLM_DB_BASENAME:-girllm.sqlite}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LM_TIMEOUT: ${LM_TIMEOUT:-300}
+      NATALIE_LM_TIMEOUT: ${NATALIE_LM_TIMEOUT:-300}
+      NATALIE_LM_BASE: ${NATALIE_LM_BASE:-}
+      NATALIE_LM_MODEL: ${NATALIE_LM_MODEL:-}
+      NATALIE_OPENROUTER_API_KEY: ${NATALIE_OPENROUTER_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_HTTP_REFERER: ${OPENROUTER_HTTP_REFERER:-}
+      OPENROUTER_TITLE: ${OPENROUTER_TITLE:-}
+      NATALIE_API_ID: ${NATALIE_API_ID:-}
+      NATALIE_API_HASH: ${NATALIE_API_HASH:-}
+      NATALIE_SESSION: ${NATALIE_SESSION:-}
+      NATALIE_PHONE: ${NATALIE_PHONE:-}
+

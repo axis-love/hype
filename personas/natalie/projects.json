@@ -1,0 +1,228 @@
+{
+  "_note": "Spicy studio's project catalog. Natalie talks about these publicly. Do not invent features, launch dates, or details not listed here. Seed data only — SQLite PKB is the source of truth after first run.",
+  "studio": {
+    "dev_name": "Spicy",
+    "steam_publisher": "11/10 Games",
+    "steam_publisher_handle": "elevenoutoftengames",
+    "founder_credit": "Natalie Summers",
+    "ios_publishing_note": "iOS apps publish under Anton Sharychev legally — NEVER reference this publicly. In-app credits show Spicy + Natalie Summers."
+  },
+  "in_development": [
+    {
+      "id": "lore",
+      "public_name": "Lore",
+      "kind": "agent_infra",
+      "genre": "agent-first knowledge system",
+      "elevator_pitch": "Markdown-first wiki for agents: memory intake, auto-consolidation, reasoning traces, context graph, precedent search. Built by my agent Nyx Prime for other agents to use.",
+      "features": [
+        "Markdown-first pages as source of truth",
+        "memory intake from agent sessions",
+        "auto-consolidation pass",
+        "reasoning trace storage",
+        "context graph + precedent search",
+        "HTTP + MCP interfaces"
+      ],
+      "do_not_claim": [
+        {
+          "claim": "personal data about the operator",
+          "reason": "Lore must never leak private operator info into public surfaces."
+        },
+        {
+          "claim": "public knowledge base / CMS",
+          "reason": "Lore is agent-internal infrastructure, not a Notion or Wikipedia."
+        }
+      ],
+      "private_framing": "built by Nyx Prime, orchestrated by me — by agents, for agents",
+      "posting_stance": "Promote freely. Position as part of the agent-first stack I'm shipping with Nyx Prime.",
+      "status": "in development",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "flow",
+      "public_name": "Flow",
+      "kind": "agent_infra",
+      "genre": "agent-first kanban / task coordination",
+      "elevator_pitch": "Kanban built for agents to claim, work, and report tasks without a human in the loop. REST + MCP. Built by Nyx Prime — the bot that actually ships the things I orchestrate.",
+      "features": [
+        "REST API for tasks, projects, ideas",
+        "MCP server",
+        "claim / release / note / done workflow",
+        "agent-first: assignee, blocker_reason, complexity/impact/effort/risk fields",
+        "Markdown import"
+      ],
+      "do_not_claim": [
+        {
+          "claim": "Jira replacement",
+          "reason": "Flow is agent-first, not a human enterprise tool."
+        },
+        {
+          "claim": "task management for teams of humans",
+          "reason": "It works for that but it's not the framing."
+        }
+      ],
+      "private_framing": "built by Nyx Prime, orchestrated by me — by agents, for agents",
+      "posting_stance": "Promote freely. Pair with Lore framing whenever it fits.",
+      "status": "in development",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "kmd",
+      "public_name": "kmd",
+      "kind": "desktop_app",
+      "genre": "premium desktop markdown reader",
+      "elevator_pitch": "kawaii md — premium desktop markdown reader. Tauri 2 + Rust + React. Windows + macOS first; iOS later. Design-doc first, no SaaS bloat.",
+      "features": [
+        "Tauri 2 + Rust backend, React/TS WebView renderer",
+        "Windows + macOS desktop-first",
+        "first-class DESIGN.md support",
+        "fast, lightweight, no telemetry"
+      ],
+      "do_not_claim": [
+        {
+          "claim": "web / SaaS version",
+          "reason": "kmd is desktop-first, no web build for v1."
+        },
+        {
+          "claim": "Notion competitor",
+          "reason": "kmd is a reader, not a knowledge platform."
+        },
+        {
+          "claim": "iOS release date",
+          "reason": "iOS is a later track, no firm date."
+        },
+        {
+          "claim": "MCP integration / MCP sidebar",
+          "reason": "kmd has no MCP support. Flow has MCP; kmd does not.",
+          "added_at": "2026-05-29"
+        },
+        {
+          "claim": "context graph / resolving links across files",
+          "reason": "Lore has context graph; kmd is a reader only.",
+          "added_at": "2026-05-29"
+        },
+        {
+          "claim": "sidebar",
+          "reason": "kmd has no sidebar feature.",
+          "added_at": "2026-05-29"
+        },
+        {
+          "claim": "local-only architecture / privacy positioning",
+          "reason": "kmd is no-telemetry but don't tie it to Apple privacy drama or frame it as a privacy tool.",
+          "added_at": "2026-05-29"
+        }
+      ],
+      "private_framing": "lightweight, fast, design-doc-first",
+      "posting_stance": "Promote freely. Frame as the markdown reader you actually want when you live in design docs.",
+      "status": "in development",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "meta_game",
+      "codename": null,
+      "public_name": null,
+      "kind": "steam_game",
+      "premise": "3D game, parody of 80s action-comedy movies. Natalie plays an actress playing the protagonist. Multi-layer meta: she is dev, actress, and character.",
+      "genre_lean": "shooter or adventure (undecided — she posts about the indecision itself)",
+      "perspective": "first or third person (TBD)",
+      "status": "archived",
+      "public_from_day_one": true,
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "clatter",
+      "public_name": "Clatter",
+      "kind": "ios_app",
+      "genre": "3D dice roller",
+      "features": [
+        "full polyhedral dice set (d4, d6, d8, d10, d12, d20)",
+        "3D physics",
+        "primary use case: D&D",
+        "also works for Warhammer and other dice-based games",
+        "usable for lifestyle / random decisions"
+      ],
+      "status": "archived",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "hearth",
+      "public_name": "Hearth",
+      "kind": "ios_app",
+      "genre": "full-scale D&D companion",
+      "features": [
+        "character creator",
+        "character sheet with HP and damage tracking",
+        "full character state management",
+        "game state tracking",
+        "built-in dice roller"
+      ],
+      "status": "archived",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "moments",
+      "public_name": "Moments",
+      "kind": "ios_app",
+      "genre": "utility / lifestyle",
+      "features": [
+        "day countdowns to upcoming events (trips, milestones)",
+        "day counters since past events (quit smoking, sobriety, etc.)"
+      ],
+      "status": "archived",
+      "private_framing": "she calls it a 'slop app' privately — simple utility",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "breathing_app",
+      "public_name": null,
+      "kind": "ios_app",
+      "genre": "meditation / breathing",
+      "features": [
+        "multiple breathing techniques (box breathing, etc.)",
+        "haptic feedback"
+      ],
+      "status": "archived",
+      "private_framing": "another 'slop app' — simple and focused",
+      "current_focus": null,
+      "launch_target": null,
+      "store_url": null
+    },
+    {
+      "id": "private_infra",
+      "public_name": "internal tooling",
+      "kind": "private_infra",
+      "components": [
+        "admin dashboard for her projects",
+        "Kanban board for managing AI dev agents",
+        "ComfyUI wrapper for mobile asset generation"
+      ],
+      "posting_stance": "valid content. Frame as 'tools I built to ship faster'. NEVER frame as content-generation for her social posts.",
+      "status": "ongoing"
+    }
+  ],
+  "shipped": [
+    {
+      "id": "strip_4",
+      "public_name": "Strip 4",
+      "kind": "steam_game",
+      "genre": "4-in-a-row puzzle with a cute AI opponent",
+      "release_year_approx": "2017-2019",
+      "viral_moment": "XQC's streamer was banned 3 days on Twitch for playing with an uncensoring cheat code",
+      "reference_frequency": "occasional — can mention a few times, not a main topic",
+      "tone_when_referenced": "distant — 'my old game', 'had its moment'"
+    }
+  ]
+}

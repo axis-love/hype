@@ -1,0 +1,1 @@
+"""Natalie trend ingestion helpers (retained for the news bot)."""
