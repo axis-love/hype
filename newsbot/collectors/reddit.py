@@ -19,7 +19,7 @@ from newsbot.collectors.base import new_candidate, truncate, to_iso_utc
 
 log = logging.getLogger(__name__)
 
-REDDIT_USER_AGENT = "newsbot:v0.1 (by /u/newsbot)"
+REDDIT_USER_AGENT = "Mozilla/5.0 (compatible; newsbot/0.1; +https://github.com/elevenoutoften/news-bot)"
 
 
 async def _fetch_one(client: httpx.AsyncClient, *, subreddit: str, limit: int) -> list[dict[str, Any]]:

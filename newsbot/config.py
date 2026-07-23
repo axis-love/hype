@@ -61,7 +61,7 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
 
 DEFAULT_RUN: dict[str, Any] = {
     "lookback_hours": 48,
-    "max_candidates": 80,
+    "max_candidates": 40,
     "max_final_news": 10,
     "min_score": 35,
     "item_prune_hours": 48,
@@ -69,8 +69,8 @@ DEFAULT_RUN: dict[str, Any] = {
 
 DEFAULT_LLM: dict[str, Any] = {
     "temperature": 0.4,
-    "max_tokens_filter": 800,
-    "max_tokens_digest": 1500,
+    "max_tokens_filter": 8000,
+    "max_tokens_digest": 8000,
 }
 
 # --- Default source config (so the bot runs with no settings) ---------

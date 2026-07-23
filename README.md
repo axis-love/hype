@@ -45,11 +45,13 @@ to stdout instead of posting — useful for testing.
 | `BOT_TOKEN` | Telegram bot token for posting |
 | `NEWS_CHANNEL_ID` | `@channel_username` or `-100…` chat id |
 | `LM_BASE` | OpenAI-compatible endpoint base (no `/v1` suffix) |
-| `LM_MODEL` | LLM model name |
+| `LM_MODEL` | LLM model name (digest writer) |
+| `LM_FILTER_MODEL` | LLM model name (filter pass; defaults to `LM_MODEL`) |
 | `LM_API_KEY` | Bearer token (optional) |
 | `LM_TIMEOUT` | Request timeout, seconds (default 300) |
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
+| `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 
 ## Configuration
@@ -67,7 +69,7 @@ VALUES ('news', 'max_final_news', '8', datetime('now'));
 Recognized keys: `sources`, `source_weights`, `topic_boost`,
 `lookback_hours`, `max_candidates`, `max_final_news`, `min_score`,
 `item_prune_hours`, `llm_temperature`, `llm_max_tokens_filter`,
-`llm_max_tokens_digest`.
+`llm_max_tokens_digest`. Default: 8000 / 8000.
 
 ## Layout
 

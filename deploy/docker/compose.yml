@@ -17,6 +17,8 @@ services:
       NEWS_CHANNEL_ID: ${NEWS_CHANNEL_ID:-}
       LM_BASE: ${LM_BASE:-}
       LM_MODEL: ${LM_MODEL:-}
+      LM_FILTER_MODEL: ${LM_FILTER_MODEL:-}
       LM_API_KEY: ${LM_API_KEY:-}
       LM_TIMEOUT: ${LM_TIMEOUT:-300}
       PH_API_KEY: ${PH_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
