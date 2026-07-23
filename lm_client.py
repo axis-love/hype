@@ -121,44 +121,6 @@ class LMClient:
 
         return False, LLMPermanentError, f"LLM request failed with HTTP {status_code}"
 
-    async def _curl_post(self, url: str, payload: dict) -> Tuple[int, str]:
-        """POST via curl subprocess — works around httpx/Caddy empty-body issue."""
-        body = json.dumps(payload)
-        header_args = []
-        for k, v in (self.headers or {}).items():
-            header_args.extend(["-H", f"{k}: {v}"])
-        header_args.extend(["-H", "Content-Type: application/json"])
-
-        proc = await asyncio.create_subprocess_exec(
-            "curl", "-s", "-S",
-            "-w", "\n%{http_code}",
-            "-X", "POST", url,
-            *header_args,
-            "-d", body,
-            "--max-time", str(int(self.timeout)),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            err = stderr.decode() if stderr else "curl failed"
-            raise LLMTransientError(f"curl subprocess failed (exit {proc.returncode}): {err[:200]}")
-
-        output = stdout.decode()
-        # Last line is the HTTP status code (from -w)
-        lines = output.rsplit("\n", 1)
-        if len(lines) == 2:
-            body_text, status_str = lines
-        else:
-            body_text = output
-            status_str = "200"
-        try:
-            status = int(status_str.strip())
-        except ValueError:
-            status = 200
-            body_text = output
-        return status, body_text
-
     async def generate(self, messages, **params) -> Tuple[str, str]:
         filtered = {k: v for k, v in params.items() if v is not None and k in self.ALLOWED_PARAMS}
 
@@ -172,65 +134,61 @@ class LMClient:
         # Record *exact* request that will be sent (without auth headers).
         self.last_request = {"url": url, **payload}
 
-        last_error: Optional[LLMTransientError] = None
-        attempts = max(1, self.max_retries)
-        for attempt in range(attempts):
-            try:
-                status, body_text = await self._curl_post(url, payload)
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            last_error: Optional[LLMTransientError] = None
+            attempts = max(1, self.max_retries)
+            for attempt in range(attempts):
+                try:
+                    r = await client.post(url, json=payload, headers=(self.headers or None))
+                    r.raise_for_status()
 
-                if status >= 400:
-                    is_transient, error_class, message = self._classify_http_error(status, body_text)
+                    # Caddy/muse can intermittently return 200 with an empty body.
+                    # Retry on empty responses.
+                    if not r.content:
+                        last_error = LLMTransientError("LLM returned 200 with empty body")
+                        if attempt == attempts - 1:
+                            break
+                        delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
+                        await asyncio.sleep(delay)
+                        continue
+
+                    data = r.json()
+                    if not data or not data.get("choices"):
+                        return "", "empty_response"
+
+                    content = data["choices"][0]["message"]["content"]
+                    return (
+                        content if content is not None else "",
+                        data["choices"][0].get("finish_reason", "")
+                    )
+                except httpx.TimeoutException as exc:
+                    last_error = LLMTransientError(f"LLM request timed out: {exc}")
+                except httpx.TransportError as exc:
+                    last_error = LLMTransientError(f"LLM transport error: {exc}")
+                except httpx.HTTPStatusError as exc:
+                    response = exc.response
+                    response_body = ""
+                    try:
+                        response_body = response.text
+                    except Exception:
+                        try:
+                            response_body = json.dumps(response.json())
+                        except Exception:
+                            response_body = ""
+                    is_transient, error_class, message = self._classify_http_error(
+                        response.status_code,
+                        response_body,
+                    )
                     error = error_class(message)
                     if not is_transient:
-                        raise error
+                        raise error from exc
                     last_error = error
-                    if attempt == attempts - 1:
-                        break
-                    delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
-                    await asyncio.sleep(delay)
-                    continue
 
-                if not body_text.strip():
-                    last_error = LLMTransientError("LLM returned 200 with empty body")
-                    if attempt == attempts - 1:
-                        break
-                    delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
-                    await asyncio.sleep(delay)
-                    continue
+                if attempt == attempts - 1:
+                    break
+                delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
+                await asyncio.sleep(delay)
 
-                data = json.loads(body_text)
-                if not data or not data.get("choices"):
-                    return "", "empty_response"
-
-                message = data["choices"][0]["message"]
-                content = message.get("content") or ""
-
-                # Reasoning models (e.g. qwen3.6, gemma4) on Ollama put all output
-                # in the "reasoning" field, leaving "content" empty. When
-                # enable_thinking isn't honoured, fall back to reasoning content
-                # so the pipeline still works.
-                if not content:
-                    reasoning = message.get("reasoning") or ""
-                    if reasoning:
-                        content = reasoning
-
-                return (
-                    content if content is not None else "",
-                    data["choices"][0].get("finish_reason", "")
-                )
-
-            except (json.JSONDecodeError,) as exc:
-                last_error = LLMTransientError(f"LLM returned invalid JSON: {exc}")
-            except LLMTransientError as exc:
-                last_error = exc
-            except LLMPermanentError:
-                raise
-
-            if attempt == attempts - 1:
-                break
-            delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
-            await asyncio.sleep(delay)
-
-        if last_error is not None:
-            raise last_error
-        raise LLMTransientError("LLM request failed after retries with no error detail")
+            if last_error is not None:
+                raise last_error
+            raise LLMTransientError("LLM request failed after retries with no error detail")

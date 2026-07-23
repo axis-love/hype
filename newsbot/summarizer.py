@@ -47,7 +47,6 @@ DIGEST_SYSTEM = (
     "2. <headline>\n...\n\n"
     "Rules: keep topics diverse (don't put 5 AI items and zero game-dev). Keep each item "
     "short. Include the source link. Do not add commentary before or after the list. "
-    "Return STRICT JSON: {{\"digest\": \"<the full digest markdown>\"}}. "
     "Do not wrap the output in code fences."
 )
 
@@ -94,7 +93,6 @@ async def llm_filter(
         temperature=temperature,
         max_tokens=max_tokens,
         response_format={"type": "json_object"},
-        chat_template_kwargs={"enable_thinking": False},
     )
 
     # Reasoning models can emit <think> blocks before the JSON.
@@ -240,29 +238,11 @@ async def llm_write_digest(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-        chat_template_kwargs={"enable_thinking": False},
     )
     cleaned = strip_think(raw_text)
     if not cleaned:
         log.warning("LLM digest writer returned empty visible output")
         return ""
-
-    # The digest writer returns JSON: {"digest": "<markdown>"}.
-    # This is necessary because reasoning models on Ollama put all output
-    # in the "reasoning" field when response_format is not set, leaving
-    # "content" empty. Forcing JSON output ensures content is populated.
-    try:
-        data = json.loads(cleaned)
-        digest_text = data.get("digest", "")
-        if not digest_text:
-            log.warning("LLM digest JSON has no 'digest' field")
-            return ""
-        cleaned = digest_text
-    except json.JSONDecodeError:
-        # If JSON parsing fails, fall back to using the raw text.
-        log.debug("LLM digest writer returned non-JSON, using raw text")
-        pass
 
     # Safety: cap at 4000 chars (Bot API limit minus margin). The poster
     # also splits long messages, but keeping the writer bounded is cheaper.
