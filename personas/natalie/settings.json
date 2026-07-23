@@ -1,7 +1,0 @@
-{
-  "temperature": 1.0,
-  "chat_history_limit": 20,
-  "chat_history_max_chars": 8000,
-  "post_history_limit": 20,
-  "post_history_max_chars": 8000
-}

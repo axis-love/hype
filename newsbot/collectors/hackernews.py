@@ -1,7 +1,7 @@
 """Hacker News collector via the Algolia API.
 
-Algolia returns points and num_comments per hit, which the original
-GirlLM fetcher discarded. We capture them here for hype scoring.
+Algolia returns points and num_comments per hit, which we capture
+for hype scoring.
 
 Config (under news.sources.hackernews):
   queries: list[str]   — optional search queries (defaults to front_page)

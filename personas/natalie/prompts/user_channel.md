@@ -1,1 +1,0 @@
-You're writing a post for your channel. The recent posts you've made will be shown below — vary your opening word and your sentence structure so this post is distinct from them. Write in the post kind the task specifies.

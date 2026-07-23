@@ -48,7 +48,7 @@ to stdout instead of posting — useful for testing.
 | `LM_MODEL` | LLM model name |
 | `LM_API_KEY` | Bearer token (optional) |
 | `LM_TIMEOUT` | Request timeout, seconds (default 300) |
-| `GIRLLM_DB` | SQLite path (default `data/girllm.sqlite`) |
+| `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 
@@ -82,8 +82,8 @@ newsbot/
   telegram_poster.py   # httpx Bot API sendMessage, 429 retry, 4096 split
   collectors/
     hackernews.py reddit.py github.py rss.py producthunt.py huggingface_papers.py
-lm_client.py           # OpenAI-compatible HTTP client (reused from GirlLM)
-core/                  # settings_store, text_utils, logging_config (reused)
+lm_client.py           # OpenAI-compatible HTTP client
+core/                  # settings_store, text_utils, logging_config
 ```
 
 ## Tests

@@ -1,7 +1,0 @@
-[Unit]
-Description=GirlLM application stack
-Wants=tg-bot.service tg-bot-natalie.service
-After=network-online.target
-
-[Install]
-WantedBy=multi-user.target

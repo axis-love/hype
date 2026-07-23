@@ -1,7 +1,7 @@
 """Reddit collector via the public JSON API.
 
 Fetches /hot.json per configured subreddit. Captures score, num_comments,
-and upvote_ratio — engagement signals the original GirlLM fetcher dropped.
+and upvote_ratio — engagement signals for hype scoring.
 
 Config (under news.sources.reddit):
   subreddits: list[str]  — e.g. ['LocalLLaMA', 'MachineLearning']

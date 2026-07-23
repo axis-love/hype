@@ -112,7 +112,7 @@ async def run() -> int:
     load_dotenv()
     configure_logging(process_name="newsbot")
 
-    db_path = os.getenv("GIRLLM_DB", "data/girllm.sqlite")
+    db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
     settings: SettingsStore = default_store(db_path)
     cfg = load_config(settings)
     store = NewsStore(Path(db_path))

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 
-# Canonical candidate fields (see temp/lightweight_news_bot_architecture.md §6).
+# Canonical candidate fields.
 CANDIDATE_KEYS: tuple[str, ...] = (
     "title",
     "url",
