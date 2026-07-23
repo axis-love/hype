@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 
 def _build_lm_client() -> LMClient:
-    """Build the single LMClient from env (LM_BASE / LM_MODEL / LM_API_KEY)."""
+    """Build the LMClient for the LLM digest writer from env (LM_BASE / LM_MODEL / LM_API_KEY)."""
     base = os.getenv("LM_BASE", "").rstrip("/")
     model = os.getenv("LM_MODEL", "")
     if not base or not model:
@@ -52,8 +52,20 @@ def _build_lm_client() -> LMClient:
     api_key = os.getenv("LM_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    # LM_BASE includes the API root (e.g. https://host/api); the OpenAI
-    # chat path is /chat/completions relative to it (no /v1 prefix).
+    return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
+
+
+def _build_filter_lm_client() -> LMClient:
+    """Build the LMClient for the LLM filter pass. Uses LM_FILTER_MODEL if set, else LM_MODEL."""
+    base = os.getenv("LM_BASE", "").rstrip("/")
+    model = os.getenv("LM_FILTER_MODEL", "") or os.getenv("LM_MODEL", "")
+    if not base or not model:
+        raise RuntimeError("LM_BASE and LM_MODEL (or LM_FILTER_MODEL) must be set in the environment")
+    timeout = float(os.getenv("LM_TIMEOUT", "300"))
+    headers = {}
+    api_key = os.getenv("LM_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
 
 
@@ -143,10 +155,10 @@ async def run() -> int:
     log.info("top %d candidates (score >= %.1f) sent to LLM filter", len(top), float(top[-1].get("score") or 0.0))
 
     # 6. Pass A — LLM filter.
-    lm = _build_lm_client()
+    filter_lm = _build_filter_lm_client()
     kept = await llm_filter(
         top,
-        lm,
+        filter_lm,
         temperature=cfg["llm_temperature"],
         max_tokens=cfg["llm_max_tokens_filter"],
     )
@@ -159,9 +171,10 @@ async def run() -> int:
     log.info("selected %d diverse items for the digest", len(final))
 
     # 8. Pass B — LLM digest writer.
+    digest_lm = _build_lm_client()
     article = await llm_write_digest(
         final,
-        lm,
+        digest_lm,
         temperature=cfg["llm_temperature"],
         max_tokens=cfg["llm_max_tokens_digest"],
     )
@@ -170,7 +183,7 @@ async def run() -> int:
         return 0
 
     # 9. Persist the digest (history) before posting.
-    store.insert_digest(article, lm.model, len(final))
+    store.insert_digest(article, digest_lm.model, len(final))
 
     # 10. Post to Telegram.
     bot_token = os.getenv("BOT_TOKEN", "").strip()
