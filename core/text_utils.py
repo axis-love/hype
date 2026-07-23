@@ -1,4 +1,4 @@
-"""Text processing utilities shared across Jessica and Natalie."""
+"""Text processing utilities for news-bot."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
 """Cross-source deduplication and merge.
 
-Implements temp/lightweight_news_bot_architecture.md §9:
+Implements the architecture spec §9:
 
   - canonical URL match (strip query string, normalize host)
   - normalized lowercase title match

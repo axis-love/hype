@@ -159,9 +159,9 @@ class SettingsStore:
 def default_store(db_path: Optional[str] = None) -> SettingsStore:
     """Factory with project defaults.
 
-    Defaults to data/girllm.sqlite unless overridden.
+    Defaults to data/newsbot.sqlite unless overridden.
     """
 
     if db_path is None:
-        db_path = os.getenv("GIRLLM_DB", "data/girllm.sqlite")
+        db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
     return SettingsStore(SettingsStoreConfig(db_path=Path(db_path)))

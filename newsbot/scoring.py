@@ -1,6 +1,6 @@
 """Hype scoring.
 
-Implements temp/lightweight_news_bot_architecture.md §8:
+Implements the architecture spec §8:
 
     hype_score = engagement * recency * source_weight + topic_bonus + crosspost_bonus
 

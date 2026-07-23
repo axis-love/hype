@@ -14,7 +14,7 @@ fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Runtime env file not found: ${ENV_FILE}" >&2
-  echo "Create it from deploy/docker/env.example or run scripts/migrate_systemd_to_docker.sh first." >&2
+  echo "Create it from deploy/docker/env.example first." >&2
   exit 1
 fi
 

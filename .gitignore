@@ -71,5 +71,5 @@ Thumbs.db
 node_modules/
 dist/
 build/
-girllm.egg-info/
+newsbot.egg-info/
 data/

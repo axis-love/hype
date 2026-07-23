@@ -15,9 +15,9 @@ RUN pip install --upgrade pip \
 
 COPY . /app
 
-RUN mkdir -p /state/data /state/telethon \
-    && chown -R appuser:appuser /app /state
+RUN mkdir -p /app/data \
+    && chown -R appuser:appuser /app
 
 USER appuser
 
-CMD ["python", "bot.py"]
+CMD ["python", "-m", "newsbot.main"]

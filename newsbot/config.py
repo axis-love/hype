@@ -2,7 +2,7 @@
 
 Reads the SettingsStore 'news' namespace for source lists, weights,
 topic boosts, and runtime parameters. Provides hard-coded defaults
-matching temp/lightweight_news_bot_architecture.md §8 so the bot runs
+matching the architecture spec §8 so the bot runs
 out of the box with an empty settings table — the operator can override
 any key via SQLite or the (future) admin path.
 """

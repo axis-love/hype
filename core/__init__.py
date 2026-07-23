@@ -1,1 +1,1 @@
-"""Core shared modules for GirlLM/Jessica/Natalie."""
+"""Core shared modules for news-bot."""

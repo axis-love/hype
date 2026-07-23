@@ -4,7 +4,7 @@ Uses the public /search/repositories endpoint. Captures stargazers_count,
 forks_count, created_at, updated_at, topics — engagement signals the
 news bot scores on.
 
-Safety filters (per temp/lightweight_news_bot_architecture.md §7.3):
+Safety filters (per architecture spec §7.3):
   - penalize repos with no description (proxy for no README)
   - penalize suspiciously young repos with huge stars but low forks/issues
   - penalize crypto / scam / piracy keywords
