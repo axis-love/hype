@@ -1,19 +1,26 @@
-"""News bot entrypoint — the linear pipeline.
+"""News bot entrypoint — the linear pipeline + scheduler loop.
 
-Run by cron:
+Runs as a long-lived process inside Docker:
 
-    0 9,18 * * * cd /opt/newsbot && python -m newsbot.main
+    python -m newsbot.main              # scheduled mode (default)
+    python -m newsbot.main --once       # one-shot mode (dry runs, testing)
 
-One invocation runs the full collect → filter-seen → dedupe → score →
-LLM filter → LLM digest → post pipeline. No worker loop, no job queue.
+In scheduled mode, the pipeline runs at a configurable interval (default
+every 8 hours) and the process stays alive between runs. The schedule
+is tracked in SQLite so it survives restarts.
+
+One invocation of _run_pipeline() does the full collect → filter-seen →
+dedupe → score → LLM filter → LLM digest → post pipeline.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +46,9 @@ from newsbot.summarizer import llm_filter, llm_write_digest, select_diverse_top_
 from newsbot.telegram_poster import post_digest
 
 log = logging.getLogger(__name__)
+
+# Default interval between scheduled runs, in hours.
+DEFAULT_INTERVAL_HOURS = 8
 
 
 def _build_lm_client() -> LMClient:
@@ -119,11 +129,8 @@ def filter_seen(items: list[dict[str, Any]], store: NewsStore) -> list[dict[str,
     return kept
 
 
-async def run() -> int:
-    """One full pipeline run. Returns a process exit code (0 = ok)."""
-    load_dotenv()
-    configure_logging(process_name="newsbot")
-
+async def _run_pipeline() -> int:
+    """One full pipeline run. Returns 0 on success, 1 on failure."""
     db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
     settings: SettingsStore = default_store(db_path)
     cfg = load_config(settings)
@@ -205,10 +212,82 @@ async def run() -> int:
     return 0
 
 
+async def _scheduled_loop(settings: SettingsStore) -> None:
+    """Long-running loop that executes the pipeline on a schedule.
+
+    Interval is read from env NEWS_INTERVAL_HOURS (default 8) or the
+    'news.schedule_interval_hours' setting. The last run time is
+    persisted in SQLite so the schedule survives container restarts.
+    """
+    interval_hours = float(
+        os.getenv("NEWS_INTERVAL_HOURS", "")
+        or settings.get("news", "schedule_interval_hours", default=DEFAULT_INTERVAL_HOURS)
+        or DEFAULT_INTERVAL_HOURS
+    )
+    interval_seconds = interval_hours * 3600
+
+    log.info("scheduler started: interval=%.1fh", interval_hours)
+
+    while True:
+        # Check if it's time to run.
+        last_run_str = settings.get("scheduler", "last_run_utc", default="") or ""
+        now = datetime.now(timezone.utc)
+
+        if last_run_str:
+            try:
+                last_run = datetime.fromisoformat(last_run_str)
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=timezone.utc)
+                elapsed = (now - last_run).total_seconds()
+                if elapsed < interval_seconds:
+                    sleep_for = interval_seconds - elapsed
+                    log.debug("next run in %.0fs (last run %s)", sleep_for, last_run_str)
+                    await asyncio.sleep(min(sleep_for, 300))  # Check every 5 min max
+                    continue
+            except (ValueError, TypeError):
+                log.warning("invalid last_run_utc in settings: %s — running now", last_run_str)
+
+        log.info("scheduled run starting at %s", now.isoformat())
+        try:
+            await _run_pipeline()
+        except Exception as exc:
+            log.error("pipeline run failed: %s", exc, exc_info=True)
+
+        now = datetime.now(timezone.utc)
+        settings.set("scheduler", "last_run_utc", now.isoformat())
+        log.info("scheduled run complete at %s, next in %.1fh", now.isoformat(), interval_hours)
+
+        # Sleep in short intervals so the process is responsive to signals.
+        await asyncio.sleep(60)
+
+
 def main() -> None:
-    """Sync entrypoint for `python -m newsbot.main`."""
-    code = asyncio.run(run())
-    sys.exit(code)
+    """Entry point for `python -m newsbot.main`."""
+    parser = argparse.ArgumentParser(description="News bot pipeline")
+    parser.add_argument("--once", action="store_true", help="Run the pipeline once and exit")
+    args = parser.parse_args()
+
+    load_dotenv()
+    configure_logging(process_name="newsbot")
+
+    if args.once:
+        code = asyncio.run(_run_pipeline())
+        sys.exit(code)
+
+    db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
+    settings: SettingsStore = default_store(db_path)
+
+    # If NEWS_INTERVAL_HOURS=0 or not set and no BOT_TOKEN, run once for testing.
+    if not os.getenv("BOT_TOKEN", "").strip() and not os.getenv("NEWS_INTERVAL_HOURS", "").strip():
+        log.info("no BOT_TOKEN and no NEWS_INTERVAL_HOURS — running once (dry-run mode)")
+        code = asyncio.run(_run_pipeline())
+        sys.exit(code)
+
+    try:
+        asyncio.run(_scheduled_loop(settings))
+    except KeyboardInterrupt:
+        log.info("shutting down")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

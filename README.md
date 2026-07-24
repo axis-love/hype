@@ -26,8 +26,13 @@ The code decides what's trending; the LLM only writes the digest.
 ```bash
 cp .env.example .env        # fill in BOT_TOKEN, NEWS_CHANNEL_ID, LM_*
 pip install -r requirements.txt
-python -m newsbot.main      # one run; cron handles scheduling
+python -m newsbot.main      # scheduled mode (stays alive, runs every NEWS_INTERVAL_HOURS)
+python -m newsbot.main --once  # one-shot mode (testing / dry runs)
 ```
+
+Without `BOT_TOKEN` and `NEWS_CHANNEL_ID`, the bot runs in dry-run mode
+(printing the digest to stdout). Without `NEWS_INTERVAL_HOURS`, it runs once
+and exits.
 
 If `BOT_TOKEN` or `NEWS_CHANNEL_ID` is unset, the bot prints the digest
 to stdout instead of posting — useful for testing.
@@ -52,6 +57,7 @@ to stdout instead of posting — useful for testing.
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
+| `NEWS_INTERVAL_HOURS` | Hours between scheduled runs (default 8) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 
 ## Configuration
