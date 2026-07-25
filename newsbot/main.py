@@ -168,13 +168,61 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     candidates.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
 
     # 5. Keep the top N for the LLM filter, dropping anything below min_score.
+    #    Source diversity: guarantee minimum slots per source so one source
+    #    (e.g. GitHub) can't crowd out all others.
     min_score = float(cfg.get("min_score") or 0.0)
     scored = [c for c in candidates if float(c.get("score") or 0.0) >= min_score]
-    top = sorted(scored, key=lambda c: float(c.get("score") or 0.0), reverse=True)[: cfg["max_candidates"]]
+    max_candidates = int(cfg["max_candidates"])
+
+    # Group by source, sorted by score within each group.
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for c in scored:
+        src = str(c.get("source") or "unknown")
+        by_source.setdefault(src, []).append(c)
+    for src in by_source:
+        by_source[src].sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+
+    # Reserve guaranteed slots: each source gets up to `source_quota` items
+    # before the remaining slots are filled by global score ranking.
+    source_quota = int(cfg.get("source_quota") or 8)
+    top: list[dict[str, Any]] = []
+    used: set[int] = set()  # dedupe by id() to avoid double-counting
+
+    # Phase 1: guaranteed slots per source (top-N from each, by score).
+    for src in sorted(by_source, key=lambda s: by_source[s][0].get("score", 0), reverse=True):
+        for item in by_source[src][:source_quota]:
+            if id(item) not in used:
+                top.append(item)
+                used.add(id(item))
+                if len(top) >= max_candidates:
+                    break
+        if len(top) >= max_candidates:
+            break
+
+    # Phase 2: fill remaining slots by global score ranking.
+    if len(top) < max_candidates:
+        remaining = [c for c in scored if id(c) not in used]
+        remaining.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+        for item in remaining:
+            top.append(item)
+            if len(top) >= max_candidates:
+                break
+
+    # Re-sort the final selection by score for the LLM filter.
+    top.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+
     if not top:
         log.warning("no candidates above min_score=%.1f; nothing to do", min_score)
         return 0
-    log.info("top %d candidates (score >= %.1f) sent to LLM filter", len(top), min_score)
+
+    source_counts: dict[str, int] = {}
+    for c in top:
+        src = str(c.get("source") or "unknown")
+        source_counts[src] = source_counts.get(src, 0) + 1
+    log.info(
+        "top %d candidates (score >= %.1f) sent to LLM filter — sources: %s",
+        len(top), min_score, ", ".join(f"{k}={v}" for k, v in sorted(source_counts.items(), key=lambda x: -x[1])),
+    )
 
     # 6. Pass A — LLM filter.
     filter_lm = _build_filter_lm_client()
