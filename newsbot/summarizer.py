@@ -5,20 +5,19 @@ Pass A — filter:  take 30-80 scored candidates, ask the LLM to keep/drop,
                   Returns JSON {items:[{keep,title,url,category,importance,
                   reason,short_summary}]}.
 
-Pass B — digest:   take the top 5-10 kept items and ask the LLM to write a
-                  readable Telegram digest in the
-                  '🔥 Tech / AI Digest — <date>' / What / Why / Signal / Link
-                  format.
+Pass B — style:   take the top 8 kept items and ask the LLM to write
+                  individual styled posts (one per item). Returns JSON
+                  {posts:[{title,body}]}.
 
-Both passes use a single LMClient (see lm_client.py). Output is run through
-core.text_utils.strip_think to remove reasoning-model <think> blocks.
+Both passes use response_format=json_object to force content output from
+reasoning models. Output is run through core.text_utils.strip_think to
+remove reasoning-model <think> blocks.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from core.text_utils import strip_think
@@ -37,17 +36,12 @@ FILTER_SYSTEM = (
     "Include every input item in the response, with keep=false for dropped ones."
 )
 
-DIGEST_SYSTEM = (
-    "You write a compact, readable Telegram tech digest. The output is Markdown that "
-    "will be posted to a channel. Use this exact format:\n\n"
-    "🔥 Tech / AI Digest — {date}\n\n"
-    "1. <headline>\nWhat happened: <one or two sentences>\n"
-    "Why it matters: <one sentence>\nSignal: <engagement signals, e.g. '2,400 GitHub "
-    "stars, 530 HN points, 190 comments'>\nLink: <url>\n\n"
-    "2. <headline>\n...\n\n"
-    "Rules: keep topics diverse (don't put 5 AI items and zero game-dev). Keep each item "
-    "short. Include the source link. Do not add commentary before or after the list. "
-    "Do not wrap the output in code fences."
+STYLE_SYSTEM = (
+    "You write individual posts for a Telegram tech-news channel. "
+    "You receive {n} selected news items. Write one post per item. "
+    "Return STRICT JSON: {{\"posts\":[{{\"title\":\"...\",\"body\":\"...\"}}]}}. "
+    "The title is a short headline. The body is 2-4 sentences in Telegram Markdown. "
+    "Follow the style instructions exactly."
 )
 
 
@@ -93,9 +87,10 @@ async def llm_filter(
         temperature=temperature,
         max_tokens=max_tokens,
         response_format={"type": "json_object"},
+        chat_template_kwargs={"enable_thinking": False},
     )
 
-    # Reasoning models can emit <think> blocks before the JSON.
+    # Reasoning models can emit 6 blocks before the JSON.
     cleaned = strip_think(raw_text)
     if not cleaned:
         log.warning("LLM filter returned empty visible output")
@@ -186,16 +181,21 @@ def select_diverse_top_items(items: list[dict[str, Any]], max_items: int) -> lis
     return selected[:max_items]
 
 
-async def llm_write_digest(
+async def llm_style_posts(
     items: list[dict[str, Any]],
     lm_client: Any,
     *,
+    style_prompt: str = "",
     temperature: float = 0.5,
     max_tokens: int = 8000,
-) -> str:
-    """Pass B: write the final Telegram digest from the selected items."""
+) -> list[dict[str, Any]]:
+    """Pass B: style individual posts from the filter output.
+
+    Returns a list of dicts with keys: title, body, category, importance, url,
+    plus the original engagement signals from the filter pass.
+    """
     if not items:
-        return ""
+        return []
 
     def signal_line(item: dict[str, Any]) -> str:
         bits = []
@@ -214,38 +214,73 @@ async def llm_write_digest(
         url = item.get("url") or ""
         summary = item.get("short_summary") or item.get("snippet") or ""
         reason = item.get("reason") or ""
-        lines = [f"{index}. {title}"]
+        lines = [f"{index}. Title: {title}"]
         if summary:
-            lines.append(f"What happened: {summary}")
+            lines.append(f"   Summary: {summary}")
         if reason:
-            lines.append(f"Why it matters: {reason}")
-        lines.append(f"Signal: {signal_line(item)}")
+            lines.append(f"   Why it matters: {reason}")
+        lines.append(f"   Signal: {signal_line(item)}")
         if url:
-            lines.append(f"Link: {url}")
+            lines.append(f"   URL: {url}")
         return "\n".join(lines)
 
-    today = datetime.now(timezone.utc).strftime("%d %b %Y").lstrip("0")  # e.g. '4 Jul 2026'
-
-    system = DIGEST_SYSTEM.replace("{date}", today)
+    system_content = (
+        style_prompt + "\n\n"
+        + STYLE_SYSTEM.replace("{n}", str(len(items)))
+    )
     user_body = "\n\n".join(item_block(i, item) for i, item in enumerate(items, start=1))
 
     messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": f"Selected items for the digest:\n\n{user_body}"},
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": f"Selected items for styling:\n\n{user_body}"},
     ]
 
     raw_text, _ = await lm_client.generate(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+        chat_template_kwargs={"enable_thinking": False},
     )
     cleaned = strip_think(raw_text)
     if not cleaned:
-        log.warning("LLM digest writer returned empty visible output")
-        return ""
+        log.warning("LLM styler returned empty visible output")
+        return []
 
-    # Safety: cap at 4000 chars (Bot API limit minus margin). The poster
-    # also splits long messages, but keeping the writer bounded is cheaper.
-    if len(cleaned) > 4000:
-        cleaned = cleaned[:3997].rstrip() + "..."
-    return cleaned
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        log.warning("LLM styler returned invalid JSON: %s\nraw: %s", exc, cleaned[:300])
+        return []
+
+    posts_raw = data.get("posts") if isinstance(data, dict) else None
+    if not isinstance(posts_raw, list):
+        log.warning("LLM styler JSON has no 'posts' list")
+        return []
+
+    # Merge styled posts with original item data (engagement signals, url, category).
+    by_title: dict[str, dict[str, Any]] = {}
+    for item in items:
+        key = str(item.get("title") or "").strip().lower()
+        if key:
+            by_title.setdefault(key, item)
+
+    result: list[dict[str, Any]] = []
+    for entry in posts_raw:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "").strip()
+        body = str(entry.get("body") or "").strip()
+        if not body:
+            continue
+        original = by_title.get(title.lower(), {})
+        result.append({
+            "title": title or original.get("title", ""),
+            "body": body,
+            "category": original.get("category", ""),
+            "importance": original.get("importance"),
+            "url": original.get("url", ""),
+        })
+
+    log.info("LLM styler: %d items in, %d posts out", len(items), len(result))
+    return result

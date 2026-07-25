@@ -3,39 +3,57 @@
 A lightweight hype-driven tech news bot. Collects candidate news from
 engagement-bearing sources (Hacker News, Reddit, GitHub, Product Hunt,
 Hugging Face Papers, RSS), ranks by hype signals, deduplicates across
-sources, summarizes via an OpenAI-compatible LLM, and posts a daily
-digest to a Telegram channel.
+sources, filters and styles via an OpenAI-compatible LLM, and posts
+individual news items to a Telegram channel on an hourly schedule.
 
 ## What it does
 
 ```text
-collect (HN/Reddit/GitHub/PH/HF Papers/RSS)
-  → filter already-seen
-  → cross-source dedupe + merge engagement
-  → score by hype (upvotes, comments, stars, recency, topic, crossposts)
-  → LLM Pass A: filter garbage, classify, importance, one-line summary (JSON)
-  → LLM Pass B: write the Telegram digest (What / Why / Signal / Link)
-  → post to Telegram
-  → mark seen
+GENERATION (every 8h):
+  collect (HN/Reddit/GitHub/PH/HF Papers/RSS)
+    → filter already-seen
+    → cross-source dedupe + merge engagement
+    → score by hype (upvotes, comments, stars, recency, topic, crossposts)
+    → LLM Pass A: filter garbage, classify, importance, one-line summary (JSON)
+    → LLM Pass B: style individual posts (JSON: title + body per item)
+    → store 8 posts in pending_posts table
+    → mark items seen
+
+POSTING (every 1h):
+  pull oldest unposted post from pending_posts
+    → post to Telegram
+    → mark as posted
 ```
 
-The code decides what's trending; the LLM only writes the digest.
+The code decides what's trending; the LLM filters and writes the posts.
+Posts are delivered one at a time, spread over the interval.
 
 ## Quick start
 
 ```bash
-cp .env.example .env        # fill in BOT_TOKEN, NEWS_CHANNEL_ID, LM_*
+cp .env.example .env        # fill in BOT_TOKEN, NEWS_CHANNEL_ID, LM_*, ADMIN_USER_ID
 pip install -r requirements.txt
-python -m newsbot.main      # scheduled mode (stays alive, runs every NEWS_INTERVAL_HOURS)
-python -m newsbot.main --once  # one-shot mode (testing / dry runs)
+python -m newsbot.main      # scheduled mode (stays alive, generates + posts on timers)
+python -m newsbot.main --once  # one-shot mode (generates + posts all immediately)
 ```
 
 Without `BOT_TOKEN` and `NEWS_CHANNEL_ID`, the bot runs in dry-run mode
-(printing the digest to stdout). Without `NEWS_INTERVAL_HOURS`, it runs once
+(printing posts to stdout). Without `NEWS_INTERVAL_HOURS`, it runs once
 and exits.
 
-If `BOT_TOKEN` or `NEWS_CHANNEL_ID` is unset, the bot prints the digest
-to stdout instead of posting — useful for testing.
+## Bot Commands
+
+The bot accepts commands via Telegram DM (long polling). Set
+`ADMIN_USER_ID` to your Telegram user ID to enable. Only the admin
+user can issue commands.
+
+| Command | Action |
+|---|---|
+| `/setstyle <text>` | Update the style prompt for Pass B (post writing) |
+| `/style` | Show the current style prompt |
+| `/run` | Trigger a generation cycle immediately |
+| `/status` | Show pending posts count + schedule info |
+| `/help` | List commands |
 
 ## Cron
 
@@ -57,7 +75,9 @@ to stdout instead of posting — useful for testing.
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
-| `NEWS_INTERVAL_HOURS` | Hours between scheduled runs (default 8) |
+| `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8) |
+| `NEWS_POST_INTERVAL_MINUTES` | Minutes between individual post deliveries (default 60) |
+| `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 
 ## Configuration
@@ -75,19 +95,20 @@ VALUES ('news', 'max_final_news', '8', datetime('now'));
 Recognized keys: `sources`, `source_weights`, `topic_boost`,
 `lookback_hours`, `max_candidates`, `max_final_news`, `min_score`,
 `item_prune_hours`, `llm_temperature`, `llm_max_tokens_filter`,
-`llm_max_tokens_digest`. Default: 8000 / 8000.
+`llm_max_tokens_digest`, `style_prompt`.
 
 ## Layout
 
 ```text
 newsbot/
-  main.py              # linear pipeline entrypoint (cron-driven)
-  config.py            # load_config + defaults
-  db.py                # NewsStore (news_items, seen, news_digests)
+  main.py              # split generation + posting scheduler + bot command handler
+  config.py            # load_config + defaults (incl. style_prompt)
+  db.py                # NewsStore (news_items, seen, news_digests, pending_posts)
   scoring.py           # hype_score (engagement × recency × weight + topics + crosspost)
   dedupe.py            # canonical URL + fuzzy title + GitHub repo + merge
-  summarizer.py        # two-pass: llm_filter (JSON) + llm_write_digest (Markdown)
+  summarizer.py        # two-pass: llm_filter (JSON) + llm_style_posts (JSON per-item)
   telegram_poster.py   # httpx Bot API sendMessage, 429 retry, 4096 split
+  bot_commands.py      # long-polling command handler (/setstyle, /run, /status, /help)
   collectors/
     hackernews.py reddit.py github.py rss.py producthunt.py huggingface_papers.py
 lm_client.py           # OpenAI-compatible HTTP client
