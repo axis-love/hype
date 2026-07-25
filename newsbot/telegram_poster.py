@@ -53,7 +53,7 @@ async def post_digest(
     *,
     bot_token: str,
     chat_id: str,
-    parse_mode: str = "Markdown",
+    parse_mode: str = "HTML",
 ) -> list[dict[str, Any]]:
     """Post *text* to the Telegram channel. Returns per-chunk send results.
 
@@ -84,8 +84,8 @@ async def post_digest(
                 r = await client.post(url, json=payload)
 
             if r.status_code >= 400:
-                # Markdown parse errors are common; retry the chunk as plain text.
-                if parse_mode == "Markdown":
+                # HTML parse errors are common; retry the chunk as plain text.
+                if parse_mode == "HTML":
                     log.warning("Telegram send failed (status=%s); retrying chunk as plain text", r.status_code)
                     r = await client.post(url, json={**payload, "parse_mode": ""})
                 if r.status_code >= 400:
