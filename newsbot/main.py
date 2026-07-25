@@ -282,8 +282,11 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     bot_handler: BotCommandHandler | None = None
 
     if bot_token and admin_user_id:
-        async def on_run() -> None:
+        async def on_digest() -> None:
             await _run_generation(store, settings)
+
+        async def on_post() -> None:
+            await _run_posting(store)
 
         async def on_status() -> str:
             pending = store.count_pending()
@@ -301,7 +304,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             bot_token=bot_token,
             admin_user_id=admin_user_id,
             settings=settings,
-            on_run=on_run,
+            on_digest=on_digest,
+            on_post=on_post,
             on_status=on_status,
         )
 
