@@ -61,10 +61,10 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
 
 DEFAULT_RUN: dict[str, Any] = {
     "lookback_hours": 48,
-    "max_candidates": 40,
+    "max_candidates": 20,
     "max_final_news": 8,
     "min_score": 35,
-    "source_quota": 8,
+    "source_quota": 4,
     "item_prune_hours": 48,
 }
 
