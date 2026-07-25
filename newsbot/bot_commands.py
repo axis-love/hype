@@ -7,7 +7,8 @@ are silently ignored.
 Commands:
   /setstyle <text>  — update the style prompt for Pass B
   /style            — show the current style prompt
-  /run              — trigger a generation cycle immediately
+  /digest           — run the generation cycle immediately
+  /post             — post the next pending post to the channel now
   /status           — show pending posts count + next gen/post time
   /help             — list commands
 """
@@ -39,13 +40,15 @@ class BotCommandHandler:
         bot_token: str,
         admin_user_id: str,
         settings: SettingsStore,
-        on_run: Callable[[], Awaitable[None]] | None = None,
+        on_digest: Callable[[], Awaitable[None]] | None = None,
+        on_post: Callable[[], Awaitable[None]] | None = None,
         on_status: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
         self.settings = settings
-        self.on_run = on_run
+        self.on_digest = on_digest
+        self.on_post = on_post
         self.on_status = on_status
         self._offset = 0  # getUpdates offset for ack
         self._client = httpx.AsyncClient(timeout=POLL_TIMEOUT + 10)
@@ -95,8 +98,10 @@ class BotCommandHandler:
             await self._cmd_setstyle(chat_id, arg)
         elif command == "/style":
             await self._cmd_show_style(chat_id)
-        elif command == "/run":
-            await self._cmd_run(chat_id)
+        elif command == "/digest":
+            await self._cmd_digest(chat_id)
+        elif command == "/post":
+            await self._cmd_post(chat_id)
         elif command == "/status":
             await self._cmd_status(chat_id)
         elif command == "/help":
@@ -109,7 +114,8 @@ class BotCommandHandler:
             "News-bot commands:\n"
             "/setstyle <text> — set the style prompt for post writing\n"
             "/style — show the current style prompt\n"
-            "/run — trigger a generation cycle now\n"
+            "/digest — run the generation cycle now (collect → filter → style → queue)\n"
+            "/post — post the next pending post to the channel immediately\n"
             "/status — show pending posts and schedule info\n"
             "/help — show this message"
         )
@@ -126,18 +132,29 @@ class BotCommandHandler:
         prompt = self.settings.get("news", "style_prompt", DEFAULT_STYLE_PROMPT)
         await self._send(chat_id, f"Current style prompt:\n\n{prompt}")
 
-    async def _cmd_run(self, chat_id: int) -> None:
+    async def _cmd_digest(self, chat_id: int) -> None:
         await self._send(chat_id, "Triggering generation cycle now...")
-        if self.on_run:
+        if self.on_digest:
             async def _run_and_notify() -> None:
                 try:
-                    await self.on_run()
+                    await self.on_digest()
                     await self._send(chat_id, "✅ Generation complete. Posts queued for hourly delivery.")
                 except Exception as exc:
                     await self._send(chat_id, f"Generation failed: {exc}")
             asyncio.create_task(_run_and_notify())
         else:
             await self._send(chat_id, "No generation handler registered.")
+
+    async def _cmd_post(self, chat_id: int) -> None:
+        if self.on_post:
+            async def _post_and_notify() -> None:
+                try:
+                    await self.on_post()
+                except Exception as exc:
+                    await self._send(chat_id, f"Post failed: {exc}")
+            asyncio.create_task(_post_and_notify())
+        else:
+            await self._send(chat_id, "No post handler registered.")
 
     async def _cmd_status(self, chat_id: int) -> None:
         if self.on_status:
