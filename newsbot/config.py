@@ -64,6 +64,7 @@ DEFAULT_RUN: dict[str, Any] = {
     "max_candidates": 40,
     "max_final_news": 8,
     "min_score": 35,
+    "source_quota": 8,
     "item_prune_hours": 48,
 }
 
@@ -99,7 +100,7 @@ DEFAULT_SOURCES: dict[str, Any] = {
     "github": {
         "queries": ["llm", "agent", "coding-agent", "rag", "local-llm",
                     "unity", "game-engine", "unreal", "godot", "webxr", "vr", "robotics"],
-        "limit": 15,
+        "limit": 5,
         "sort": "stars",
     },
     "huggingface_papers": {"limit": 10},
@@ -144,6 +145,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
         "max_candidates": _as_int(raw.get("max_candidates"), DEFAULT_RUN["max_candidates"]),
         "max_final_news": _as_int(raw.get("max_final_news"), DEFAULT_RUN["max_final_news"]),
         "min_score": _as_float(raw.get("min_score"), DEFAULT_RUN["min_score"]),
+        "source_quota": _as_int(raw.get("source_quota"), DEFAULT_RUN["source_quota"]),
         "item_prune_hours": _as_int(raw.get("item_prune_hours"), DEFAULT_RUN["item_prune_hours"]),
         "llm_temperature": _as_float(raw.get("llm_temperature"), DEFAULT_LLM["temperature"]),
         "llm_max_tokens_filter": _as_int(raw.get("llm_max_tokens_filter"), DEFAULT_LLM["max_tokens_filter"]),

@@ -1,53 +1,114 @@
-"""Reddit collector via the public JSON API.
+"""Reddit collector via RSS feeds.
 
-Fetches /hot.json per configured subreddit. Captures score, num_comments,
-and upvote_ratio — engagement signals for hype scoring.
+Fetches /hot.rss per configured subreddit. Reddit's public JSON API
+now blocks all requests with 403, but the RSS endpoints still work.
+
+Captures score and num_comments from the RSS entry metadata — engagement
+signals for hype scoring.
 
 Config (under news.sources.reddit):
   subreddits: list[str]  — e.g. ['LocalLLaMA', 'MachineLearning']
-  limit: int             — per-subreddit cap, 1-25 (default 10)
+  limit: int             — per-subreddit cap (default 10)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 from typing import Any
 
-import httpx
+try:
+    import feedparser
+except ImportError:  # pragma: no cover
+    feedparser = None
 
-from newsbot.collectors.base import new_candidate, truncate, to_iso_utc
+from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_utc
 
 log = logging.getLogger(__name__)
 
 REDDIT_USER_AGENT = "Mozilla/5.0 (compatible; newsbot/0.1; +https://github.com/elevenoutoften/news-bot)"
 
+# Regex to extract score and comment count from Reddit RSS entry titles
+# e.g. "Some title : r/LocalLLaMA — 1.2k votes, 89 comments"
+_SCORE_RE = re.compile(r"(\d+\.?\d*[km]?)\s*votes?", re.IGNORECASE)
+_COMMENT_RE = re.compile(r"(\d+\.?\d*[km]?)\s*comments?", re.IGNORECASE)
 
-async def _fetch_one(client: httpx.AsyncClient, *, subreddit: str, limit: int) -> list[dict[str, Any]]:
-    source_name = f"r/{subreddit}"
-    url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit={limit}"
+
+def _parse_count(text: str) -> int:
+    """Parse a Reddit-style count string like '1.2k' or '89' to int."""
+    text = text.strip().lower()
+    if not text:
+        return 0
+    mult = 1
+    if text.endswith("k"):
+        mult = 1_000
+        text = text[:-1]
+    elif text.endswith("m"):
+        mult = 1_000_000
+        text = text[:-1]
     try:
-        r = await client.get(url)
-        if r.status_code >= 400:
-            log.warning("Reddit fetch failed for %s url=%s status=%s", source_name, url, r.status_code)
-            return []
-        payload = r.json()
+        return int(float(text) * mult)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _extract_engagement(entry: Any) -> tuple[int | None, int | None]:
+    """Try to extract upvotes and comment count from a Reddit RSS entry."""
+    # Reddit RSS entries often have the counts in the title or content.
+    title = str(entry.get("title") or "")
+    summary = str(entry.get("summary") or "") + str(entry.get("content", [{}])[0].get("value", "") if entry.get("content") else "")
+    blob = title + " " + summary
+
+    upvotes: int | None = None
+    comments: int | None = None
+
+    m = _SCORE_RE.search(blob)
+    if m:
+        upvotes = _parse_count(m.group(1))
+
+    m = _COMMENT_RE.search(blob)
+    if m:
+        comments = _parse_count(m.group(1))
+
+    return upvotes, comments
+
+
+async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
+    source_name = f"r/{subreddit}"
+    url = f"https://www.reddit.com/r/{subreddit}/hot.rss"
+
+    if feedparser is None:
+        log.warning("Reddit fetch skipped for %s: feedparser not installed", source_name)
+        return []
+
+    try:
+        parsed = await asyncio.to_thread(
+            feedparser.parse, url, agent=REDDIT_USER_AGENT
+        )
     except Exception as exc:
-        log.warning("Reddit fetch failed for %s url=%s status=unavailable: %s", source_name, url, exc)
+        log.warning("Reddit fetch failed for %s url=%s: %s", source_name, url, exc)
+        return []
+
+    status = getattr(parsed, "status", None)
+    if status and status >= 400:
+        log.warning("Reddit fetch failed for %s url=%s status=%s", source_name, url, status)
         return []
 
     items: list[dict[str, Any]] = []
-    children = ((payload or {}).get("data") or {}).get("children") or []
-    for child in children:
-        data = child.get("data") or {}
-        if data.get("stickied"):
-            continue
-
-        title = str(data.get("title") or "").strip()
+    for entry in list(getattr(parsed, "entries", []) or [])[:limit]:
+        title = str(entry.get("title") or "").strip()
         if not title:
             continue
 
-        permalink = str(data.get("permalink") or "").strip()
-        full_url = f"https://www.reddit.com{permalink}" if permalink.startswith("/") else permalink
+        link = str(entry.get("link") or "").strip()
+        # Reddit RSS links are permalinks to the post.
+        full_url = link or f"https://www.reddit.com/r/{subreddit}/"
+
+        summary = entry.get("summary") or ""
+        snippet = truncate(strip_html(str(summary)))
+
+        upvotes, comments = _extract_engagement(entry)
 
         items.append(
             new_candidate(
@@ -55,35 +116,37 @@ async def _fetch_one(client: httpx.AsyncClient, *, subreddit: str, limit: int) -
                 url=full_url,
                 source="reddit",
                 source_name=source_name,
-                snippet=truncate(str(data.get("selftext") or "")),
-                published_at=to_iso_utc(data.get("created_utc")),
-                upvotes=int(data.get("score") or 0) or None,
-                comments=int(data.get("num_comments") or 0) or None,
-                upvote_ratio=float(data.get("upvote_ratio") or 0.0) or None,
-                raw_text=str(data.get("selftext") or "").strip() or None,
-                raw_json=data,
+                snippet=snippet,
+                published_at=to_iso_utc(entry.get("published") or entry.get("updated")),
+                upvotes=upvotes,
+                comments=comments,
+                raw_text=str(summary).strip() or None,
+                raw_json=dict(entry),
             )
         )
 
     if not items:
-        log.warning("Reddit fetch returned zero usable items for %s url=%s status=%s", source_name, url, r.status_code)
+        log.warning(
+            "Reddit fetch returned zero usable items for %s url=%s status=%s",
+            source_name, url, status or "unknown",
+        )
     return items
 
 
 async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
-    """Fetch Reddit candidates. *config* is the news.sources.reddit block."""
+    """Fetch Reddit candidates via RSS. *config* is the news.sources.reddit block."""
     subreddits = config.get("subreddits") or []
     if not subreddits:
         return []
 
     limit = max(1, min(int(config.get("limit") or 10), 25))
-    headers = {"User-Agent": REDDIT_USER_AGENT}
-    timeout = httpx.Timeout(15.0)
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
-        results = []
+    async def fetch_all() -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
         for sub in subreddits:
             sub = str(sub).strip().strip("/")
             if sub:
-                results.extend(await _fetch_one(client, subreddit=sub, limit=limit))
-    return results
+                results.extend(await _fetch_one(sub, limit))
+        return results
+
+    return await fetch_all()
