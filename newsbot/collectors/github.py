@@ -101,7 +101,7 @@ async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort:
                 source="github",
                 source_name="GitHub Trending",
                 snippet=truncate(description),
-                published_at=to_iso_utc(repo.get("created_at")),
+                published_at=to_iso_utc(repo.get("pushed_at")),
                 stars=int(repo.get("stargazers_count") or 0) or None,
                 forks=int(repo.get("forks_count") or 0) or None,
                 category=None,
