@@ -129,10 +129,13 @@ class BotCommandHandler:
     async def _cmd_run(self, chat_id: int) -> None:
         await self._send(chat_id, "Triggering generation cycle now...")
         if self.on_run:
-            try:
-                await self.on_run()
-            except Exception as exc:
-                await self._send(chat_id, f"Generation failed: {exc}")
+            async def _run_and_notify() -> None:
+                try:
+                    await self.on_run()
+                    await self._send(chat_id, "✅ Generation complete. Posts queued for hourly delivery.")
+                except Exception as exc:
+                    await self._send(chat_id, f"Generation failed: {exc}")
+            asyncio.create_task(_run_and_notify())
         else:
             await self._send(chat_id, "No generation handler registered.")
 
