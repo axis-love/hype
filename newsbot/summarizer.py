@@ -28,7 +28,9 @@ FILTER_SYSTEM = (
     "You are a tech-news filter. For each candidate below, decide whether to keep it "
     "for a Telegram digest. Drop: old news, thin marketing launches, pure drama, "
     "crypto spam, obvious reposts, low-quality GitHub repos, low-value Product Hunt "
-    "launches. For kept items, assign a category (e.g. 'AI / Coding', 'LLM', 'Game Dev', "
+    "launches. Check the Published date — if the item is older than 7 days, drop it "
+    "unless it has extraordinary engagement (10K+ stars, 1K+ upvotes) AND is still "
+    "actively discussed. For kept items, assign a category (e.g. 'AI / Coding', 'LLM', 'Game Dev', "
     "'VR/AR', 'Robotics', 'Research', 'Tools'), an importance score from 1 to 10, a "
     "one-line reason, and a one-line short_summary. "
     "Return STRICT JSON: {\"items\":[{\"keep\":true,\"title\":...,\"url\":...,"
@@ -41,6 +43,9 @@ STYLE_SYSTEM = (
     "You receive {n} selected news items. Write one post per item. "
     "Return STRICT JSON: {{\"posts\":[{{\"title\":\"...\",\"body\":\"...\"}}]}}. "
     "The title is a short headline. The body is 2-4 sentences in Telegram Markdown. "
+    "Use the Published date to accurately describe timing — do not assume an item "
+    "is new or 'just released' unless the date is recent. Do not use phrases like "
+    "'finally dropped' or 'just launched' unless the published date confirms it. "
     "Follow the style instructions exactly."
 )
 
@@ -48,6 +53,8 @@ STYLE_SYSTEM = (
 def _format_candidate(index: int, item: dict[str, Any]) -> str:
     """Render one candidate for the filter prompt."""
     parts = [f"{index}. [{item.get('source_name','?')}] {item.get('title','')}"]
+    if item.get("published_at"):
+        parts.append(f"   Published: {item['published_at']}")
     if item.get("url"):
         parts.append(f"   URL: {item['url']}")
     if item.get("snippet"):
@@ -214,7 +221,10 @@ async def llm_style_posts(
         url = item.get("url") or ""
         summary = item.get("short_summary") or item.get("snippet") or ""
         reason = item.get("reason") or ""
+        published = item.get("published_at") or ""
         lines = [f"{index}. Title: {title}"]
+        if published:
+            lines.append(f"   Published: {published}")
         if summary:
             lines.append(f"   Summary: {summary}")
         if reason:

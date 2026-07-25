@@ -167,12 +167,14 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     candidates = score_all(candidates, cfg)
     candidates.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
 
-    # 5. Keep the top N for the LLM filter.
-    top = candidates[: cfg["max_candidates"]]
+    # 5. Keep the top N for the LLM filter, dropping anything below min_score.
+    min_score = float(cfg.get("min_score") or 0.0)
+    scored = [c for c in candidates if float(c.get("score") or 0.0) >= min_score]
+    top = sorted(scored, key=lambda c: float(c.get("score") or 0.0), reverse=True)[: cfg["max_candidates"]]
     if not top:
-        log.warning("no candidates after filtering; nothing to do")
+        log.warning("no candidates above min_score=%.1f; nothing to do", min_score)
         return 0
-    log.info("top %d candidates (score >= %.1f) sent to LLM filter", len(top), float(top[-1].get("score") or 0.0))
+    log.info("top %d candidates (score >= %.1f) sent to LLM filter", len(top), min_score)
 
     # 6. Pass A — LLM filter.
     filter_lm = _build_filter_lm_client()
