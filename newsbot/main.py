@@ -1,16 +1,22 @@
-"""News bot entrypoint — the linear pipeline + scheduler loop.
+"""News bot entrypoint — split generation + posting pipeline.
 
 Runs as a long-lived process inside Docker:
 
     python -m newsbot.main              # scheduled mode (default)
     python -m newsbot.main --once       # one-shot mode (dry runs, testing)
 
-In scheduled mode, the pipeline runs at a configurable interval (default
-every 8 hours) and the process stays alive between runs. The schedule
-is tracked in SQLite so it survives restarts.
+In scheduled mode, two timers run concurrently:
 
-One invocation of _run_pipeline() does the full collect → filter-seen →
-dedupe → score → LLM filter → LLM digest → post pipeline.
+  - Generation (every NEWS_INTERVAL_HOURS, default 8h):
+      collect → filter-seen → dedupe → score → LLM filter → LLM style
+      → store 8 individual posts in pending_posts table.
+
+  - Posting (every NEWS_POST_INTERVAL_MINUTES, default 60min):
+      pull the oldest unposted post from pending_posts → post to
+      Telegram → mark as posted.
+
+A bot command handler (long polling) runs concurrently to accept
+admin commands (/setstyle, /style, /run, /status, /help).
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from core.logging_config import configure_logging
 from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
+from newsbot.bot_commands import BotCommandHandler
 from newsbot.collectors import (
     hackernews as hn_collector,
     reddit as reddit_collector,
@@ -42,13 +49,14 @@ from newsbot.config import load_config
 from newsbot.db import NewsStore
 from newsbot.dedupe import dedupe_and_merge
 from newsbot.scoring import score_all
-from newsbot.summarizer import llm_filter, llm_write_digest, select_diverse_top_items
+from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
 from newsbot.telegram_poster import post_digest
 
 log = logging.getLogger(__name__)
 
-# Default interval between scheduled runs, in hours.
+# Default intervals.
 DEFAULT_INTERVAL_HOURS = 8
+DEFAULT_POST_INTERVAL_MINUTES = 60
 
 
 def _build_lm_client() -> LMClient:
@@ -129,12 +137,17 @@ def filter_seen(items: list[dict[str, Any]], store: NewsStore) -> list[dict[str,
     return kept
 
 
-async def _run_pipeline() -> int:
-    """One full pipeline run. Returns 0 on success, 1 on failure."""
-    db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
-    settings: SettingsStore = default_store(db_path)
+async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
+    """Generation cycle: collect → filter → score → LLM filter → LLM style → store posts.
+
+    Returns 0 on success, 1 on failure.
+    """
     cfg = load_config(settings)
-    store = NewsStore(Path(db_path))
+
+    # Clear any unposted items from the previous batch.
+    cleared = store.clear_unposted()
+    if cleared:
+        log.info("cleared %d unposted items from previous batch", cleared)
 
     # 1. Collect from every enabled source concurrently.
     log.info("collecting from %d source types", len(cfg["sources"]))
@@ -173,114 +186,249 @@ async def _run_pipeline() -> int:
         log.warning("LLM filter kept zero items; nothing to post")
         return 0
 
-    # 7. Select a diverse top-N for the digest.
+    # 7. Select a diverse top-N for styling.
     final = select_diverse_top_items(kept, cfg["max_final_news"])
-    log.info("selected %d diverse items for the digest", len(final))
+    log.info("selected %d diverse items for styling", len(final))
 
-    # 8. Pass B — LLM digest writer.
-    digest_lm = _build_lm_client()
-    article = await llm_write_digest(
+    # 8. Pass B — LLM styler (individual posts).
+    style_lm = _build_lm_client()
+    posts = await llm_style_posts(
         final,
-        digest_lm,
+        style_lm,
+        style_prompt=cfg["style_prompt"],
         temperature=cfg["llm_temperature"],
         max_tokens=cfg["llm_max_tokens_digest"],
     )
-    if not article:
-        log.warning("LLM digest writer produced empty output; nothing to post")
+    if not posts:
+        log.warning("LLM styler produced zero posts; nothing to queue")
         return 0
 
-    # 9. Persist the digest (history) before posting.
-    store.insert_digest(article, digest_lm.model, len(final))
+    # 9. Store posts in pending_posts queue.
+    for post in posts:
+        store.add_pending_post(post)
+    log.info("queued %d posts for hourly delivery", len(posts))
 
-    # 10. Post to Telegram.
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
-    if not bot_token or not chat_id:
-        # Dry-run mode: print to stdout instead of posting. Useful for testing.
-        log.warning("BOT_TOKEN or NEWS_CHANNEL_ID not set; dry-run (printing digest to stdout)")
-        print(article)
-        store.mark_seen(final)
-        store.prune_old_items(cfg["item_prune_hours"])
-        return 0
-
-    await post_digest(article, bot_token=bot_token, chat_id=chat_id)
-
-    # 11. Mark these items as seen so we don't repost them.
+    # 10. Mark source items as seen.
     store.mark_seen(final)
     store.prune_old_items(cfg["item_prune_hours"])
-    log.info("run complete: posted digest with %d items", len(final))
+
+    return 0
+
+
+async def _run_posting(store: NewsStore) -> int:
+    """Posting cycle: post one pending post to Telegram.
+
+    Returns 0 on success, 1 on failure.
+    """
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+
+    post = store.get_next_pending_post()
+    if not post:
+        log.debug("no pending posts to deliver")
+        return 0
+
+    body = post["body"]
+
+    if not bot_token or not chat_id:
+        # Dry-run mode: print to stdout instead of posting.
+        log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
+        print(body)
+        store.mark_posted(post["id"])
+        return 0
+
+    try:
+        await post_digest(body, bot_token=bot_token, chat_id=chat_id)
+        store.mark_posted(post["id"])
+        log.info("posted pending post id=%d to Telegram", post["id"])
+    except Exception as exc:
+        log.error("failed to post pending post id=%d: %s", post["id"], exc)
+        return 1
+
     return 0
 
 
 async def _scheduled_loop(settings: SettingsStore) -> None:
-    """Long-running loop that executes the pipeline on a schedule.
+    """Long-running loop with concurrent generation + posting timers.
 
-    Interval is read from env NEWS_INTERVAL_HOURS (default 8) or the
-    'news.schedule_interval_hours' setting. The last run time is
-    persisted in SQLite so the schedule survives container restarts.
+    Generation runs every NEWS_INTERVAL_HOURS (default 8).
+    Posting runs every NEWS_POST_INTERVAL_MINUTES (default 60).
+    Bot command handler polls Telegram getUpdates concurrently.
     """
-    interval_hours = float(
+    db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
+    store = NewsStore(Path(db_path))
+
+    gen_interval_hours = float(
         os.getenv("NEWS_INTERVAL_HOURS", "")
         or settings.get("news", "schedule_interval_hours", default=DEFAULT_INTERVAL_HOURS)
         or DEFAULT_INTERVAL_HOURS
     )
-    interval_seconds = interval_hours * 3600
+    post_interval_minutes = float(
+        os.getenv("NEWS_POST_INTERVAL_MINUTES", "")
+        or settings.get("news", "post_interval_minutes", default=DEFAULT_POST_INTERVAL_MINUTES)
+        or DEFAULT_POST_INTERVAL_MINUTES
+    )
+    gen_interval_s = gen_interval_hours * 3600
+    post_interval_s = post_interval_minutes * 60
 
-    log.info("scheduler started: interval=%.1fh", interval_hours)
+    # --- Bot command handler (optional) ---
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    admin_user_id = os.getenv("ADMIN_USER_ID", "").strip()
+    bot_handler: BotCommandHandler | None = None
 
-    while True:
-        # Check if it's time to run.
-        last_run_str = settings.get("scheduler", "last_run_utc", default="") or ""
-        now = datetime.now(timezone.utc)
+    if bot_token and admin_user_id:
+        async def on_run() -> None:
+            await _run_generation(store, settings)
 
-        if last_run_str:
+        async def on_status() -> str:
+            pending = store.count_pending()
+            last_gen = settings.get("scheduler", "last_gen_utc", default="") or ""
+            last_post = settings.get("scheduler", "last_post_utc", default="") or ""
+            return (
+                f"Pending posts: {pending}\n"
+                f"Last generation: {last_gen or 'never'}\n"
+                f"Last post: {last_post or 'never'}\n"
+                f"Generation interval: {gen_interval_hours:.1f}h\n"
+                f"Posting interval: {post_interval_minutes:.0f}min"
+            )
+
+        bot_handler = BotCommandHandler(
+            bot_token=bot_token,
+            admin_user_id=admin_user_id,
+            settings=settings,
+            on_run=on_run,
+            on_status=on_status,
+        )
+
+    async def generation_loop() -> None:
+        """Generation timer: runs the full pipeline on schedule."""
+        log.info("generation timer started: interval=%.1fh", gen_interval_hours)
+        while True:
+            last_gen_str = settings.get("scheduler", "last_gen_utc", default="") or ""
+            now = datetime.now(timezone.utc)
+
+            if last_gen_str:
+                try:
+                    last_gen = datetime.fromisoformat(last_gen_str)
+                    if last_gen.tzinfo is None:
+                        last_gen = last_gen.replace(tzinfo=timezone.utc)
+                    elapsed = (now - last_gen).total_seconds()
+                    if elapsed < gen_interval_s:
+                        sleep_for = gen_interval_s - elapsed
+                        log.debug("next generation in %.0fs", sleep_for)
+                        await asyncio.sleep(min(sleep_for, 300))
+                        continue
+                except (ValueError, TypeError):
+                    log.warning("invalid last_gen_utc: %s — generating now", last_gen_str)
+
+            log.info("generation cycle starting at %s", now.isoformat())
             try:
-                last_run = datetime.fromisoformat(last_run_str)
-                if last_run.tzinfo is None:
-                    last_run = last_run.replace(tzinfo=timezone.utc)
-                elapsed = (now - last_run).total_seconds()
-                if elapsed < interval_seconds:
-                    sleep_for = interval_seconds - elapsed
-                    log.debug("next run in %.0fs (last run %s)", sleep_for, last_run_str)
-                    await asyncio.sleep(min(sleep_for, 300))  # Check every 5 min max
-                    continue
-            except (ValueError, TypeError):
-                log.warning("invalid last_run_utc in settings: %s — running now", last_run_str)
+                await _run_generation(store, settings)
+            except Exception as exc:
+                log.error("generation cycle failed: %s", exc, exc_info=True)
 
-        log.info("scheduled run starting at %s", now.isoformat())
-        try:
-            await _run_pipeline()
-        except Exception as exc:
-            log.error("pipeline run failed: %s", exc, exc_info=True)
+            now = datetime.now(timezone.utc)
+            settings.set("scheduler", "last_gen_utc", now.isoformat())
+            log.info("generation cycle complete, next in %.1fh", gen_interval_hours)
+            await asyncio.sleep(60)
 
-        now = datetime.now(timezone.utc)
-        settings.set("scheduler", "last_run_utc", now.isoformat())
-        log.info("scheduled run complete at %s, next in %.1fh", now.isoformat(), interval_hours)
+    async def posting_loop() -> None:
+        """Posting timer: posts one pending post on schedule."""
+        log.info("posting timer started: interval=%.0fmin", post_interval_minutes)
+        while True:
+            last_post_str = settings.get("scheduler", "last_post_utc", default="") or ""
+            now = datetime.now(timezone.utc)
 
-        # Sleep in short intervals so the process is responsive to signals.
-        await asyncio.sleep(60)
+            if last_post_str:
+                try:
+                    last_post = datetime.fromisoformat(last_post_str)
+                    if last_post.tzinfo is None:
+                        last_post = last_post.replace(tzinfo=timezone.utc)
+                    elapsed = (now - last_post).total_seconds()
+                    if elapsed < post_interval_s:
+                        sleep_for = post_interval_s - elapsed
+                        await asyncio.sleep(min(sleep_for, 60))
+                        continue
+                except (ValueError, TypeError):
+                    pass  # run now
+
+            try:
+                await _run_posting(store)
+            except Exception as exc:
+                log.error("posting cycle failed: %s", exc, exc_info=True)
+
+            now = datetime.now(timezone.utc)
+            settings.set("scheduler", "last_post_utc", now.isoformat())
+            await asyncio.sleep(30)
+
+    tasks = [asyncio.create_task(generation_loop()), asyncio.create_task(posting_loop())]
+    if bot_handler:
+        tasks.append(asyncio.create_task(bot_handler.poll_loop()))
+
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        log.info("shutting down")
+    finally:
+        if bot_handler:
+            await bot_handler.close()
 
 
 def main() -> None:
     """Entry point for `python -m newsbot.main`."""
     parser = argparse.ArgumentParser(description="News bot pipeline")
-    parser.add_argument("--once", action="store_true", help="Run the pipeline once and exit")
+    parser.add_argument("--once", action="store_true", help="Run generation + one post cycle and exit")
     args = parser.parse_args()
 
     load_dotenv()
     configure_logging(process_name="newsbot")
 
-    if args.once:
-        code = asyncio.run(_run_pipeline())
-        sys.exit(code)
-
     db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
     settings: SettingsStore = default_store(db_path)
 
-    # If NEWS_INTERVAL_HOURS=0 or not set and no BOT_TOKEN, run once for testing.
+    if args.once:
+        store = NewsStore(Path(db_path))
+
+        async def _once() -> int:
+            code = await _run_generation(store, settings)
+            if code != 0:
+                return code
+            # Post all generated posts immediately for testing.
+            while True:
+                post = store.get_next_pending_post()
+                if not post:
+                    break
+                bot_token = os.getenv("BOT_TOKEN", "").strip()
+                chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+                body = post["body"]
+                if not bot_token or not chat_id:
+                    print(body)
+                else:
+                    await post_digest(body, bot_token=bot_token, chat_id=chat_id)
+                store.mark_posted(post["id"])
+            return 0
+
+        code = asyncio.run(_once())
+        sys.exit(code)
+
+    # Scheduled mode: needs BOT_TOKEN for posting. Without it, run once for testing.
     if not os.getenv("BOT_TOKEN", "").strip() and not os.getenv("NEWS_INTERVAL_HOURS", "").strip():
         log.info("no BOT_TOKEN and no NEWS_INTERVAL_HOURS — running once (dry-run mode)")
-        code = asyncio.run(_run_pipeline())
+        store = NewsStore(Path(db_path))
+
+        async def _dry() -> int:
+            code = await _run_generation(store, settings)
+            if code != 0:
+                return code
+            while True:
+                post = store.get_next_pending_post()
+                if not post:
+                    break
+                print(post["body"])
+                store.mark_posted(post["id"])
+            return 0
+
+        code = asyncio.run(_dry())
         sys.exit(code)
 
     try:

@@ -62,7 +62,7 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
 DEFAULT_RUN: dict[str, Any] = {
     "lookback_hours": 48,
     "max_candidates": 40,
-    "max_final_news": 10,
+    "max_final_news": 8,
     "min_score": 35,
     "item_prune_hours": 48,
 }
@@ -72,6 +72,17 @@ DEFAULT_LLM: dict[str, Any] = {
     "max_tokens_filter": 8000,
     "max_tokens_digest": 8000,
 }
+
+# Default style prompt for Pass B (the styler). Overridable via SQLite
+# setting news.style_prompt or the /setstyle bot command.
+DEFAULT_STYLE_PROMPT = (
+    "You are a tech-news writer for a Telegram channel called Cyber Cream. "
+    "Write punchy, concise posts about trending tech news. One post per item. "
+    "Each post is 2-4 sentences — hook the reader, explain what happened, and why it matters. "
+    "Be direct and conversational, like a sharp friend sharing a find. "
+    "No hype words like 'revolutionary' or 'game-changing'. No emojis. No clickbait. "
+    "Include the source link on its own line at the end."
+)
 
 # --- Default source config (so the bot runs with no settings) ---------
 
@@ -137,6 +148,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
         "llm_temperature": _as_float(raw.get("llm_temperature"), DEFAULT_LLM["temperature"]),
         "llm_max_tokens_filter": _as_int(raw.get("llm_max_tokens_filter"), DEFAULT_LLM["max_tokens_filter"]),
         "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"]),
+        "style_prompt": str(raw.get("style_prompt") or DEFAULT_STYLE_PROMPT),
     }
 
 

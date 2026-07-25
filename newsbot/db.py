@@ -89,8 +89,23 @@ class NewsStore:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_posts(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              category TEXT,
+              importance INTEGER,
+              url TEXT,
+              created_at TEXT NOT NULL,
+              posted_at TEXT
+            )
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS ix_news_items_fetched_at ON news_items(fetched_at);")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_news_items_score ON news_items(score DESC);")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_pending_posts_posted ON pending_posts(posted_at);")
         cur.close()
 
     # --- news_items -----------------------------------------------------
@@ -240,3 +255,58 @@ class NewsStore:
             log.warning("insert_digest failed: %s", exc)
             return None
         return int(cur.lastrowid)
+
+    # --- pending_posts (individual posts waiting to be sent) -----------
+
+    def add_pending_post(self, post: dict[str, Any]) -> Optional[int]:
+        """Insert a styled post into the pending queue. Returns row id."""
+        try:
+            cur = self._conn.execute(
+                """
+                INSERT INTO pending_posts(title, body, category, importance, url, created_at)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    str(post.get("title") or "").strip(),
+                    str(post.get("body") or "").strip(),
+                    str(post.get("category") or "").strip() or None,
+                    post.get("importance"),
+                    str(post.get("url") or "").strip() or None,
+                    _utc_now_iso(),
+                ),
+            )
+        except sqlite3.Error as exc:
+            log.warning("add_pending_post failed: %s", exc)
+            return None
+        return int(cur.lastrowid)
+
+    def get_next_pending_post(self) -> Optional[dict[str, Any]]:
+        """Get the oldest unposted post from the queue."""
+        row = self._conn.execute(
+            """
+            SELECT * FROM pending_posts
+            WHERE posted_at IS NULL
+            ORDER BY created_at ASC, id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_posted(self, post_id: int) -> None:
+        """Mark a pending post as posted."""
+        self._conn.execute(
+            "UPDATE pending_posts SET posted_at=? WHERE id=?",
+            (_utc_now_iso(), post_id),
+        )
+
+    def clear_unposted(self) -> int:
+        """Delete all unposted posts (called before a new generation cycle)."""
+        cur = self._conn.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
+        return int(cur.rowcount or 0)
+
+    def count_pending(self) -> int:
+        """Count unposted posts in the queue."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NULL"
+        ).fetchone()
+        return int(row["n"] if row else 0)
