@@ -269,21 +269,17 @@ async def llm_style_posts(
         return []
 
     # Merge styled posts with original item data (engagement signals, url, category).
-    by_title: dict[str, dict[str, Any]] = {}
-    for item in items:
-        key = str(item.get("title") or "").strip().lower()
-        if key:
-            by_title.setdefault(key, item)
-
+    # Match by index: the styler receives items in order and writes posts in order.
+    # Title-based matching fails because the LLM rewrites headlines.
     result: list[dict[str, Any]] = []
-    for entry in posts_raw:
+    for idx, entry in enumerate(posts_raw):
         if not isinstance(entry, dict):
             continue
         title = str(entry.get("title") or "").strip()
         body = str(entry.get("body") or "").strip()
         if not body:
             continue
-        original = by_title.get(title.lower(), {})
+        original = items[idx] if idx < len(items) else {}
         result.append({
             "title": title or original.get("title", ""),
             "body": body,
