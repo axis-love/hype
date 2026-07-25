@@ -228,17 +228,20 @@ async def _run_posting(store: NewsStore) -> int:
         log.debug("no pending posts to deliver")
         return 0
 
+    title = post["title"]
     body = post["body"]
+    # Format as bold title + body for Telegram Markdown.
+    message = f"**{title}**\n\n{body}" if title else body
 
     if not bot_token or not chat_id:
         # Dry-run mode: print to stdout instead of posting.
         log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
-        print(body)
+        print(message)
         store.mark_posted(post["id"])
         return 0
 
     try:
-        await post_digest(body, bot_token=bot_token, chat_id=chat_id)
+        await post_digest(message, bot_token=bot_token, chat_id=chat_id)
         store.mark_posted(post["id"])
         log.info("posted pending post id=%d to Telegram", post["id"])
     except Exception as exc:
@@ -400,11 +403,13 @@ def main() -> None:
                     break
                 bot_token = os.getenv("BOT_TOKEN", "").strip()
                 chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+                title = post["title"]
                 body = post["body"]
+                message = f"**{title}**\n\n{body}" if title else body
                 if not bot_token or not chat_id:
-                    print(body)
+                    print(message)
                 else:
-                    await post_digest(body, bot_token=bot_token, chat_id=chat_id)
+                    await post_digest(message, bot_token=bot_token, chat_id=chat_id)
                 store.mark_posted(post["id"])
             return 0
 
@@ -424,7 +429,10 @@ def main() -> None:
                 post = store.get_next_pending_post()
                 if not post:
                     break
-                print(post["body"])
+                title = post["title"]
+                body = post["body"]
+                message = f"**{title}**\n\n{body}" if title else body
+                print(message)
                 store.mark_posted(post["id"])
             return 0
 
