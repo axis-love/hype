@@ -280,8 +280,16 @@ async def _run_posting(store: NewsStore) -> int:
 
     title = post["title"]
     body = post["body"]
-    # Format as bold title + body for Telegram HTML.
-    message = f"<b>{title}</b>\n\n{body}" if title else body
+    url = post.get("url") or ""
+    # Format as bold title + body + source link for Telegram HTML.
+    parts = []
+    if title:
+        parts.append(f"<b>{title}</b>")
+        parts.append("")  # blank line
+    parts.append(body)
+    if url:
+        parts.append(url)
+    message = "\n".join(parts)
 
     if not bot_token or not chat_id:
         # Dry-run mode: print to stdout instead of posting.
@@ -459,7 +467,15 @@ def main() -> None:
                 chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
                 title = post["title"]
                 body = post["body"]
-                message = f"<b>{title}</b>\n\n{body}" if title else body
+                url = post.get("url") or ""
+                parts = []
+                if title:
+                    parts.append(f"<b>{title}</b>")
+                    parts.append("")
+                parts.append(body)
+                if url:
+                    parts.append(url)
+                message = "\n".join(parts)
                 if not bot_token or not chat_id:
                     print(message)
                 else:
@@ -485,7 +501,15 @@ def main() -> None:
                     break
                 title = post["title"]
                 body = post["body"]
-                message = f"<b>{title}</b>\n\n{body}" if title else body
+                url = post.get("url") or ""
+                parts = []
+                if title:
+                    parts.append(f"<b>{title}</b>")
+                    parts.append("")
+                parts.append(body)
+                if url:
+                    parts.append(url)
+                message = "\n".join(parts)
                 print(message)
                 store.mark_posted(post["id"])
             return 0

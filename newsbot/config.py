@@ -82,7 +82,6 @@ DEFAULT_STYLE_PROMPT = (
     "Each post is 2-4 sentences — hook the reader, explain what happened, and why it matters. "
     "Be direct and conversational, like a sharp friend sharing a find. "
     "No hype words like 'revolutionary' or 'game-changing'. No emojis. No clickbait. "
-    "Include the source link on its own line at the end."
 )
 
 # --- Default source config (so the bot runs with no settings) ---------
