@@ -230,8 +230,8 @@ async def _run_posting(store: NewsStore) -> int:
 
     title = post["title"]
     body = post["body"]
-    # Format as bold title + body for Telegram Markdown.
-    message = f"**{title}**\n\n{body}" if title else body
+    # Format as bold title + body for Telegram HTML.
+    message = f"<b>{title}</b>\n\n{body}" if title else body
 
     if not bot_token or not chat_id:
         # Dry-run mode: print to stdout instead of posting.
@@ -405,7 +405,7 @@ def main() -> None:
                 chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
                 title = post["title"]
                 body = post["body"]
-                message = f"**{title}**\n\n{body}" if title else body
+                message = f"<b>{title}</b>\n\n{body}" if title else body
                 if not bot_token or not chat_id:
                     print(message)
                 else:
@@ -431,7 +431,7 @@ def main() -> None:
                     break
                 title = post["title"]
                 body = post["body"]
-                message = f"**{title}**\n\n{body}" if title else body
+                message = f"<b>{title}</b>\n\n{body}" if title else body
                 print(message)
                 store.mark_posted(post["id"])
             return 0
