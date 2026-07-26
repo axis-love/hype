@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from newsbot.config import DEFAULT_STYLE_PROMPT
 
@@ -66,7 +67,7 @@ class BotCommandHandler:
                     "parse_mode": "",
                 })
             except Exception as exc:
-                log.warning("bot command reply failed: %s", exc)
+                log.warning("bot command reply failed: %s", redact_exception(exc))
 
     def _is_admin(self, user_id: int) -> bool:
         return str(user_id) == self.admin_user_id
@@ -177,7 +178,7 @@ class BotCommandHandler:
                 r = await self._client.post(url, json=params)
 
                 if r.status_code >= 400:
-                    log.warning("getUpdates failed: %s %s", r.status_code, r.text[:200])
+                    log.warning("getUpdates failed: status=%s body=%s", r.status_code, redact_text(r.text[:200], max_length=150))
                     await asyncio.sleep(5)
                     continue
 
@@ -196,7 +197,7 @@ class BotCommandHandler:
                 # Normal for long polling — just continue.
                 continue
             except Exception as exc:
-                log.error("bot command poll error: %s", exc, exc_info=True)
+                log.error("bot command poll error: %s", redact_exception(exc), exc_info=False)
                 await asyncio.sleep(5)
 
     async def close(self) -> None:
