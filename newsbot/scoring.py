@@ -17,10 +17,34 @@ The code discovers hype; the LLM only writes the digest.
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 from newsbot.config import TOPIC_KEYWORDS, _SOURCE_ALIASES
+
+# Pre-compiled regex patterns for short keywords that need word-boundary matching.
+# Short keywords (≤3 chars or single-word) get \b boundaries to prevent
+# matching substrings like "ai" in "email". Multi-word phrases use substring.
+_SHORT_KEYWORD_PATTERNS: dict[str, list[tuple[re.Pattern, str]]] = {}
+
+
+def _build_keyword_patterns() -> None:
+    """Pre-compile keyword patterns for boundary-aware matching."""
+    for boost_key, keywords in TOPIC_KEYWORDS.items():
+        patterns: list[tuple[re.Pattern, str]] = []
+        for kw in keywords:
+            kw_lower = kw.lower()
+            # Multi-word phrases or long keywords: use substring match.
+            if " " in kw or len(kw_lower) > 4:
+                patterns.append((None, kw_lower))
+            else:
+                # Short single-word: use word-boundary regex.
+                patterns.append((re.compile(r"\b" + re.escape(kw_lower) + r"\b"), kw_lower))
+        _SHORT_KEYWORD_PATTERNS[boost_key] = patterns
+
+
+_build_keyword_patterns()
 
 
 def recency_decay(published_at: Any, *, lookback_hours: float) -> float:
@@ -58,7 +82,12 @@ def recency_decay(published_at: Any, *, lookback_hours: float) -> float:
 
 
 def topic_bonus(item: dict[str, Any], topic_boost: dict[str, int]) -> int:
-    """Sum boosts for topics whose keywords appear in title or snippet."""
+    """Sum boosts for topics whose keywords appear in title or snippet.
+
+    Short keywords (≤4 chars, single word) use word-boundary matching to
+    prevent false positives like "ai" matching "email". Multi-word phrases
+    and longer keywords use substring matching.
+    """
     haystack = " ".join(
         s for s in (str(item.get("title") or ""), str(item.get("snippet") or ""),
                     str(item.get("raw_text") or "")) if s
@@ -67,12 +96,21 @@ def topic_bonus(item: dict[str, Any], topic_boost: dict[str, int]) -> int:
         return 0
 
     total = 0
-    for boost_key, keywords in TOPIC_KEYWORDS.items():
+    for boost_key, patterns in _SHORT_KEYWORD_PATTERNS.items():
         weight = topic_boost.get(boost_key, 0)
         if weight <= 0:
             continue
-        if any(kw in haystack for kw in keywords):
-            total += weight
+        for regex, kw_lower in patterns:
+            if regex is not None:
+                # Short keyword: word-boundary match.
+                if regex.search(haystack):
+                    total += weight
+                    break
+            else:
+                # Multi-word phrase or long keyword: substring match.
+                if kw_lower in haystack:
+                    total += weight
+                    break
     return total
 
 
