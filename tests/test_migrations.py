@@ -134,8 +134,11 @@ class TestRetentionPruning:
     def test_prune_digests_removes_old(self, store):
         """Old digest entries should be removed."""
         old_ts = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat(timespec="seconds")
-        store.insert_digest("old digest", "model", 5)
-        store._conn.execute("UPDATE news_digests SET created_at=? WHERE id=1", (old_ts,))
+        # Insert directly since insert_digest was removed.
+        store._conn.execute(
+            "INSERT INTO news_digests(created_at, digest_text, model_used, item_count) VALUES(?,?,?,?)",
+            (old_ts, "old digest", "model", 5),
+        )
 
         deleted = store.prune_digests(max_age_days=90)
         assert deleted == 1

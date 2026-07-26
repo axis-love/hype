@@ -123,14 +123,14 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def filter_seen(items: list[dict[str, Any]], store: NewsStore) -> list[dict[str, Any]]:
-    """Drop items whose URL or title was already posted (per the seen table)."""
-    kept: list[dict[str, Any]] = []
-    for item in items:
-        url = str(item.get("url") or "").strip()
-        title = str(item.get("title") or "").strip()
-        if store.is_seen(url, title):
-            continue
-        kept.append(item)
+    """Drop items whose URL or title was already posted (per the seen table).
+
+    Uses batch SQL (is_seen_batch) instead of per-item queries.
+    """
+    if not items:
+        return []
+    seen_indices = store.is_seen_batch(items)
+    kept = [item for i, item in enumerate(items) if i not in seen_indices]
     dropped = len(items) - len(kept)
     if dropped:
         log.info("filter_seen dropped %d already-seen items", dropped)
