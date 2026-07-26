@@ -2,22 +2,23 @@
 
 Implements the architecture spec §9:
 
-  - canonical URL match (strip query string, normalize host)
+  - canonical URL match (strip tracking params, normalize host, preserve content-identifying params)
   - normalized lowercase title match
   - fuzzy title similarity > 0.90 (rapidfuzz)
   - same GitHub repo URL
 
 When duplicates are found, **merge** their engagement signals instead of
-dropping the weaker item: sum upvotes/comments/stars, take the max
-published_at, and stamp crosspost_count = number of distinct sources.
-The crosspost bonus (+30 in scoring) is one of the strongest signals.
+dropping the weaker item: sum upvotes/comments/stars (only across distinct
+sources), take the max published_at, and stamp crosspost_count = number of
+distinct sources. The crosspost bonus (+30 in scoring) is one of the
+strongest signals.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qsl
 
 try:
     from rapidfuzz import fuzz
@@ -30,9 +31,25 @@ log = logging.getLogger(__name__)
 
 FUZZY_THRESHOLD = 90.0  # rapidfuzz.fuzz.ratio is 0-100
 
+# Query parameters that are tracking/referral and should be stripped.
+# All others are preserved because they may identify distinct content.
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "ref", "ref_src", "ref_url", "source", "utm", "mc_cid", "mc_eid",
+    "fbclid", "gclid", "dclid", "msclkid", "yclid", "sr", "sr_share",
+    "spm", "scm", "campaign", "_hsenc", "_hsmi", "hsCtaTracking",
+    "feature", "ocid", "ito", "cmpid", "src", "share",
+})
+
 
 def _canonical_url(url: Any) -> str:
-    """Normalize a URL for dedup: lowercase host, strip scheme, drop query/fragment."""
+    """Normalize a URL for dedup: lowercase host, strip scheme, drop tracking
+    query params and fragment, but preserve content-identifying query params.
+
+    Examples:
+      item?id=1 and item?id=2 → distinct canonical URLs (preserved)
+      example.com/post?utm_source=x → example.com/post (tracking stripped)
+    """
     s = str(url or "").strip()
     if not s:
         return ""
@@ -45,6 +62,23 @@ def _canonical_url(url: Any) -> str:
     if host.startswith("www."):
         host = host[4:]
     path = parts.path.rstrip("/") or "/"
+
+    # Preserve query params that are NOT tracking params.
+    query = parts.query
+    if query:
+        kept = [(k, v) for k, v in parse_qsl(query, keep_blank_values=True)
+                if k.lower() not in _TRACKING_PARAMS]
+        if kept:
+            # Sort for determinism (order-independent canonicalization).
+            kept.sort()
+            query = "&".join(f"{k}={v}" for k, v in kept)
+        else:
+            query = ""
+    else:
+        query = ""
+
+    if query:
+        return f"{host}{path}?{query}"
     return f"{host}{path}"
 
 
@@ -78,15 +112,31 @@ def _fuzzy_ratio(a: str, b: str) -> float:
 
 
 def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
-    """Merge *other* into *keep*, summing engagement and stamping crosspost_count.
+    """Merge *other* into *keep*, summing engagement across distinct sources only.
 
     Returns the merged *keep* dict (mutated in place).
+
+    Key rules:
+    - Engagement is summed only when the other item comes from a different
+      source than any already merged. Same-source duplicates (e.g. same GitHub
+      repo from multiple search queries) do NOT re-count engagement.
+    - crosspost_count reflects all distinct contributing sources (not capped at 2).
+    - source_names set is accumulated across all merges.
+    - The representative source is the one with the highest score (deterministic).
     """
-    for field in ("upvotes", "comments", "stars", "forks", "reposts"):
-        a = keep.get(field) or 0
-        b = other.get(field) or 0
-        if a or b:
-            keep[field] = (a or 0) + (b or 0)
+    # Track contributing sources in a list on the keep item.
+    if "_contributing_sources" not in keep:
+        keep["_contributing_sources"] = [keep.get("source")]
+    other_source = other.get("source")
+
+    # Only sum engagement if this is from a new source (prevents inflation).
+    if other_source and other_source not in keep["_contributing_sources"]:
+        keep["_contributing_sources"].append(other_source)
+        for field in ("upvotes", "comments", "stars", "forks", "reposts"):
+            a = keep.get(field) or 0
+            b = other.get(field) or 0
+            if a or b:
+                keep[field] = (a or 0) + (b or 0)
 
     # upvote_ratio: take the max (Reddit-only field; non-Reddit items have None).
     if other.get("upvote_ratio") is not None:
@@ -107,18 +157,25 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
         keep["snippet"] = other.get("snippet")
 
     # Track the union of source names so the digest can list them.
-    seen_names = set()
+    if "_source_names_set" not in keep:
+        keep["_source_names_set"] = set()
     for it in (keep, other):
         for n in str(it.get("source_name") or "").split(" + "):
             n = n.strip()
             if n:
-                seen_names.add(n)
-    keep["source_name"] = " + ".join(sorted(seen_names))
+                keep["_source_names_set"].add(n)
+    keep["source_name"] = " + ".join(sorted(keep["_source_names_set"]))
 
-    # crosspost_count = distinct sources seen.
-    sources = {keep.get("source"), other.get("source")}
+    # crosspost_count = number of distinct contributing sources (not capped at 2).
+    sources = set(keep["_contributing_sources"])
     sources.discard(None)
+    sources.discard("")
     keep["crosspost_count"] = max(int(keep.get("crosspost_count") or 1), len(sources))
+
+    # Deterministic primary source: highest score wins, tie-break by name.
+    if other.get("score") is not None:
+        if keep.get("score") is None or float(other["score"]) > float(keep["score"]):
+            keep["source"] = other_source or keep.get("source")
 
     return keep
 
@@ -184,4 +241,10 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _merge_pair(result[match_idx], item)
 
     log.info("dedupe: %d candidates -> %d unique", len(items), len(result))
+
+    # Clean up internal tracking fields.
+    for item in result:
+        item.pop("_contributing_sources", None)
+        item.pop("_source_names_set", None)
+
     return result
