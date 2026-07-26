@@ -1,13 +1,15 @@
 """SQLite-backed news bot storage.
 
-Three tables:
-  - news_items: raw fetched candidates (with engagement signals)
-  - seen:       URLs/titles already delivered to Telegram (dedup state)
-  - news_digests: posted digests (history)
+Tables:
+  - pending_posts: individual posts waiting to be sent to Telegram
+  - seen:          URLs/titles already delivered (dedup state)
+  - news_items:    raw fetched candidates (retained for prune window)
+  - news_digests:  posted digest history
+  - schema_version: migration tracking
 
 WAL mode, autocommit, single connection per process — same pattern as
-core/settings_store.py. No cross-process coordination needed (cron runs
-one-shot), but WAL keeps reads cheap if an admin inspects the DB.
+core/settings_store.py. Schema evolution is handled by a lightweight
+migration mechanism that records applied versions in schema_version.
 """
 
 from __future__ import annotations
@@ -25,6 +27,87 @@ log = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# --- Migrations ----------------------------------------------------------
+# Each migration is a function that takes a sqlite3 cursor and is safe to
+# rerun (idempotent). Migrations are applied in order, tracking the
+# applied version in the schema_version table.
+
+_MIGRATIONS: list[tuple[int, str]] = []
+
+
+def _migration(version: int, description: str):
+    """Decorator to register a migration."""
+    def decorator(fn):
+        _MIGRATIONS.append((version, description))
+        globals()[f"_migration_{version}"] = fn
+        return fn
+    return decorator
+
+
+@_migration(1, "Initial schema: news_items, seen, news_digests, pending_posts")
+def _migration_1(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_items(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source TEXT NOT NULL,
+          source_name TEXT NOT NULL,
+          title TEXT NOT NULL,
+          url TEXT,
+          snippet TEXT,
+          published_at TEXT,
+          fetched_at TEXT NOT NULL,
+          upvotes INTEGER,
+          comments INTEGER,
+          stars INTEGER,
+          forks INTEGER,
+          reposts INTEGER,
+          upvote_ratio REAL,
+          score REAL DEFAULT 0,
+          category TEXT,
+          raw_json TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS seen(
+          url TEXT PRIMARY KEY,
+          title TEXT,
+          first_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_digests(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          created_at TEXT NOT NULL,
+          digest_text TEXT NOT NULL,
+          model_used TEXT,
+          item_count INTEGER
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pending_posts(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          category TEXT,
+          importance INTEGER,
+          url TEXT,
+          created_at TEXT NOT NULL,
+          posted_at TEXT
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_news_items_fetched_at ON news_items(fetched_at);")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_news_items_score ON news_items(score DESC);")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_pending_posts_posted ON pending_posts(posted_at);")
 
 
 class NewsStore:
@@ -46,67 +129,69 @@ class NewsStore:
         cur.execute("PRAGMA journal_mode=WAL;")
         cur.execute("PRAGMA synchronous=NORMAL;")
         cur.execute("PRAGMA busy_timeout=5000;")
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS news_items(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              source TEXT NOT NULL,
-              source_name TEXT NOT NULL,
-              title TEXT NOT NULL,
-              url TEXT,
-              snippet TEXT,
-              published_at TEXT,
-              fetched_at TEXT NOT NULL,
-              upvotes INTEGER,
-              comments INTEGER,
-              stars INTEGER,
-              forks INTEGER,
-              reposts INTEGER,
-              upvote_ratio REAL,
-              score REAL DEFAULT 0,
-              category TEXT,
-              raw_json TEXT
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS seen(
-              url TEXT PRIMARY KEY,
-              title TEXT,
-              first_seen_at TEXT NOT NULL
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS news_digests(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              created_at TEXT NOT NULL,
-              digest_text TEXT NOT NULL,
-              model_used TEXT,
-              item_count INTEGER
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pending_posts(
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              title TEXT NOT NULL,
-              body TEXT NOT NULL,
-              category TEXT,
-              importance INTEGER,
-              url TEXT,
-              created_at TEXT NOT NULL,
-              posted_at TEXT
-            )
-            """
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS ix_news_items_fetched_at ON news_items(fetched_at);")
-        cur.execute("CREATE INDEX IF NOT EXISTS ix_news_items_score ON news_items(score DESC);")
-        cur.execute("CREATE INDEX IF NOT EXISTS ix_pending_posts_posted ON pending_posts(posted_at);")
         cur.close()
+
+        # Run migrations.
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        """Apply pending migrations in order, tracking in schema_version."""
+        cur = self._conn.cursor()
+        # Create the version tracking table first.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_version(
+              version INTEGER PRIMARY KEY,
+              description TEXT NOT NULL,
+              applied_at TEXT NOT NULL
+            )
+            """
+        )
+        # Determine current version.
+        row = cur.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+        current_version = int(row["v"]) if row and row["v"] is not None else 0
+
+        for version, description in _MIGRATIONS:
+            if version <= current_version:
+                continue
+            fn = globals().get(f"_migration_{version}")
+            if fn is None:
+                log.error("Migration %d not found: %s", version, description)
+                continue
+            try:
+                cur.execute("BEGIN IMMEDIATE")
+                fn(cur)
+                cur.execute(
+                    "INSERT INTO schema_version(version, description, applied_at) VALUES(?,?,?)",
+                    (version, description, _utc_now_iso()),
+                )
+                cur.execute("COMMIT")
+                log.info("Applied migration %d: %s", version, description)
+            except Exception as exc:
+                log.error("Migration %d failed: %s", version, exc)
+                try:
+                    cur.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+            finally:
+                cur.close()
+                cur = self._conn.cursor()
+
+        cur.close()
+
+    def close(self) -> None:
+        """Explicitly close the database connection."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "NewsStore":
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
 
     # --- news_items -----------------------------------------------------
 
@@ -377,3 +462,67 @@ class NewsStore:
             "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NULL"
         ).fetchone()
         return int(row["n"] if row else 0)
+
+    # --- Retention / cleanup --------------------------------------------
+
+    def prune_posted_posts(self, max_age_days: int = 30, batch_size: int = 500) -> int:
+        """Delete posted posts older than max_age_days, in bounded batches.
+
+        Never removes unposted posts (posted_at IS NULL).
+        Returns the total count of deleted rows.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        total_deleted = 0
+        while True:
+            cur = self._conn.execute(
+                "DELETE FROM pending_posts WHERE posted_at IS NOT NULL AND posted_at < ? AND id IN "
+                "(SELECT id FROM pending_posts WHERE posted_at IS NOT NULL AND posted_at < ? LIMIT ?)",
+                (cutoff, cutoff, batch_size),
+            )
+            deleted = int(cur.rowcount or 0)
+            total_deleted += deleted
+            if deleted < batch_size:
+                break
+        if total_deleted:
+            log.info("Pruned %d posted posts older than %d days", total_deleted, max_age_days)
+        return total_deleted
+
+    def prune_seen(self, max_age_days: int = 14, batch_size: int = 500) -> int:
+        """Delete seen entries older than max_age_days, in bounded batches.
+
+        Never removes entries within the deduplication window.
+        Returns the total count of deleted rows.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        total_deleted = 0
+        while True:
+            cur = self._conn.execute(
+                "DELETE FROM seen WHERE first_seen_at < ? AND url IN "
+                "(SELECT url FROM seen WHERE first_seen_at < ? LIMIT ?)",
+                (cutoff, cutoff, batch_size),
+            )
+            deleted = int(cur.rowcount or 0)
+            total_deleted += deleted
+            if deleted < batch_size:
+                break
+        if total_deleted:
+            log.info("Pruned %d seen entries older than %d days", total_deleted, max_age_days)
+        return total_deleted
+
+    def prune_digests(self, max_age_days: int = 90, batch_size: int = 100) -> int:
+        """Delete old digest history entries older than max_age_days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
+        total_deleted = 0
+        while True:
+            cur = self._conn.execute(
+                "DELETE FROM news_digests WHERE created_at < ? AND id IN "
+                "(SELECT id FROM news_digests WHERE created_at < ? LIMIT ?)",
+                (cutoff, cutoff, batch_size),
+            )
+            deleted = int(cur.rowcount or 0)
+            total_deleted += deleted
+            if deleted < batch_size:
+                break
+        if total_deleted:
+            log.info("Pruned %d digests older than %d days", total_deleted, max_age_days)
+        return total_deleted
