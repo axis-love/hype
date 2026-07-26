@@ -17,6 +17,7 @@ Config (under news.sources.github):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -136,9 +137,14 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
     timeout = httpx.Timeout(20.0)
 
     async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
+        # Fetch queries concurrently for bounded latency.
+        tasks = [_fetch_one(client, query=str(q).strip(), limit=limit, sort=sort)
+                 for q in queries if str(q).strip()]
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
         results = []
-        for q in queries:
-            q = str(q).strip()
-            if q:
-                results.extend(await _fetch_one(client, query=q, limit=limit, sort=sort))
+        for batch in batches:
+            if isinstance(batch, Exception):
+                log.warning("GitHub query failed: %s", batch)
+                continue
+            results.extend(batch)
     return results

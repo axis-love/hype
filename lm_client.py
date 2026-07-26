@@ -52,7 +52,7 @@ class LMClient:
         *,
         headers: Optional[Dict[str, str]] = None,
         endpoint_path: str = "/v1/chat/completions",
-        max_retries: int = 5,
+        max_retries: int = 3,
     ):
         self.base_url = (base_url or "").rstrip("/")
         self.model = model
@@ -181,7 +181,8 @@ class LMClient:
 
                 if attempt == attempts - 1:
                     break
-                delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
+                # Bounded backoff: 1s, 2s, 4s (+ jitter), capped at 10s.
+                delay = min(1.0 * (2 ** attempt) + random.uniform(0.0, 0.5), 10.0)
                 await asyncio.sleep(delay)
 
             if last_error is not None:
