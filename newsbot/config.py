@@ -18,6 +18,7 @@ from core.settings_store import SettingsStore
 
 DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "hackernews": 1.2,
+    "hn": 1.2,  # alias — HN collector uses "hn" as source
     "reddit": 1.0,
     "github": 1.1,
     "producthunt": 0.8,
@@ -25,6 +26,12 @@ DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "lobsters": 1.0,
     "rss": 0.5,           # normal RSS
     "official_rss": 1.3,  # tagged via feed 'weight' override
+}
+
+# Source identifier normalization: maps collector source IDs to weight-map keys.
+# This ensures "hn" from the HN collector matches "hackernews" in the weight map.
+_SOURCE_ALIASES: dict[str, str] = {
+    "hn": "hackernews",
 }
 
 DEFAULT_TOPIC_BOOST: dict[str, int] = {

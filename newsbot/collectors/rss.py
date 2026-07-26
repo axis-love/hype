@@ -31,6 +31,8 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     source_name = str(feed.get("name") or url).strip()
+    # Carry the feed's configured weight into raw_json so the scorer can use it.
+    feed_weight = feed.get("weight")
     if feedparser is None:
         log.warning("RSS fetch skipped for %s: feedparser not installed", source_name)
         return []
@@ -48,6 +50,10 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
             continue
 
         summary = entry.get("summary") or entry.get("description") or ""
+        # Copy feed weight into raw_json so hype_score() can apply it.
+        entry_data = dict(entry)
+        if feed_weight is not None:
+            entry_data["weight"] = feed_weight
         items.append(
             new_candidate(
                 title=title,
@@ -57,7 +63,7 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
                 snippet=truncate(strip_html(str(summary))),
                 published_at=to_iso_utc(entry.get("published") or entry.get("updated")),
                 raw_text=str(summary).strip() or None,
-                raw_json=dict(entry),
+                raw_json=entry_data,
             )
         )
 
