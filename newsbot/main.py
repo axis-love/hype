@@ -18,17 +18,18 @@ In scheduled mode, two timers run concurrently:
 A bot command handler (long polling) runs concurrently to accept
 admin commands (/setstyle, /style, /run, /status, /help).
 """
-
 from __future__ import annotations
 
 import argparse
 import asyncio
+import html as html_module
 import logging
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -57,6 +58,38 @@ log = logging.getLogger(__name__)
 # Default intervals.
 DEFAULT_INTERVAL_HOURS = 8
 DEFAULT_POST_INTERVAL_MINUTES = 60
+
+
+def _source_label(url: str) -> str:
+    """Extract a clean 'domain.tld' label from a URL for the source link."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        # Strip leading 'www.' for a cleaner look.
+        if host.startswith("www."):
+            host = host[4:]
+        return host or url
+    except Exception:
+        return url
+
+
+def _format_post_message(title: str, body: str, url: str) -> str:
+    """Build the Telegram HTML message for a single post.
+
+    Format: <b>Title</b> → blank line → body → clickable source link.
+    The source link shows a clean domain label instead of the raw URL.
+    """
+    parts: list[str] = []
+    if title:
+        parts.append(f"<b>{html_module.escape(title)}</b>")
+        parts.append("")
+    # Body text is LLM-generated; escape to be safe in HTML parse mode.
+    parts.append(html_module.escape(body))
+    if url:
+        label = html_module.escape(_source_label(url))
+        safe_url = html_module.escape(url, quote=True)
+        parts.append(f'<a href="{safe_url}">Source: {label}</a>')
+    return "\n".join(parts)
 
 
 def _build_lm_client() -> LMClient:
@@ -281,15 +314,7 @@ async def _run_posting(store: NewsStore) -> int:
     title = post["title"]
     body = post["body"]
     url = post.get("url") or ""
-    # Format as bold title + body + source link for Telegram HTML.
-    parts = []
-    if title:
-        parts.append(f"<b>{title}</b>")
-        parts.append("")  # blank line
-    parts.append(body)
-    if url:
-        parts.append(url)
-    message = "\n".join(parts)
+    message = _format_post_message(title, body, url)
 
     if not bot_token or not chat_id:
         # Dry-run mode: print to stdout instead of posting.
@@ -468,14 +493,7 @@ def main() -> None:
                 title = post["title"]
                 body = post["body"]
                 url = post.get("url") or ""
-                parts = []
-                if title:
-                    parts.append(f"<b>{title}</b>")
-                    parts.append("")
-                parts.append(body)
-                if url:
-                    parts.append(url)
-                message = "\n".join(parts)
+                message = _format_post_message(title, body, url)
                 if not bot_token or not chat_id:
                     print(message)
                 else:
@@ -502,14 +520,7 @@ def main() -> None:
                 title = post["title"]
                 body = post["body"]
                 url = post.get("url") or ""
-                parts = []
-                if title:
-                    parts.append(f"<b>{title}</b>")
-                    parts.append("")
-                parts.append(body)
-                if url:
-                    parts.append(url)
-                message = "\n".join(parts)
+                message = _format_post_message(title, body, url)
                 print(message)
                 store.mark_posted(post["id"])
             return 0
