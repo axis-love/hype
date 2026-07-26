@@ -22,14 +22,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import html as html_module
 import logging
 import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -49,47 +47,15 @@ from newsbot.collectors import (
 from newsbot.config import load_config
 from newsbot.db import NewsStore
 from newsbot.dedupe import dedupe_and_merge
+from newsbot.jobs import JobCoordinator
 from newsbot.scoring import score_all
 from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
-from newsbot.telegram_poster import post_digest
 
 log = logging.getLogger(__name__)
 
 # Default intervals.
 DEFAULT_INTERVAL_HOURS = 8
 DEFAULT_POST_INTERVAL_MINUTES = 60
-
-
-def _source_label(url: str) -> str:
-    """Extract a clean 'domain.tld' label from a URL for the source link."""
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        # Strip leading 'www.' for a cleaner look.
-        if host.startswith("www."):
-            host = host[4:]
-        return host or url
-    except Exception:
-        return url
-
-
-def _format_post_message(title: str, body: str, url: str) -> str:
-    """Build the Telegram HTML message for a single post.
-
-    Format: <b>Title</b> → blank line → body → clickable source link.
-    The source link shows a clean domain label instead of the raw URL.
-    """
-    parts: list[str] = []
-    if title:
-        parts.append(f"<b>{html_module.escape(title)}</b>")
-        parts.append("")
-    # Body text is LLM-generated; escape to be safe in HTML parse mode.
-    parts.append(html_module.escape(body))
-    if url:
-        label = html_module.escape(_source_label(url))
-        safe_url = html_module.escape(url, quote=True)
-        parts.append(f'<a href="{safe_url}">Source: {label}</a>')
-    return "\n".join(parts)
 
 
 def _build_lm_client() -> LMClient:
@@ -298,51 +264,19 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     return 0
 
 
-async def _run_posting(store: NewsStore) -> int:
-    """Posting cycle: post one pending post to Telegram.
-
-    Returns 0 on success, 1 on failure.
-    """
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
-
-    post = store.get_next_pending_post()
-    if not post:
-        log.debug("no pending posts to deliver")
-        return 0
-
-    title = post["title"]
-    body = post["body"]
-    url = post.get("url") or ""
-    message = _format_post_message(title, body, url)
-
-    if not bot_token or not chat_id:
-        # Dry-run mode: print to stdout instead of posting.
-        log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
-        print(message)
-        store.mark_posted(post["id"])
-        return 0
-
-    try:
-        await post_digest(message, bot_token=bot_token, chat_id=chat_id)
-        store.mark_posted(post["id"])
-        log.info("posted pending post id=%d to Telegram", post["id"])
-    except Exception as exc:
-        log.error("failed to post pending post id=%d: %s", post["id"], exc)
-        return 1
-
-    return 0
-
-
 async def _scheduled_loop(settings: SettingsStore) -> None:
     """Long-running loop with concurrent generation + posting timers.
 
     Generation runs every NEWS_INTERVAL_HOURS (default 8).
     Posting runs every NEWS_POST_INTERVAL_MINUTES (default 60).
     Bot command handler polls Telegram getUpdates concurrently.
+
+    All jobs go through a JobCoordinator that serializes generation and
+    posting, preventing overlap between scheduled and manual commands.
     """
     db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
     store = NewsStore(Path(db_path))
+    coordinator = JobCoordinator(store, settings)
 
     gen_interval_hours = float(
         os.getenv("NEWS_INTERVAL_HOURS", "")
@@ -364,21 +298,31 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 
     if bot_token and admin_user_id:
         async def on_digest() -> None:
-            await _run_generation(store, settings)
+            ran = await coordinator.run_generation(
+                lambda: _run_generation(store, settings)
+            )
+            if not ran:
+                raise RuntimeError("generation already in progress — skipped")
 
         async def on_post() -> None:
-            await _run_posting(store)
+            result = await coordinator.run_posting()
+            if result == 2:
+                raise RuntimeError("posting already in progress — skipped")
+            if result != 0:
+                raise RuntimeError(f"posting failed (code={result})")
 
         async def on_status() -> str:
             pending = store.count_pending()
             last_gen = settings.get("scheduler", "last_gen_utc", default="") or ""
             last_post = settings.get("scheduler", "last_post_utc", default="") or ""
+            gen_status = "running" if coordinator.generation_running else "idle"
+            post_status = "running" if coordinator.posting_running else "idle"
             return (
                 f"Pending posts: {pending}\n"
                 f"Last generation: {last_gen or 'never'}\n"
                 f"Last post: {last_post or 'never'}\n"
-                f"Generation interval: {gen_interval_hours:.1f}h\n"
-                f"Posting interval: {post_interval_minutes:.0f}min"
+                f"Generation: {gen_status} (interval: {gen_interval_hours:.1f}h)\n"
+                f"Posting: {post_status} (interval: {post_interval_minutes:.0f}min)"
             )
 
         bot_handler = BotCommandHandler(
@@ -413,7 +357,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 
             log.info("generation cycle starting at %s", now.isoformat())
             try:
-                await _run_generation(store, settings)
+                await coordinator.run_generation(
+                    lambda: _run_generation(store, settings)
+                )
             except Exception as exc:
                 log.error("generation cycle failed: %s", exc, exc_info=True)
 
@@ -443,7 +389,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                     pass  # run now
 
             try:
-                await _run_posting(store)
+                await coordinator.run_posting()
             except Exception as exc:
                 log.error("posting cycle failed: %s", exc, exc_info=True)
 
@@ -467,7 +413,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 def main() -> None:
     """Entry point for `python -m newsbot.main`."""
     parser = argparse.ArgumentParser(description="News bot pipeline")
-    parser.add_argument("--once", action="store_true", help="Run generation + one post cycle and exit")
+    parser.add_argument("--once", action="store_true", help="Run generation + drain all posts and exit")
     args = parser.parse_args()
 
     load_dotenv()
@@ -480,26 +426,14 @@ def main() -> None:
         store = NewsStore(Path(db_path))
 
         async def _once() -> int:
-            code = await _run_generation(store, settings)
-            if code != 0:
-                return code
-            # Post all generated posts immediately for testing.
-            while True:
-                post = store.get_next_pending_post()
-                if not post:
-                    break
-                bot_token = os.getenv("BOT_TOKEN", "").strip()
-                chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
-                title = post["title"]
-                body = post["body"]
-                url = post.get("url") or ""
-                message = _format_post_message(title, body, url)
-                if not bot_token or not chat_id:
-                    print(message)
-                else:
-                    await post_digest(message, bot_token=bot_token, chat_id=chat_id)
-                store.mark_posted(post["id"])
-            return 0
+            coordinator = JobCoordinator(store, settings)
+            ran = await coordinator.run_generation(
+                lambda: _run_generation(store, settings)
+            )
+            if not ran:
+                return 1
+            # Drain all generated posts immediately for testing.
+            return await coordinator.drain_posts()
 
         code = asyncio.run(_once())
         sys.exit(code)
@@ -510,20 +444,11 @@ def main() -> None:
         store = NewsStore(Path(db_path))
 
         async def _dry() -> int:
-            code = await _run_generation(store, settings)
-            if code != 0:
-                return code
-            while True:
-                post = store.get_next_pending_post()
-                if not post:
-                    break
-                title = post["title"]
-                body = post["body"]
-                url = post.get("url") or ""
-                message = _format_post_message(title, body, url)
-                print(message)
-                store.mark_posted(post["id"])
-            return 0
+            coordinator = JobCoordinator(store, settings)
+            await coordinator.run_generation(
+                lambda: _run_generation(store, settings)
+            )
+            return await coordinator.drain_posts()
 
         code = asyncio.run(_dry())
         sys.exit(code)
