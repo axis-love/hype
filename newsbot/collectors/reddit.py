@@ -83,9 +83,22 @@ async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
         return []
 
     try:
-        parsed = await asyncio.to_thread(
-            feedparser.parse, url, agent=REDDIT_USER_AGENT
-        )
+        # Use a bounded timeout for the feedparser blocking network request.
+        import signal
+        def _timeout_handler(signum, frame):
+            raise TimeoutError(f"Reddit fetch timed out for {source_name}")
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(30)  # 30-second timeout
+        try:
+            parsed = await asyncio.to_thread(
+                feedparser.parse, url, agent=REDDIT_USER_AGENT
+            )
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    except TimeoutError as exc:
+        log.warning("Reddit fetch timed out for %s url=%s: %s", source_name, url, exc)
+        return []
     except Exception as exc:
         log.warning("Reddit fetch failed for %s url=%s: %s", source_name, url, exc)
         return []
@@ -142,11 +155,16 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
     limit = max(1, min(int(config.get("limit") or 10), 25))
 
     async def fetch_all() -> list[dict[str, Any]]:
+        # Fetch subreddits concurrently with bounded parallelism.
         results: list[dict[str, Any]] = []
-        for sub in subreddits:
-            sub = str(sub).strip().strip("/")
-            if sub:
-                results.extend(await _fetch_one(sub, limit))
+        tasks = [_fetch_one(str(sub).strip().strip("/"), limit)
+                 for sub in subreddits if str(sub).strip().strip("/")]
+        batches = await asyncio.gather(*tasks, return_exceptions=True)
+        for batch in batches:
+            if isinstance(batch, Exception):
+                log.warning("Reddit sub fetch failed: %s", batch)
+                continue
+            results.extend(batch)
         return results
 
     return await fetch_all()

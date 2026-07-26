@@ -38,7 +38,20 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     try:
-        parsed = await asyncio.to_thread(feedparser.parse, url)
+        # Use a bounded timeout for the feedparser blocking network request.
+        import signal
+        def _timeout_handler(signum, frame):
+            raise TimeoutError(f"RSS fetch timed out for {source_name}")
+        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(30)  # 30-second timeout
+        try:
+            parsed = await asyncio.to_thread(feedparser.parse, url)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    except TimeoutError as exc:
+        log.warning("RSS fetch timed out for %s url=%s: %s", source_name, url, exc)
+        return []
     except Exception as exc:
         log.warning("RSS fetch failed for %s url=%s: %s", source_name, url, exc)
         return []
