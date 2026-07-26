@@ -28,7 +28,9 @@ MAX_CHUNK_CHARS = 3000
 def _split_for_telegram(text: str, *, limit: int = MAX_CHUNK_CHARS) -> list[str]:
     """Split a long digest into chunks <= limit, on blank-line boundaries.
 
-    Falls back to hard character splits if a single block exceeds the limit.
+    Tag-aware: won't split inside HTML tags (<b>...</b>) or HTML entities
+    (&amp;). Falls back to hard character splits only when a single block
+    exceeds the limit.
     """
     if len(text) <= limit:
         return [text]
@@ -42,7 +44,20 @@ def _split_for_telegram(text: str, *, limit: int = MAX_CHUNK_CHARS) -> list[str]
             # Fall back to the last newline, else hard cut.
             cut = remaining.rfind("\n", 0, limit)
             if cut <= 0:
+                # Hard cut, but check if we're inside an HTML tag or entity.
                 cut = limit
+                # Don't split inside an HTML tag (e.g. <a href="...">).
+                tag_start = remaining.rfind("<", 0, cut)
+                tag_end = remaining.find(">", tag_start, cut + 50) if tag_start >= 0 else -1
+                if tag_start >= 0 and tag_end == -1:
+                    # We're inside a tag — split before it.
+                    cut = tag_start
+                # Don't split inside an HTML entity (e.g. &amp;).
+                elif "&" in remaining[cut - 10:cut]:
+                    amp_pos = remaining.rfind("&", cut - 10, cut)
+                    semi_pos = remaining.find(";", amp_pos, cut + 10) if amp_pos >= 0 else -1
+                    if amp_pos >= 0 and semi_pos == -1:
+                        cut = amp_pos
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip("\n")
     if remaining:
@@ -95,9 +110,11 @@ async def post_digest(
                     raise
 
             if r.status_code >= 400:
-                # HTML parse errors are common; retry the chunk as plain text.
-                if parse_mode == "HTML":
-                    log.warning("Telegram send failed (status=%s); retrying chunk as plain text", r.status_code)
+                # Only retry as plain text for HTML parse errors (400).
+                # Do NOT retry on auth failures (401/403), not found (404),
+                # server errors (5xx), or a second 429.
+                if parse_mode == "HTML" and r.status_code == 400:
+                    log.warning("Telegram 400 parse error; retrying chunk as plain text")
                     try:
                         r = await client.post(url, json={**payload, "parse_mode": ""})
                     except httpx.HTTPError as exc:
@@ -105,9 +122,8 @@ async def post_digest(
                         raise
                 if r.status_code >= 400:
                     # Log status code and a redacted snippet of the response.
-                    # Never log the full URL (it contains the bot token).
                     safe_body = redact_text(r.text[:300], max_length=200)
-                    log.error("Telegram send failed permanently: status=%s body=%s", r.status_code, safe_body)
+                    log.error("Telegram send failed: status=%s body=%s", r.status_code, safe_body)
                     r.raise_for_status()
 
             results.append(r.json())
