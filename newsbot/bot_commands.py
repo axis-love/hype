@@ -133,8 +133,8 @@ class BotCommandHandler:
         await self._send(chat_id, f"Current style prompt:\n\n{prompt}")
 
     async def _cmd_digest(self, chat_id: int) -> None:
-        await self._send(chat_id, "Triggering generation cycle now...")
         if self.on_digest:
+            await self._send(chat_id, "Triggering generation cycle now...")
             async def _run_and_notify() -> None:
                 try:
                     await self.on_digest()
