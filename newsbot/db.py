@@ -304,6 +304,73 @@ class NewsStore:
         cur = self._conn.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
         return int(cur.rowcount or 0)
 
+    def replace_unposted_batch(
+        self, new_posts: list[dict[str, Any]], seen_items: list[dict[str, Any]]
+    ) -> tuple[int, int]:
+        """Atomically replace unposted posts with a new batch and mark items as seen.
+
+        This performs clear + insert + mark-seen in a single transaction.
+        If any insertion fails, the transaction is rolled back and the
+        previous queue remains intact.
+
+        Returns (posts_inserted, seen_marked).
+        Raises sqlite3.Error on failure (transaction rolled back).
+        """
+        now = _utc_now_iso()
+        posts_inserted = 0
+        seen_marked = 0
+
+        cur = self._conn.cursor()
+        try:
+            # Use explicit transaction (autocommit is normally on).
+            cur.execute("BEGIN IMMEDIATE")
+
+            # 1. Clear old unposted posts.
+            cur.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
+
+            # 2. Insert new posts.
+            for post in new_posts:
+                cur.execute(
+                    """
+                    INSERT INTO pending_posts(title, body, category, importance, url, created_at)
+                    VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        str(post.get("title") or "").strip(),
+                        str(post.get("body") or "").strip(),
+                        str(post.get("category") or "").strip() or None,
+                        post.get("importance"),
+                        str(post.get("url") or "").strip() or None,
+                        now,
+                    ),
+                )
+                posts_inserted += 1
+
+            # 3. Mark source items as seen.
+            for item in seen_items:
+                url = str(item.get("url") or "").strip()
+                title = str(item.get("title") or "").strip().lower()
+                if not url and not title:
+                    continue
+                cur.execute(
+                    "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
+                    (url or None, title or None, now),
+                )
+                seen_marked += 1
+
+            cur.execute("COMMIT")
+        except sqlite3.Error as exc:
+            log.error("replace_unposted_batch failed, rolling back: %s", exc)
+            try:
+                cur.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            cur.close()
+
+        return posts_inserted, seen_marked
+
     def count_pending(self) -> int:
         """Count unposted posts in the queue."""
         row = self._conn.execute(
