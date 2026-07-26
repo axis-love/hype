@@ -137,6 +137,74 @@ def filter_seen(items: list[dict[str, Any]], store: NewsStore) -> list[dict[str,
     return kept
 
 
+def _select_diverse_candidates(
+    scored: list[dict[str, Any]],
+    max_candidates: int,
+    cfg: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Select top candidates with guaranteed source diversity.
+
+    Uses round-robin allocation: sources are ordered by their top score,
+    and each source contributes one item per round until it exhausts its
+    quota or all slots are filled. This ensures every source with eligible
+    candidates gets at least one slot before any source gets a second.
+
+    When a guarantee cannot be met (not enough eligible items), remaining
+    slots are filled by global score ranking.
+    """
+    if not scored:
+        return []
+
+    source_quota = int(cfg.get("source_quota") or 8)
+
+    # Group by source, sorted by score within each group.
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for c in scored:
+        src = str(c.get("source") or "unknown")
+        by_source.setdefault(src, []).append(c)
+    for src in by_source:
+        by_source[src].sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+
+    # Order sources by their top item's score (descending).
+    source_order = sorted(
+        by_source,
+        key=lambda s: float(by_source[s][0].get("score") or 0.0),
+        reverse=True,
+    )
+
+    top: list[dict[str, Any]] = []
+    used: set[int] = set()
+
+    # Phase 1: round-robin allocation — one item per source per round.
+    # This ensures every source gets at least one slot before any gets two.
+    rounds = min(source_quota, max_candidates)
+    for round_idx in range(rounds):
+        for src in source_order:
+            if len(top) >= max_candidates:
+                break
+            items = by_source[src]
+            if round_idx < len(items):
+                item = items[round_idx]
+                if id(item) not in used:
+                    top.append(item)
+                    used.add(id(item))
+        if len(top) >= max_candidates:
+            break
+
+    # Phase 2: fill remaining slots by global score ranking.
+    if len(top) < max_candidates:
+        remaining = [c for c in scored if id(c) not in used]
+        remaining.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+        for item in remaining:
+            top.append(item)
+            if len(top) >= max_candidates:
+                break
+
+    # Re-sort the final selection by score for the LLM filter.
+    top.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    return top
+
+
 async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     """Generation cycle: collect → filter → score → LLM filter → LLM style → store posts.
 
@@ -172,46 +240,13 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     # 5. Keep the top N for the LLM filter, dropping anything below min_score.
     #    Source diversity: guarantee minimum slots per source so one source
     #    (e.g. GitHub) can't crowd out all others.
+    #    Uses round-robin allocation so all sources get representation even
+    #    when number_of_sources × quota > max_candidates.
     min_score = float(cfg.get("min_score") or 0.0)
     scored = [c for c in candidates if float(c.get("score") or 0.0) >= min_score]
     max_candidates = int(cfg["max_candidates"])
 
-    # Group by source, sorted by score within each group.
-    by_source: dict[str, list[dict[str, Any]]] = {}
-    for c in scored:
-        src = str(c.get("source") or "unknown")
-        by_source.setdefault(src, []).append(c)
-    for src in by_source:
-        by_source[src].sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
-
-    # Reserve guaranteed slots: each source gets up to `source_quota` items
-    # before the remaining slots are filled by global score ranking.
-    source_quota = int(cfg.get("source_quota") or 8)
-    top: list[dict[str, Any]] = []
-    used: set[int] = set()  # dedupe by id() to avoid double-counting
-
-    # Phase 1: guaranteed slots per source (top-N from each, by score).
-    for src in sorted(by_source, key=lambda s: by_source[s][0].get("score", 0), reverse=True):
-        for item in by_source[src][:source_quota]:
-            if id(item) not in used:
-                top.append(item)
-                used.add(id(item))
-                if len(top) >= max_candidates:
-                    break
-        if len(top) >= max_candidates:
-            break
-
-    # Phase 2: fill remaining slots by global score ranking.
-    if len(top) < max_candidates:
-        remaining = [c for c in scored if id(c) not in used]
-        remaining.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
-        for item in remaining:
-            top.append(item)
-            if len(top) >= max_candidates:
-                break
-
-    # Re-sort the final selection by score for the LLM filter.
-    top.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    top = _select_diverse_candidates(scored, max_candidates, cfg)
 
     if not top:
         log.warning("no candidates above min_score=%.1f; nothing to do", min_score)

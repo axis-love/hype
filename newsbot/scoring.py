@@ -20,7 +20,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from newsbot.config import TOPIC_KEYWORDS
+from newsbot.config import TOPIC_KEYWORDS, _SOURCE_ALIASES
 
 
 def recency_decay(published_at: Any, *, lookback_hours: float) -> float:
@@ -96,6 +96,8 @@ def hype_score(item: dict[str, Any], config: dict[str, Any]) -> float:
     topic_boost: dict[str, int] = config.get("topic_boost") or {}
 
     src = str(item.get("source") or "").strip()
+    # Normalize source ID through alias map so "hn" matches "hackernews" weights.
+    src = _SOURCE_ALIASES.get(src, src)
     weight = float(source_weights.get(src, 1.0))
 
     # Official-RSS override: if the candidate carries a per-feed weight
