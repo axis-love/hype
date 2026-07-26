@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest tests/ -q
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t newsbot-ci .
+
+      - name: Verify imports
+        run: |
+          docker run --rm --entrypoint python newsbot-ci -c "
+          import newsbot.main
+          import newsbot.config
+          import newsbot.db
+          import newsbot.scoring
+          import newsbot.dedupe
+          import newsbot.summarizer
+          import newsbot.telegram_poster
+          import newsbot.bot_commands
+          import newsbot.jobs
+          import lm_client
+          import core.log_sanitizer
+          print('All imports OK')
+          "
