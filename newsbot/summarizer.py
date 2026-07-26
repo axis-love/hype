@@ -33,15 +33,19 @@ FILTER_SYSTEM = (
     "actively discussed. For kept items, assign a category (e.g. 'AI / Coding', 'LLM', 'Game Dev', "
     "'VR/AR', 'Robotics', 'Research', 'Tools'), an importance score from 1 to 10, a "
     "one-line reason, and a one-line short_summary. "
-    "Return STRICT JSON: {\"items\":[{\"keep\":true,\"title\":...,\"url\":...,"
+    "Return STRICT JSON: {\"items\":[{\"id\":\"c001\",\"keep\":true,\"title\":...,"
     "\"category\":...,\"importance\":8,\"reason\":...,\"short_summary\":...}]}. "
+    "Each item MUST include the 'id' field exactly as given in the input. "
+    "Do NOT include a 'url' field — URLs are managed by the application. "
     "Include every input item in the response, with keep=false for dropped ones."
 )
 
 STYLE_SYSTEM = (
     "You write individual posts for a Telegram tech-news channel. "
     "You receive {n} selected news items. Write one post per item. "
-    "Return STRICT JSON: {{\"posts\":[{{\"title\":\"...\",\"body\":\"...\"}}]}}. "
+    "Return STRICT JSON: {{\"posts\":[{{\"id\":\"c001\",\"title\":\"...\",\"body\":\"...\"}}]}}. "
+    "Each post MUST include the 'id' field exactly as given in the input. "
+    "Do NOT include a 'url' field — URLs are managed by the application. "
     "The title is a short headline. The body is 2-4 sentences in Telegram Markdown. "
     "Use the Published date to accurately describe timing — do not assume an item "
     "is new or 'just released' unless the date is recent. Do not use phrases like "
@@ -50,9 +54,24 @@ STYLE_SYSTEM = (
 )
 
 
-def _format_candidate(index: int, item: dict[str, Any]) -> str:
+def _assign_candidate_ids(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Assign opaque application-generated IDs to each candidate.
+
+    Returns a mapping from id string (e.g. 'c001') to the original item dict.
+    Also mutates each item to set its 'candidate_id' field.
+    """
+    id_map: dict[str, dict[str, Any]] = {}
+    for i, item in enumerate(items, start=1):
+        cid = f"c{i:03d}"
+        item["candidate_id"] = cid
+        id_map[cid] = item
+    return id_map
+
+
+def _format_candidate(item: dict[str, Any]) -> str:
     """Render one candidate for the filter prompt."""
-    parts = [f"{index}. [{item.get('source_name','?')}] {item.get('title','')}"]
+    cid = item.get("candidate_id", "c000")
+    parts = [f"[{cid}] [{item.get('source_name','?')}] {item.get('title','')}"]
     if item.get("published_at"):
         parts.append(f"   Published: {item['published_at']}")
     if item.get("url"):
@@ -83,7 +102,10 @@ async def llm_filter(
     if not items:
         return []
 
-    numbered = "\n".join(_format_candidate(i, item) for i, item in enumerate(items, start=1))
+    # Assign opaque IDs to each candidate for binding LLM output.
+    id_map = _assign_candidate_ids(items)
+
+    numbered = "\n".join(_format_candidate(item) for item in items)
     messages = [
         {"role": "system", "content": FILTER_SYSTEM},
         {"role": "user", "content": f"Candidates:\n{numbered}"},
@@ -97,7 +119,7 @@ async def llm_filter(
         chat_template_kwargs={"enable_thinking": False},
     )
 
-    # Reasoning models can emit 6 blocks before the JSON.
+    # Reasoning models can emit  blocks before the JSON.
     cleaned = strip_think(raw_text)
     if not cleaned:
         log.warning("LLM filter returned empty visible output")
@@ -114,30 +136,33 @@ async def llm_filter(
         log.warning("LLM filter JSON has no 'items' list")
         return []
 
-    # Build a title -> original-candidate index so we can carry engagement
-    # signals into the filter output (the LLM only echoes title/url).
-    by_title: dict[str, dict[str, Any]] = {}
-    for item in items:
-        key = str(item.get("title") or "").strip().lower()
-        if key:
-            by_title.setdefault(key, item)
-
+    # Match LLM results to original candidates by opaque ID.
+    # Never accept URLs from LLM output — always use trusted application data.
+    seen_ids: set[str] = set()
     kept: list[dict[str, Any]] = []
     for entry in kept_raw:
         if not isinstance(entry, dict):
             continue
         if not entry.get("keep"):
             continue
-        title = str(entry.get("title") or "").strip()
-        original = by_title.get(title.lower())
-        merged = dict(original) if original else {}
-        # Overlay the LLM's annotations.
+        cid = str(entry.get("id") or "").strip()
+        if not cid or cid not in id_map:
+            log.warning("LLM filter returned unknown or missing id: %r — skipping", cid)
+            continue
+        if cid in seen_ids:
+            log.warning("LLM filter returned duplicate id: %r — skipping", cid)
+            continue
+        seen_ids.add(cid)
+
+        original = id_map[cid]
+        merged = dict(original)
+        # Overlay LLM annotations — but NEVER the URL.
         merged["category"] = entry.get("category") or merged.get("category")
         merged["importance"] = entry.get("importance")
         merged["reason"] = entry.get("reason")
         merged["short_summary"] = entry.get("short_summary")
-        merged["title"] = title or merged.get("title")
-        merged["url"] = entry.get("url") or merged.get("url")
+        merged["title"] = str(entry.get("title") or "").strip() or merged.get("title")
+        # URL is always from trusted application data, never from LLM output.
         kept.append(merged)
 
     log.info("LLM filter: %d in, %d kept", len(items), len(kept))
@@ -204,6 +229,11 @@ async def llm_style_posts(
     if not items:
         return []
 
+    # Assign IDs to items for binding LLM output (if not already assigned).
+    if not any("candidate_id" in item for item in items):
+        _assign_candidate_ids(items)
+    id_map = {item["candidate_id"]: item for item in items}
+
     def signal_line(item: dict[str, Any]) -> str:
         bits = []
         if item.get("stars"):
@@ -216,13 +246,14 @@ async def llm_style_posts(
             bits.append(f"cross-posted on {item.get('crosspost_count')} sources")
         return ", ".join(bits) if bits else "n/a"
 
-    def item_block(index: int, item: dict[str, Any]) -> str:
+    def item_block(item: dict[str, Any]) -> str:
+        cid = item.get("candidate_id", "c000")
         title = item.get("title") or "(untitled)"
         url = item.get("url") or ""
         summary = item.get("short_summary") or item.get("snippet") or ""
         reason = item.get("reason") or ""
         published = item.get("published_at") or ""
-        lines = [f"{index}. Title: {title}"]
+        lines = [f"[{cid}] Title: {title}"]
         if published:
             lines.append(f"   Published: {published}")
         if summary:
@@ -238,7 +269,7 @@ async def llm_style_posts(
         style_prompt + "\n\n"
         + STYLE_SYSTEM.replace("{n}", str(len(items)))
     )
-    user_body = "\n\n".join(item_block(i, item) for i, item in enumerate(items, start=1))
+    user_body = "\n\n".join(item_block(item) for item in items)
 
     messages = [
         {"role": "system", "content": system_content},
@@ -268,24 +299,34 @@ async def llm_style_posts(
         log.warning("LLM styler JSON has no 'posts' list")
         return []
 
-    # Merge styled posts with original item data (engagement signals, url, category).
-    # Match by index: the styler receives items in order and writes posts in order.
-    # Title-based matching fails because the LLM rewrites headlines.
+    # Merge styled posts with original item data by candidate ID.
+    # Never accept URLs from LLM output — always use trusted application data.
+    # This prevents URL transfer when the model omits, reorders, or duplicates posts.
+    seen_ids: set[str] = set()
     result: list[dict[str, Any]] = []
-    for idx, entry in enumerate(posts_raw):
+    for entry in posts_raw:
         if not isinstance(entry, dict):
             continue
-        title = str(entry.get("title") or "").strip()
         body = str(entry.get("body") or "").strip()
         if not body:
             continue
-        original = items[idx] if idx < len(items) else {}
+        cid = str(entry.get("id") or "").strip()
+        if not cid or cid not in id_map:
+            log.warning("LLM styler returned unknown or missing id: %r — skipping", cid)
+            continue
+        if cid in seen_ids:
+            log.warning("LLM styler returned duplicate id: %r — skipping", cid)
+            continue
+        seen_ids.add(cid)
+
+        original = id_map[cid]
+        title = str(entry.get("title") or "").strip()
         result.append({
             "title": title or original.get("title", ""),
             "body": body,
             "category": original.get("category", ""),
             "importance": original.get("importance"),
-            "url": original.get("url", ""),
+            "url": original.get("url", ""),  # Always from trusted data
         })
 
     log.info("LLM styler: %d items in, %d posts out", len(items), len(result))
