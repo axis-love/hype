@@ -16,7 +16,7 @@ GENERATION (every 8h):
     → score by hype (upvotes, comments, stars, recency, topic, crossposts)
     → LLM Pass A: filter garbage, classify, importance, one-line summary (JSON)
     → LLM Pass B: style individual posts (JSON: title + body per item)
-    → store 8 posts in pending_posts table
+    → store 8 posts in pending_posts table (atomic replacement)
     → mark items seen
 
 POSTING (every 1h):
@@ -51,14 +51,23 @@ user can issue commands.
 |---|---|
 | `/setstyle <text>` | Update the style prompt for Pass B (post writing) |
 | `/style` | Show the current style prompt |
-| `/run` | Trigger a generation cycle immediately |
+| `/digest` | Trigger a generation cycle immediately (collect → filter → style → queue) |
+| `/post` | Post the next pending post to the channel immediately |
 | `/status` | Show pending posts count + schedule info |
 | `/help` | List commands |
 
 ## Cron
 
+For scheduled (long-lived) mode:
+
 ```cron
 0 9,18 * * * cd /opt/newsbot && python -m newsbot.main
+```
+
+For one-shot mode:
+
+```cron
+0 9 * * * cd /opt/newsbot && python -m newsbot.main --once
 ```
 
 ## Environment
@@ -67,7 +76,7 @@ user can issue commands.
 |---|---|
 | `BOT_TOKEN` | Telegram bot token for posting |
 | `NEWS_CHANNEL_ID` | `@channel_username` or `-100…` chat id |
-| `LM_BASE` | OpenAI-compatible endpoint base (no `/v1` suffix) |
+| `LM_BASE` | OpenAI-compatible endpoint base including `/v1` (e.g. `https://host/v1`) |
 | `LM_MODEL` | LLM model name (digest writer) |
 | `LM_FILTER_MODEL` | LLM model name (filter pass; defaults to `LM_MODEL`) |
 | `LM_API_KEY` | Bearer token (optional) |
@@ -75,7 +84,7 @@ user can issue commands.
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
-| `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8) |
+| `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8; 0 = one-shot) |
 | `NEWS_POST_INTERVAL_MINUTES` | Minutes between individual post deliveries (default 60) |
 | `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
@@ -94,25 +103,26 @@ VALUES ('news', 'max_final_news', '8', datetime('now'));
 
 Recognized keys: `sources`, `source_weights`, `topic_boost`,
 `lookback_hours`, `max_candidates`, `max_final_news`, `min_score`,
-`item_prune_hours`, `llm_temperature`, `llm_max_tokens_filter`,
-`llm_max_tokens_digest`, `style_prompt`.
+`source_quota`, `item_prune_hours`, `llm_temperature`,
+`llm_max_tokens_filter`, `llm_max_tokens_digest`, `style_prompt`.
 
 ## Layout
 
 ```text
 newsbot/
   main.py              # split generation + posting scheduler + bot command handler
-  config.py            # load_config + defaults (incl. style_prompt)
-  db.py                # NewsStore (news_items, seen, news_digests, pending_posts)
+  config.py            # load_config + defaults + validation (incl. style_prompt)
+  db.py                # NewsStore (pending_posts, seen, migrations, retention)
   scoring.py           # hype_score (engagement × recency × weight + topics + crosspost)
   dedupe.py            # canonical URL + fuzzy title + GitHub repo + merge
   summarizer.py        # two-pass: llm_filter (JSON) + llm_style_posts (JSON per-item)
-  telegram_poster.py   # httpx Bot API sendMessage, 429 retry, 4096 split
-  bot_commands.py      # long-polling command handler (/setstyle, /run, /status, /help)
+  telegram_poster.py   # httpx Bot API sendMessage, 429 retry, tag-safe 4096 split
+  bot_commands.py      # long-polling command handler (/setstyle, /digest, /post, /status)
+  jobs.py              # JobCoordinator (serializes generation + posting via asyncio locks)
   collectors/
     hackernews.py reddit.py github.py rss.py producthunt.py huggingface_papers.py
-lm_client.py           # OpenAI-compatible HTTP client
-core/                  # settings_store, text_utils, logging_config
+lm_client.py           # OpenAI-compatible HTTP client with bounded retries
+core/                  # settings_store, text_utils, logging_config, log_sanitizer
 ```
 
 ## Tests

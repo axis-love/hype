@@ -95,6 +95,12 @@ async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort:
         if _is_suspicious(repo):
             penalty *= 0.2
 
+        # Use created_at as the publication date — when the repo was first created.
+        # Using pushed_at would make old repos with recent maintenance pushes
+        # appear as freshly published articles.
+        published = to_iso_utc(repo.get("created_at"))
+        pushed = to_iso_utc(repo.get("pushed_at"))
+
         items.append(
             new_candidate(
                 title=full_name,
@@ -102,12 +108,12 @@ async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort:
                 source="github",
                 source_name="GitHub Trending",
                 snippet=truncate(description),
-                published_at=to_iso_utc(repo.get("pushed_at")),
+                published_at=published,
                 stars=int(repo.get("stargazers_count") or 0) or None,
                 forks=int(repo.get("forks_count") or 0) or None,
                 category=None,
                 raw_text=description or None,
-                raw_json=repo,
+                raw_json={**repo, "_last_activity": pushed},
             )
         )
         # Stash the penalty multiplier on the candidate so scoring can apply it.
