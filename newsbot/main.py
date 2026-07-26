@@ -340,7 +340,12 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
         )
 
     async def generation_loop() -> None:
-        """Generation timer: runs the full pipeline on schedule."""
+        """Generation timer: runs the full pipeline on schedule.
+
+        last_gen_utc advances only after successful generation.
+        Failed jobs retain the previous timestamp so the scheduler
+        retries on the next tick (bounded by the 60s sleep).
+        """
         log.info("generation timer started: interval=%.1fh", gen_interval_hours)
         while True:
             last_gen_str = settings.get("scheduler", "last_gen_utc", default="") or ""
@@ -361,20 +366,34 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                     log.warning("invalid last_gen_utc: %s — generating now", last_gen_str)
 
             log.info("generation cycle starting at %s", now.isoformat())
+            gen_failed = False
             try:
-                await coordinator.run_generation(
+                ran = await coordinator.run_generation(
                     lambda: _run_generation(store, settings)
                 )
+                if not ran:
+                    log.info("generation skipped — already in progress")
             except Exception as exc:
                 log.error("generation cycle failed: %s", exc, exc_info=True)
+                gen_failed = True
 
-            now = datetime.now(timezone.utc)
-            settings.set("scheduler", "last_gen_utc", now.isoformat())
-            log.info("generation cycle complete, next in %.1fh", gen_interval_hours)
+            # Only advance last_gen_utc on success.
+            if not gen_failed:
+                now = datetime.now(timezone.utc)
+                settings.set("scheduler", "last_gen_utc", now.isoformat())
+                log.info("generation cycle complete, next in %.1fh", gen_interval_hours)
+            else:
+                log.warning("generation failed — will retry on next tick (last_gen_utc unchanged)")
+
             await asyncio.sleep(60)
 
     async def posting_loop() -> None:
-        """Posting timer: posts one pending post on schedule."""
+        """Posting timer: posts one pending post on schedule.
+
+        last_post_utc advances only after a successful post (or when
+        there are no pending posts). Failed posts retain the previous
+        timestamp so the scheduler retries on the next tick.
+        """
         log.info("posting timer started: interval=%.0fmin", post_interval_minutes)
         while True:
             last_post_str = settings.get("scheduler", "last_post_utc", default="") or ""
@@ -393,13 +412,26 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 except (ValueError, TypeError):
                     pass  # run now
 
+            post_failed = False
             try:
-                await coordinator.run_posting()
+                result = await coordinator.run_posting()
+                if result == 2:
+                    log.info("posting skipped — already in progress")
+                # result 0 = success or no-op (no pending posts)
+                # result 1 = failure
+                if result == 1:
+                    post_failed = True
             except Exception as exc:
                 log.error("posting cycle failed: %s", exc, exc_info=True)
+                post_failed = True
 
-            now = datetime.now(timezone.utc)
-            settings.set("scheduler", "last_post_utc", now.isoformat())
+            # Only advance last_post_utc on success (or no pending posts).
+            if not post_failed:
+                now = datetime.now(timezone.utc)
+                settings.set("scheduler", "last_post_utc", now.isoformat())
+            else:
+                log.warning("posting failed — will retry on next tick (last_post_utc unchanged)")
+
             await asyncio.sleep(30)
 
     tasks = [asyncio.create_task(generation_loop()), asyncio.create_task(posting_loop())]
