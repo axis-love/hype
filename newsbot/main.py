@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import logging
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,20 +140,22 @@ def filter_seen(items: list[dict[str, Any]], store: NewsStore) -> list[dict[str,
 async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     """Generation cycle: collect → filter → score → LLM filter → LLM style → store posts.
 
+    The queue replacement is transactional: existing unposted items are not
+    deleted until the new batch is fully built and ready. If any step fails
+    (collection, LLM, insertion), the prior queue remains intact.
+
     Returns 0 on success, 1 on failure.
     """
     cfg = load_config(settings)
 
-    # Clear any unposted items from the previous batch.
-    cleared = store.clear_unposted()
-    if cleared:
-        log.info("cleared %d unposted items from previous batch", cleared)
+    # NOTE: Do NOT clear unposted items here. The old queue stays intact
+    # until the new batch is ready (transactional replacement at the end).
 
     # 1. Collect from every enabled source concurrently.
     log.info("collecting from %d source types", len(cfg["sources"]))
     candidates = await collect_all(cfg)
     if not candidates:
-        log.warning("no candidates collected; nothing to do")
+        log.warning("no candidates collected; keeping existing queue")
         return 0
     log.info("collected %d raw candidates", len(candidates))
 
@@ -249,16 +252,18 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         max_tokens=cfg["llm_max_tokens_digest"],
     )
     if not posts:
-        log.warning("LLM styler produced zero posts; nothing to queue")
+        log.warning("LLM styler produced zero posts; keeping existing queue")
         return 0
 
-    # 9. Store posts in pending_posts queue.
-    for post in posts:
-        store.add_pending_post(post)
-    log.info("queued %d posts for hourly delivery", len(posts))
+    # 9. Atomically replace unposted queue with new posts and mark items as seen.
+    #    If insertion fails, the old queue remains intact (rollback).
+    try:
+        inserted, seen = store.replace_unposted_batch(posts, final)
+    except sqlite3.Error as exc:
+        log.error("transactional queue replacement failed: %s — keeping existing queue", exc)
+        return 1
 
-    # 10. Mark source items as seen.
-    store.mark_seen(final)
+    log.info("queued %d posts for delivery (marked %d items as seen)", inserted, seen)
     store.prune_old_items(cfg["item_prune_hours"])
 
     return 0
