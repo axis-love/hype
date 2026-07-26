@@ -13,3 +13,37 @@ venv
 data
 deploy/docker/state
 tests
+.pytest_cache
+newsbot.egg-info
+
+# Environment files — never copy secrets into image layers
+.env
+.env.*
+!.env.example
+deploy/docker/.env
+deploy/docker/.env.*
+
+# SQLite databases — runtime state, not build artifacts
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+
+# Models and binaries — huge, never needed in image
+ollama_models/
+*.gguf
+*.bin
+*.safetensors
+models/
+
+# OS / IDE / temp
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+*.bak
+*.old
+node_modules/
+dist/
+build/
+logs/
