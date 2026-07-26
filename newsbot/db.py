@@ -194,95 +194,10 @@ class NewsStore:
         self.close()
 
     # --- news_items -----------------------------------------------------
-
-    def insert_items(self, items: list[dict[str, Any]]) -> int:
-        """Insert candidates into news_items. Returns the count inserted.
-
-        Dedups on (source, source_name, title, url) — re-fetched items
-        update their engagement fields rather than duplicating.
-        """
-        if not items:
-            return 0
-
-        fetched_at = _utc_now_iso()
-        persisted = 0
-        for item in items:
-            source = str(item.get("source") or "").strip()
-            source_name = str(item.get("source_name") or "").strip()
-            title = str(item.get("title") or "").strip()
-            if not source or not source_name or not title:
-                continue
-
-            url = str(item.get("url") or "").strip() or None
-            raw_json = json.dumps(item.get("raw_json") or None, ensure_ascii=False, default=str)
-
-            existing = self._conn.execute(
-                """
-                SELECT id FROM news_items
-                WHERE source=? AND source_name=? AND title=? AND COALESCE(url,'')=?
-                LIMIT 1
-                """,
-                (source, source_name, title, url or ""),
-            ).fetchone()
-
-            if existing is None:
-                self._conn.execute(
-                    """
-                    INSERT INTO news_items(
-                      source, source_name, title, url, snippet, published_at, fetched_at,
-                      upvotes, comments, stars, forks, reposts, upvote_ratio, score, category, raw_json
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        source, source_name, title, url,
-                        str(item.get("snippet") or "").strip() or None,
-                        item.get("published_at"),
-                        fetched_at,
-                        item.get("upvotes"),
-                        item.get("comments"),
-                        item.get("stars"),
-                        item.get("forks"),
-                        item.get("reposts"),
-                        item.get("upvote_ratio"),
-                        float(item.get("score") or 0.0),
-                        item.get("category"),
-                        raw_json,
-                    ),
-                )
-            else:
-                # Refresh engagement + score on re-fetch.
-                self._conn.execute(
-                    """
-                    UPDATE news_items
-                    SET snippet=COALESCE(?, snippet),
-                        published_at=COALESCE(?, published_at),
-                        fetched_at=?,
-                        upvotes=COALESCE(?, upvotes),
-                        comments=COALESCE(?, comments),
-                        stars=COALESCE(?, stars),
-                        forks=COALESCE(?, forks),
-                        upvote_ratio=COALESCE(?, upvote_ratio),
-                        score=?,
-                        raw_json=?
-                    WHERE id=?
-                    """,
-                    (
-                        str(item.get("snippet") or "").strip() or None,
-                        item.get("published_at"),
-                        fetched_at,
-                        item.get("upvotes"),
-                        item.get("comments"),
-                        item.get("stars"),
-                        item.get("forks"),
-                        item.get("upvote_ratio"),
-                        float(item.get("score") or 0.0),
-                        raw_json,
-                        existing["id"],
-                    ),
-                )
-            persisted += 1
-
-        return persisted
+    # Note: insert_items() was removed — the current pipeline does not
+    # persist candidates to news_items. prune_old_items() remains because
+    # it is called from the generation cycle and is harmless on an empty
+    # table. The table is created by migration 1 for backward compatibility.
 
     def prune_old_items(self, max_age_hours: int = 48) -> int:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, max_age_hours))).isoformat(timespec="seconds")
@@ -304,42 +219,85 @@ class NewsStore:
                 return True
         return False
 
+    def is_seen_batch(self, items: list[dict[str, Any]]) -> set[int]:
+        """Check which items are seen, returning a set of indices that ARE seen.
+
+        Uses set-based SQL instead of per-item queries: at most 2 queries
+        total for the entire batch, regardless of batch size.
+        Returns a set of indices into the input list.
+        """
+        if not items:
+            return set()
+
+        urls: list[str] = []
+        titles: list[str] = []
+        url_to_idx: dict[str, int] = {}
+        title_to_idx: dict[str, int] = {}
+
+        for i, item in enumerate(items):
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip().lower()
+            if url and url not in url_to_idx:
+                url_to_idx[url] = i
+                urls.append(url)
+            if title and title not in title_to_idx:
+                title_to_idx[title] = i
+                titles.append(title)
+
+        seen_indices: set[int] = set()
+
+        # Batch URL lookup: SELECT WHERE url IN (?,?,...).
+        if urls:
+            # SQLite parameter limit is 999; chunk if needed.
+            for chunk_start in range(0, len(urls), 500):
+                chunk = urls[chunk_start:chunk_start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT url FROM seen WHERE url IN ({placeholders})", chunk
+                ).fetchall()
+                for row in rows:
+                    seen_indices.add(url_to_idx[row["url"]])
+
+        # Batch title lookup.
+        if titles:
+            for chunk_start in range(0, len(titles), 500):
+                chunk = titles[chunk_start:chunk_start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT title FROM seen WHERE title IN ({placeholders})", chunk
+                ).fetchall()
+                for row in rows:
+                    seen_indices.add(title_to_idx[row["title"]])
+
+        return seen_indices
+
     def mark_seen(self, items: list[dict[str, Any]]) -> int:
+        """Mark items as seen using batched executemany."""
         now = _utc_now_iso()
-        count = 0
+        rows: list[tuple] = []
         for item in items:
             url = str(item.get("url") or "").strip()
             title = str(item.get("title") or "").strip().lower()
             if not url and not title:
                 continue
-            try:
-                self._conn.execute(
-                    """
-                    INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)
-                    """,
-                    (url or None, title or None, now),
-                )
-                count += 1
-            except sqlite3.Error as exc:
-                log.warning("mark_seen failed url=%s: %s", url, exc)
-        return count
+            rows.append((url or None, title or None, now))
+        if not rows:
+            return 0
+        # Use executemany for batched insertion (much faster than per-row).
+        # INSERT OR IGNORE handles duplicates silently.
+        try:
+            cur = self._conn.executemany(
+                "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
+                rows,
+            )
+            return len(rows)
+        except sqlite3.Error as exc:
+            log.warning("mark_seen batch failed: %s", exc)
+            return 0
 
     # --- news_digests ---------------------------------------------------
-
-    def insert_digest(self, text: str, model: Optional[str], item_count: Optional[int]) -> Optional[int]:
-        try:
-            cur = self._conn.execute(
-                """
-                INSERT INTO news_digests(created_at, digest_text, model_used, item_count)
-                VALUES(?,?,?,?)
-                """,
-                (_utc_now_iso(), str(text or "").strip(), str(model or "").strip() or None,
-                 int(item_count) if item_count is not None else None),
-            )
-        except sqlite3.Error as exc:
-            log.warning("insert_digest failed: %s", exc)
-            return None
-        return int(cur.lastrowid)
+    # Note: insert_digest() was removed — the current pipeline does not
+    # persist digests to news_digests. prune_digests() remains for cleanup.
 
     # --- pending_posts (individual posts waiting to be sent) -----------
 
