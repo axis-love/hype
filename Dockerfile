@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.15-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -8,10 +8,10 @@ WORKDIR /app
 
 RUN useradd --create-home --shell /bin/bash --uid 10001 appuser
 
-COPY requirements.txt pyproject.toml /app/
+COPY pyproject.toml /app/
 
-RUN pip install --upgrade pip \
-    && pip install -r requirements.txt
+RUN pip install --no-cache-dir -e ".[dev]" \
+    && pip freeze --all > /app/constraints.txt
 
 COPY . /app
 

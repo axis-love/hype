@@ -131,3 +131,23 @@ core/                  # settings_store, text_utils, logging_config, log_sanitiz
 pip install -e ".[dev]"
 pytest
 ```
+
+## Reproducible Builds
+
+- **Base image**: Pinned to `python:3.11.15-slim` in `Dockerfile`.
+  Update by changing the version and verifying CI passes.
+- **Dependencies**: Declared in `pyproject.toml` with lower bounds.
+  The Docker build runs `pip freeze --all > constraints.txt` to capture
+  exact resolved versions. For fully reproducible builds, install from
+  `constraints.txt` instead of resolving fresh.
+- **CI**: GitHub Actions (`.github/workflows/ci.yml`) runs the test suite
+  and verifies the Docker image builds and all modules import on every PR
+  and push to main.
+
+## Docker
+
+```bash
+cd deploy/docker
+cp env.example .env   # fill in secrets
+docker compose up -d
+```
