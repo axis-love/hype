@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from core.log_sanitizer import redact_exception, redact_text, redact_url
+
 log = logging.getLogger(__name__)
 
 BOT_API_BASE = "https://api.telegram.org"
@@ -65,6 +67,7 @@ async def post_digest(
     if not chat_id:
         raise ValueError("NEWS_CHANNEL_ID is not set")
 
+    # The URL contains the bot token — never log it directly.
     url = f"{BOT_API_BASE}/bot{bot_token}/sendMessage"
     chunks = _split_for_telegram(text)
     results: list[dict[str, Any]] = []
@@ -72,7 +75,11 @@ async def post_digest(
     async with httpx.AsyncClient(timeout=30.0) as client:
         for chunk in chunks:
             payload = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}
-            r = await client.post(url, json=payload)
+            try:
+                r = await client.post(url, json=payload)
+            except httpx.HTTPError as exc:
+                log.error("Telegram request failed: %s", redact_exception(exc))
+                raise
 
             if r.status_code == 429:
                 try:
@@ -81,15 +88,26 @@ async def post_digest(
                     retry_after = 1.0
                 log.warning("Telegram 429: sleeping %.1fs before retry", retry_after)
                 await asyncio.sleep(retry_after)
-                r = await client.post(url, json=payload)
+                try:
+                    r = await client.post(url, json=payload)
+                except httpx.HTTPError as exc:
+                    log.error("Telegram 429 retry failed: %s", redact_exception(exc))
+                    raise
 
             if r.status_code >= 400:
                 # HTML parse errors are common; retry the chunk as plain text.
                 if parse_mode == "HTML":
                     log.warning("Telegram send failed (status=%s); retrying chunk as plain text", r.status_code)
-                    r = await client.post(url, json={**payload, "parse_mode": ""})
+                    try:
+                        r = await client.post(url, json={**payload, "parse_mode": ""})
+                    except httpx.HTTPError as exc:
+                        log.error("Telegram plain-text retry failed: %s", redact_exception(exc))
+                        raise
                 if r.status_code >= 400:
-                    log.error("Telegram send failed permanently: %s %s", r.status_code, r.text[:300])
+                    # Log status code and a redacted snippet of the response.
+                    # Never log the full URL (it contains the bot token).
+                    safe_body = redact_text(r.text[:300], max_length=200)
+                    log.error("Telegram send failed permanently: status=%s body=%s", r.status_code, safe_body)
                     r.raise_for_status()
 
             results.append(r.json())

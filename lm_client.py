@@ -108,16 +108,11 @@ class LMClient:
                 "service unavailable",
             )
             if any(marker in body_lower for marker in transient_markers):
-                body_tail = response_body[-500:] if response_body else ""
-                msg = "LLM provider temporarily unavailable (HTTP 400)"
-                if body_tail:
-                    msg += f": {body_tail}"
-                return True, LLMTransientError, msg
-            body_tail = response_body[-500:] if response_body else ""
-            msg = "LLM request failed with HTTP 400"
-            if body_tail:
-                msg += f": {body_tail}"
-            return False, LLMPermanentError, msg
+                # Do NOT include response body — providers may echo prompts or article text.
+                return True, LLMTransientError, "LLM provider temporarily unavailable (HTTP 400)"
+            # Do NOT include response body — providers may echo request fields including
+            # article text, prompts, or other sensitive content.
+            return False, LLMPermanentError, "LLM request failed with HTTP 400"
 
         return False, LLMPermanentError, f"LLM request failed with HTTP {status_code}"
 
@@ -131,8 +126,8 @@ class LMClient:
         }
 
         url = f"{self.base_url}{self.endpoint_path}"
-        # Record *exact* request that will be sent (without auth headers).
-        self.last_request = {"url": url, **payload}
+        # Record request for debugging — URL only (no auth headers, no body).
+        self.last_request = {"url": url, "model": self.model}
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             last_error: Optional[LLMTransientError] = None
@@ -161,10 +156,10 @@ class LMClient:
                         content if content is not None else "",
                         data["choices"][0].get("finish_reason", "")
                     )
-                except httpx.TimeoutException as exc:
-                    last_error = LLMTransientError(f"LLM request timed out: {exc}")
-                except httpx.TransportError as exc:
-                    last_error = LLMTransientError(f"LLM transport error: {exc}")
+                except httpx.TimeoutException:
+                    last_error = LLMTransientError(f"LLM request timed out after {self.timeout}s")
+                except httpx.TransportError:
+                    last_error = LLMTransientError("LLM transport error (connection failed)")
                 except httpx.HTTPStatusError as exc:
                     response = exc.response
                     response_body = ""
