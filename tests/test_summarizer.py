@@ -1,11 +1,11 @@
-"""Tests for newsbot/summarizer.py — Pass A JSON parse, non-empty guard, diversity."""
+"""Tests for newsbot/summarizer.py — Pass A JSON parse, non-empty guard, diversity, ID binding."""
 
 import json
 from typing import Any
 
 import pytest
 
-from newsbot.summarizer import llm_filter, llm_write_digest, select_diverse_top_items
+from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
 
 
 class _FakeLM:
@@ -41,11 +41,12 @@ def _candidate(title, url, **extra):
 
 @pytest.mark.asyncio
 async def test_llm_filter_parses_valid_json_and_keeps_marked_items():
+    """Filter keeps items with keep=True, matches by candidate ID."""
     payload = {
         "items": [
-            {"keep": True, "title": "Good news", "url": "https://a.com",
+            {"id": "c001", "keep": True, "title": "Good news",
              "category": "AI", "importance": 8, "reason": "r", "short_summary": "s"},
-            {"keep": False, "title": "Spam", "url": "https://b.com",
+            {"id": "c002", "keep": False, "title": "Spam",
              "category": "AI", "importance": 1, "reason": "r", "short_summary": "s"},
         ]
     }
@@ -75,7 +76,7 @@ async def test_llm_filter_invalid_json_returns_empty():
 @pytest.mark.asyncio
 async def test_llm_filter_strips_think_blocks():
     raw = "<think>reasoning here</think>\n" + json.dumps({
-        "items": [{"keep": True, "title": "T", "url": "https://t.com",
+        "items": [{"id": "c001", "keep": True, "title": "T",
                    "category": "AI", "importance": 7, "reason": "r", "short_summary": "s"}]
     })
     lm = _FakeLM(raw)
@@ -85,25 +86,39 @@ async def test_llm_filter_strips_think_blocks():
 
 
 @pytest.mark.asyncio
-async def test_llm_write_digest_returns_nonempty_markdown():
-    items = [
-        {"title": "Item one", "url": "https://one.com", "short_summary": "Summary one",
-         "reason": "Reason one", "stars": 2400, "upvotes": 530, "comments": 190,
-         "crosspost_count": 1},
-        {"title": "Item two", "url": "https://two.com", "short_summary": "Summary two",
-         "reason": "Reason two", "stars": None, "upvotes": 200, "comments": 50,
-         "crosspost_count": 2},
-    ]
-    lm = _FakeLM("🔥 Tech / AI Digest\n\n1. Item one\nWhat happened: ...\n")
-    out = await llm_write_digest(items, lm)
-    assert out  # non-empty
+async def test_llm_filter_preserves_original_url():
+    """URL must come from trusted app data, not LLM output."""
+    payload = {
+        "items": [
+            {"id": "c001", "keep": True, "title": "T", "url": "https://evil.com/hacked",
+             "category": "AI", "importance": 7, "reason": "r", "short_summary": "s"},
+        ]
+    }
+    lm = _FakeLM(json.dumps(payload))
+    items = [_candidate("T", "https://trusted.com/real")]
+    kept = await llm_filter(items, lm)
+    assert len(kept) == 1
+    assert kept[0]["url"] == "https://trusted.com/real"
 
 
 @pytest.mark.asyncio
-async def test_llm_write_digest_empty_output_returns_empty():
-    lm = _FakeLM("")
-    out = await llm_write_digest([{"title": "x", "url": "u"}], lm)
-    assert out == ""
+async def test_llm_style_posts_basic():
+    """Style posts match by candidate ID, URLs from trusted data."""
+    items = [
+        _candidate("Story A", "https://a.com", candidate_id="c001"),
+        _candidate("Story B", "https://b.com", candidate_id="c002"),
+    ]
+    payload = {
+        "posts": [
+            {"id": "c001", "title": "A Post", "body": "Body A"},
+            {"id": "c002", "title": "B Post", "body": "Body B"},
+        ]
+    }
+    lm = _FakeLM(json.dumps(payload))
+    posts = await llm_style_posts(items, lm)
+    assert len(posts) == 2
+    assert posts[0]["url"] == "https://a.com"
+    assert posts[1]["url"] == "https://b.com"
 
 
 def test_select_diverse_top_items_caps_per_category():

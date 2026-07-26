@@ -1,7 +1,12 @@
-"""Tests for the HN and Reddit collectors — engagement signal capture."""
+"""Tests for the HN and Reddit collectors — engagement signal capture.
+
+HN uses httpx (Algolia API). Reddit uses feedparser (RSS feeds).
+Tests mock the current network and parsing boundaries.
+"""
 
 import json
 from unittest.mock import AsyncMock, patch, MagicMock
+from typing import Any
 
 import pytest
 
@@ -64,55 +69,98 @@ async def test_hn_collect_falls_back_to_hn_url_when_url_missing():
     assert items[0]["url"] == "https://news.ycombinator.com/item?id=42"
 
 
-# --- Reddit -------------------------------------------------------------
+# --- Reddit (RSS-based) -------------------------------------------------
 
-def _reddit_child(title="Tool X", score=2100, num_comments=340, upvote_ratio=0.95,
-                  permalink="/r/LocalLLaMA/comments/abc/tool_x/", created_utc=1751640000.0):
-    return {"data": {"title": title, "score": score, "num_comments": num_comments,
-                     "upvote_ratio": upvote_ratio, "permalink": permalink,
-                     "created_utc": created_utc, "selftext": "body", "stickied": False}}
+def _reddit_rss_entry(title="Tool X — 2.1k votes, 340 comments",
+                      link="https://www.reddit.com/r/LocalLLaMA/comments/abc/tool_x/",
+                      published="2026-07-04T10:00:00+00:00",
+                      summary="<p>Some body text</p>"):
+    """Create a fake feedparser entry as returned by Reddit RSS."""
+    return {
+        "title": title,
+        "link": link,
+        "published": published,
+        "summary": summary,
+    }
+
+
+def _make_parsed_feed(entries: list[dict[str, Any]]) -> MagicMock:
+    """Create a fake feedparser.ParseResult."""
+    feed = MagicMock()
+    feed.status = 200
+    feed.entries = entries
+    return feed
 
 
 @pytest.mark.asyncio
-async def test_reddit_collect_captures_score_comments_ratio():
-    fake_resp = MagicMock()
-    fake_resp.status_code = 200
-    fake_resp.json.return_value = {"data": {"children": [_reddit_child()]}}
-    fake_resp.raise_for_status = MagicMock()
+async def test_reddit_collect_captures_score_and_comments_from_rss():
+    """Reddit collector uses RSS; engagement is parsed from entry title."""
+    entry = _reddit_rss_entry()
+    parsed = _make_parsed_feed([entry])
 
-    fake_client = AsyncMock()
-    fake_client.get = AsyncMock(return_value=fake_resp)
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
-
-    with patch("newsbot.collectors.reddit.httpx.AsyncClient", return_value=fake_client):
-        items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
+    with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
+        mock_fp.parse = MagicMock(return_value=parsed)
+        mock_fp.__bool__ = lambda self: True  # not None
+        with patch("newsbot.collectors.reddit.asyncio.to_thread", new=AsyncMock(return_value=parsed)):
+            items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
 
     assert len(items) == 1
     assert items[0]["source"] == "reddit"
     assert items[0]["source_name"] == "r/LocalLLaMA"
-    assert items[0]["upvotes"] == 2100
+    assert items[0]["upvotes"] == 2100  # parsed from "2.1k votes"
     assert items[0]["comments"] == 340
-    assert abs(items[0]["upvote_ratio"] - 0.95) < 1e-6
-    assert items[0]["published_at"].startswith("20")  # ISO UTC from epoch
+    assert items[0]["url"] == "https://www.reddit.com/r/LocalLLaMA/comments/abc/tool_x/"
 
 
 @pytest.mark.asyncio
-async def test_reddit_collect_skips_stickied_posts():
-    stickied = _reddit_child(title="[Megathread]", score=1, num_comments=5)
-    stickied["data"]["stickied"] = True
-    fake_resp = MagicMock()
-    fake_resp.status_code = 200
-    fake_resp.json.return_value = {"data": {"children": [stickied, _reddit_child()]}}
-    fake_resp.raise_for_status = MagicMock()
+async def test_reddit_collect_handles_empty_feed():
+    """Empty RSS feed should return empty list."""
+    parsed = _make_parsed_feed([])
 
-    fake_client = AsyncMock()
-    fake_client.get = AsyncMock(return_value=fake_resp)
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
+    with patch("newsbot.collectors.reddit.asyncio.to_thread", new=AsyncMock(return_value=parsed)):
+        with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
+            mock_fp.parse = MagicMock()
+            items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
 
-    with patch("newsbot.collectors.reddit.httpx.AsyncClient", return_value=fake_client):
-        items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
+    assert items == []
+
+
+@pytest.mark.asyncio
+async def test_reddit_collect_handles_missing_engagement():
+    """Reddit RSS entry without vote/comment counts in title."""
+    entry = _reddit_rss_entry(title="Just a title without counts")
+    parsed = _make_parsed_feed([entry])
+
+    with patch("newsbot.collectors.reddit.asyncio.to_thread", new=AsyncMock(return_value=parsed)):
+        with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
+            mock_fp.parse = MagicMock()
+            items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
 
     assert len(items) == 1
-    assert items[0]["title"] == "Tool X"
+    assert items[0]["upvotes"] is None  # no count in title
+    assert items[0]["comments"] is None
+
+
+@pytest.mark.asyncio
+async def test_reddit_collect_multiple_subreddits():
+    """Multiple subreddits should all be fetched."""
+    entry1 = _reddit_rss_entry(title="Story 1 — 100 votes, 10 comments")
+    entry2 = _reddit_rss_entry(title="Story 2 — 200 votes, 20 comments",
+                               link="https://www.reddit.com/r/MachineLearning/comments/xyz/story2/")
+    parsed1 = _make_parsed_feed([entry1])
+    parsed2 = _make_parsed_feed([entry2])
+
+    call_count = 0
+    async def mock_to_thread(fn, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return parsed1 if call_count == 1 else parsed2
+
+    with patch("newsbot.collectors.reddit.asyncio.to_thread", new=mock_to_thread):
+        with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
+            mock_fp.parse = MagicMock()
+            items = await reddit.collect({"subreddits": ["LocalLLaMA", "MachineLearning"], "limit": 10})
+
+    assert len(items) == 2
+    assert items[0]["source_name"] == "r/LocalLLaMA"
+    assert items[1]["source_name"] == "r/MachineLearning"
