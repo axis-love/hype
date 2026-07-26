@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, patch, MagicMock
 
+import httpx
 import pytest
 
 from newsbot.telegram_poster import _split_for_telegram, post_digest
@@ -78,3 +79,62 @@ async def test_post_digest_raises_on_missing_token():
         await post_digest("x", bot_token="", chat_id="@c")
     with pytest.raises(ValueError):
         await post_digest("x", bot_token="t", chat_id="")
+
+
+@pytest.mark.asyncio
+async def test_post_digest_does_not_retry_on_auth_failure():
+    """401/403 should NOT be retried as plain text."""
+    auth_fail = MagicMock()
+    auth_fail.status_code = 401
+    auth_fail.text = "Unauthorized"
+    auth_fail.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+        "401", request=MagicMock(), response=auth_fail))
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(return_value=auth_fail)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            await post_digest("text", bot_token="t", chat_id="@c")
+
+    # Only one POST — no plain-text retry.
+    assert fake_client.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_post_digest_does_not_retry_on_server_error():
+    """500 should NOT be retried as plain text."""
+    server_err = MagicMock()
+    server_err.status_code = 500
+    server_err.text = "Internal Server Error"
+    server_err.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+        "500", request=MagicMock(), response=server_err))
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(return_value=server_err)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            await post_digest("text", bot_token="t", chat_id="@c")
+
+    assert fake_client.post.call_count == 1
+
+
+def test_split_does_not_break_html_tag():
+    """Splitting should not break inside an HTML tag."""
+    # Build text with a long link tag that spans past the split point.
+    before = "A" * 2950
+    tag = f'<a href="{"http://x.com/" + "b" * 100}">link</a>'
+    text = before + tag + "C" * 200
+    chunks = _split_for_telegram(text, limit=3000)
+    # Each chunk should have balanced tags (no split inside <a ...>)
+    for chunk in chunks:
+        # Count opening and closing tags
+        opens = chunk.count("<a ")
+        closes = chunk.count("</a>")
+        # Either both 0 or both 1
+        assert opens == closes, f"Unbalanced <a> tag in chunk: opens={opens}, closes={closes}"
