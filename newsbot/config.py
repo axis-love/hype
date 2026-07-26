@@ -143,7 +143,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
     # Drop sources the operator disabled (set to None or empty dict).
     sources = {k: v for k, v in sources.items() if v}
 
-    return {
+    config = {
         "sources": sources,
         "source_weights": _coerce_dict(raw.get("source_weights"), DEFAULT_SOURCE_WEIGHTS),
         "topic_boost": {**DEFAULT_TOPIC_BOOST, **_coerce_dict(raw.get("topic_boost"), {})},
@@ -158,6 +158,59 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
         "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"]),
         "style_prompt": str(raw.get("style_prompt") or DEFAULT_STYLE_PROMPT),
     }
+
+    _validate_config(config)
+    return config
+
+
+def _validate_config(config: dict[str, Any]) -> None:
+    """Validate configuration ranges and shapes. Raises ValueError on invalid config."""
+    errors: list[str] = []
+
+    # Numeric range checks.
+    if config["lookback_hours"] <= 0:
+        errors.append("lookback_hours must be > 0")
+    if config["max_candidates"] <= 0:
+        errors.append("max_candidates must be > 0")
+    if config["max_candidates"] > 100:
+        errors.append("max_candidates should be <= 100 (got %s)" % config["max_candidates"])
+    if config["max_final_news"] <= 0:
+        errors.append("max_final_news must be > 0")
+    if config["max_final_news"] > config["max_candidates"]:
+        errors.append("max_final_news (%s) cannot exceed max_candidates (%s)" % (config["max_final_news"], config["max_candidates"]))
+    if config["source_quota"] < 0:
+        errors.append("source_quota must be >= 0")
+    if config["item_prune_hours"] <= 0:
+        errors.append("item_prune_hours must be > 0")
+    if not (0.0 <= config["llm_temperature"] <= 2.0):
+        errors.append("llm_temperature must be in [0.0, 2.0]")
+    if config["llm_max_tokens_filter"] <= 0:
+        errors.append("llm_max_tokens_filter must be > 0")
+    if config["llm_max_tokens_digest"] <= 0:
+        errors.append("llm_max_tokens_digest must be > 0")
+
+    # Source weights validation.
+    for src, w in config["source_weights"].items():
+        if not isinstance(w, (int, float)):
+            errors.append(f"source_weights['{src}'] must be numeric, got {type(w).__name__}")
+        elif w <= 0:
+            errors.append(f"source_weights['{src}'] must be > 0")
+
+    # RSS feeds validation.
+    rss_config = config["sources"].get("rss")
+    if rss_config and isinstance(rss_config, dict):
+        feeds = rss_config.get("feeds")
+        if feeds and isinstance(feeds, list):
+            for i, feed in enumerate(feeds):
+                if not isinstance(feed, dict):
+                    errors.append(f"rss.feeds[{i}] must be a dict")
+                elif not feed.get("url"):
+                    errors.append(f"rss.feeds[{i}] missing 'url'")
+                elif not feed.get("name"):
+                    errors.append(f"rss.feeds[{i}] missing 'name'")
+
+    if errors:
+        raise ValueError("Configuration validation failed:\n  " + "\n  ".join(errors))
 
 
 def _coerce_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
