@@ -376,13 +376,23 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
 
     log.info("queued %d posts for delivery (marked %d items as seen)", inserted, seen)
     store.prune_old_items(cfg["item_prune_hours"])
-    # Run retention cleanup: posted posts older than 30 days, seen entries
-    # older than 14 days, digests older than 90 days. Bounded batches.
-    store.prune_posted_posts(max_age_days=30)
-    store.prune_seen(max_age_days=14)
-    store.prune_digests(max_age_days=90)
 
     return 0
+
+
+def _run_retention(store: NewsStore) -> None:
+    """Run retention cleanup: posted posts older than 30 days, seen entries
+    older than 14 days, digests older than 90 days. Bounded batches.
+
+    Called on every generation cycle outcome (success, no-progress, failure)
+    so cleanup is not skipped when generation produces no new posts.
+    """
+    try:
+        store.prune_posted_posts(max_age_days=30)
+        store.prune_seen(max_age_days=14)
+        store.prune_digests(max_age_days=90)
+    except Exception as exc:
+        log.warning("retention cleanup failed: %s", exc)
 
 
 async def _scheduled_loop(settings: SettingsStore) -> None:
@@ -512,6 +522,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             else:
                 log.warning("generation did not succeed — will retry on next tick (last_gen_utc unchanged)")
 
+            # Run retention cleanup on every cycle (success, no-progress, failure)
+            _run_retention(store)
+
             await asyncio.sleep(60)
 
     async def posting_loop() -> None:
@@ -602,12 +615,17 @@ def main() -> None:
                 lambda: _run_generation(store, settings),
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
-            if result != 0:
+            # Run retention even on no-progress or failure.
+            _run_retention(store)
+            if result != 0 and result != 3:
                 return 1
             # Drain all generated posts immediately for testing.
             return await coordinator.drain_posts()
 
-        code = asyncio.run(_once())
+        try:
+            code = asyncio.run(_once())
+        finally:
+            store.close()
         sys.exit(code)
 
     # Scheduled mode: needs BOT_TOKEN for posting. Without it, run once for testing.
@@ -621,9 +639,13 @@ def main() -> None:
                 lambda: _run_generation(store, settings),
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
+            _run_retention(store)
             return await coordinator.drain_posts()
 
-        code = asyncio.run(_dry())
+        try:
+            code = asyncio.run(_dry())
+        finally:
+            store.close()
         sys.exit(code)
 
     try:

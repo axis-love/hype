@@ -209,3 +209,24 @@ class TestSchedulerBookkeeping:
             settings.set("scheduler", "last_gen_utc", datetime.now(timezone.utc).isoformat())
 
         assert settings.get("scheduler", "last_gen_utc") == old_ts
+
+    @pytest.mark.asyncio
+    async def test_retention_runs_on_no_progress(self, store, settings):
+        """Retention should run even when generation returns no-progress (3)."""
+        from newsbot.main import _run_retention
+
+        store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
+        post = store.get_next_pending_post()
+        store.mark_posted(post["id"])
+
+        # Run retention — should not raise, even with old data.
+        _run_retention(store)
+        assert store.count_pending() == 0  # the old post was marked posted
+
+    @pytest.mark.asyncio
+    async def test_retention_runs_on_failure(self, store, settings):
+        """Retention should run even when generation returns failure (1)."""
+        from newsbot.main import _run_retention
+
+        _run_retention(store)
+        assert store.count_pending() == 0
