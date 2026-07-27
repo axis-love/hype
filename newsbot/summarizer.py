@@ -130,7 +130,7 @@ async def llm_filter(
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        log.warning("LLM filter returned invalid JSON: %s\nraw: %s", exc, cleaned[:300])
+        log.warning("LLM filter returned invalid JSON: %s (length=%d)", exc, len(cleaned))
         return []
 
     kept_raw = data.get("items") if isinstance(data, dict) else None
@@ -141,20 +141,31 @@ async def llm_filter(
     # Match LLM results to original candidates by opaque ID.
     # Never accept URLs from LLM output — always use trusted application data.
     seen_ids: set[str] = set()
+    dropped_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+    malformed_entries = 0
     kept: list[dict[str, Any]] = []
     for entry in kept_raw:
         if not isinstance(entry, dict):
-            continue
-        if not entry.get("keep"):
+            malformed_entries += 1
             continue
         cid = str(entry.get("id") or "").strip()
         if not cid or cid not in id_map:
-            log.warning("LLM filter returned unknown or missing id: %r — skipping", cid)
+            # Detect unknown/malformed IDs regardless of keep/drop status
+            if cid:
+                log.warning("LLM filter returned unknown id: %r — skipping", cid)
+            else:
+                malformed_entries += 1
             continue
         if cid in seen_ids:
+            duplicate_ids.add(cid)
             log.warning("LLM filter returned duplicate id: %r — skipping", cid)
             continue
         seen_ids.add(cid)
+
+        if not entry.get("keep"):
+            dropped_ids.add(cid)
+            continue
 
         original = id_map[cid]
         merged = dict(original)
@@ -167,7 +178,22 @@ async def llm_filter(
         # URL is always from trusted application data, never from LLM output.
         kept.append(merged)
 
-    log.info("LLM filter: %d in, %d kept", len(items), len(kept))
+    # Detect omitted IDs — input items the LLM never mentioned at all.
+    all_input_ids = set(id_map.keys())
+    mentioned_ids = seen_ids | dropped_ids
+    omitted_ids = all_input_ids - mentioned_ids
+    if omitted_ids:
+        log.warning(
+            "LLM filter omitted %d/%d candidate IDs (never mentioned): %s",
+            len(omitted_ids), len(all_input_ids), ", ".join(sorted(omitted_ids)),
+        )
+    if duplicate_ids:
+        log.warning("LLM filter returned %d duplicate IDs: %s", len(duplicate_ids), ", ".join(sorted(duplicate_ids)))
+    if malformed_entries:
+        log.warning("LLM filter returned %d malformed entries (non-dict or missing id)", malformed_entries)
+
+    log.info("LLM filter: %d in, %d kept, %d dropped, %d omitted",
+             len(items), len(kept), len(dropped_ids), len(omitted_ids))
     return kept
 
 
@@ -231,10 +257,12 @@ async def llm_style_posts(
     if not items:
         return []
 
-    # Assign IDs to items for binding LLM output (if not already assigned).
-    if not any("candidate_id" in item for item in items):
-        _assign_candidate_ids(items)
-    id_map = {item["candidate_id"]: item for item in items}
+    # Assign IDs to items for binding LLM output.
+    # Handle mixed lists: assign IDs to any items that don't already have one.
+    items_needing_ids = [item for item in items if "candidate_id" not in item]
+    if items_needing_ids:
+        _assign_candidate_ids(items_needing_ids)
+    id_map = {item["candidate_id"]: item for item in items if "candidate_id" in item}
 
     def signal_line(item: dict[str, Any]) -> str:
         bits = []
@@ -293,7 +321,7 @@ async def llm_style_posts(
     try:
         data = json.loads(cleaned)
     except json.JSONDecodeError as exc:
-        log.warning("LLM styler returned invalid JSON: %s\nraw: %s", exc, cleaned[:300])
+        log.warning("LLM styler returned invalid JSON: %s (length=%d)", exc, len(cleaned))
         return []
 
     posts_raw = data.get("posts") if isinstance(data, dict) else None

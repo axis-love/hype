@@ -142,6 +142,43 @@ class TestLLMFilterIDBinding:
         assert len(kept) == 1
         assert kept[0]["title"] == "Has ID"
 
+    @pytest.mark.asyncio
+    async def test_filter_detects_omitted_ids(self, sample_items):
+        """LLM completely omits some candidates — should be detected and logged."""
+        # Only c001 is mentioned; c002 and c003 are omitted entirely
+        response = json.dumps({
+            "items": [
+                {"id": "c001", "keep": True, "title": "AI", "category": "AI",
+                 "importance": 9, "reason": "x", "short_summary": "s"},
+            ]
+        })
+        lm = FakeLMClient(response)
+        kept = await llm_filter(sample_items, lm)
+        assert len(kept) == 1
+        # The omitted items (c002, c003) are not in kept
+        kept_ids = {k.get("candidate_id") for k in kept}
+        assert "c001" in kept_ids
+        assert "c002" not in kept_ids
+        assert "c003" not in kept_ids
+
+    @pytest.mark.asyncio
+    async def test_filter_detects_dropped_duplicate_malformed(self, sample_items):
+        """Duplicate, dropped, and malformed entries are all detected."""
+        response = json.dumps({
+            "items": [
+                {"id": "c001", "keep": True, "title": "AI", "category": "AI",
+                 "importance": 9, "reason": "x", "short_summary": "s"},
+                {"id": "c001", "keep": True, "title": "Dup", "category": "AI",
+                 "importance": 10, "reason": "x", "short_summary": "s"},  # duplicate
+                {"id": "c002", "keep": False, "title": "GPU"},  # dropped
+                "not-a-dict",  # malformed
+            ]
+        })
+        lm = FakeLMClient(response)
+        kept = await llm_filter(sample_items, lm)
+        assert len(kept) == 1
+        assert kept[0]["title"] == "AI"
+
 
 class TestLLMStyleIDBinding:
     @pytest.mark.asyncio
