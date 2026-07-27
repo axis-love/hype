@@ -231,18 +231,22 @@ class NewsStore:
 
         urls: list[str] = []
         titles: list[str] = []
-        url_to_idx: dict[str, int] = {}
-        title_to_idx: dict[str, int] = {}
+        url_to_indices: dict[str, list[int]] = {}
+        title_to_indices: dict[str, list[int]] = {}
 
         for i, item in enumerate(items):
             url = str(item.get("url") or "").strip()
             title = str(item.get("title") or "").strip().lower()
-            if url and url not in url_to_idx:
-                url_to_idx[url] = i
-                urls.append(url)
-            if title and title not in title_to_idx:
-                title_to_idx[title] = i
-                titles.append(title)
+            if url:
+                if url not in url_to_indices:
+                    url_to_indices[url] = []
+                    urls.append(url)
+                url_to_indices[url].append(i)
+            if title:
+                if title not in title_to_indices:
+                    title_to_indices[title] = []
+                    titles.append(title)
+                title_to_indices[title].append(i)
 
         seen_indices: set[int] = set()
 
@@ -256,7 +260,7 @@ class NewsStore:
                     f"SELECT url FROM seen WHERE url IN ({placeholders})", chunk
                 ).fetchall()
                 for row in rows:
-                    seen_indices.add(url_to_idx[row["url"]])
+                    seen_indices.update(url_to_indices[row["url"]])
 
         # Batch title lookup.
         if titles:
@@ -267,7 +271,7 @@ class NewsStore:
                     f"SELECT title FROM seen WHERE title IN ({placeholders})", chunk
                 ).fetchall()
                 for row in rows:
-                    seen_indices.add(title_to_idx[row["title"]])
+                    seen_indices.update(title_to_indices[row["title"]])
 
         return seen_indices
 
@@ -371,35 +375,42 @@ class NewsStore:
             # 1. Clear old unposted posts.
             cur.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
 
-            # 2. Insert new posts.
-            for post in new_posts:
-                cur.execute(
+            # 2. Insert new posts (batched via executemany).
+            post_rows = [
+                (
+                    str(post.get("title") or "").strip(),
+                    str(post.get("body") or "").strip(),
+                    str(post.get("category") or "").strip() or None,
+                    post.get("importance"),
+                    str(post.get("url") or "").strip() or None,
+                    now,
+                )
+                for post in new_posts
+            ]
+            if post_rows:
+                cur.executemany(
                     """
                     INSERT INTO pending_posts(title, body, category, importance, url, created_at)
                     VALUES(?,?,?,?,?,?)
                     """,
-                    (
-                        str(post.get("title") or "").strip(),
-                        str(post.get("body") or "").strip(),
-                        str(post.get("category") or "").strip() or None,
-                        post.get("importance"),
-                        str(post.get("url") or "").strip() or None,
-                        now,
-                    ),
+                    post_rows,
                 )
-                posts_inserted += 1
+                posts_inserted = len(post_rows)
 
-            # 3. Mark source items as seen.
-            for item in seen_items:
-                url = str(item.get("url") or "").strip()
-                title = str(item.get("title") or "").strip().lower()
-                if not url and not title:
-                    continue
-                cur.execute(
+            # 3. Mark source items as seen (batched via executemany).
+            seen_rows = [
+                (str(item.get("url") or "").strip() or None,
+                 str(item.get("title") or "").strip().lower() or None,
+                 now)
+                for item in seen_items
+                if str(item.get("url") or "").strip() or str(item.get("title") or "").strip()
+            ]
+            if seen_rows:
+                cur.executemany(
                     "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
-                    (url or None, title or None, now),
+                    seen_rows,
                 )
-                seen_marked += 1
+                seen_marked = len(seen_rows)
 
             cur.execute("COMMIT")
         except Exception as exc:
