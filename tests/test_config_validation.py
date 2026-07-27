@@ -209,3 +209,80 @@ class TestLLMEnvValidation:
         from unittest.mock import patch
         with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test"}, clear=True):
             _validate_llm_env()  # should not raise
+
+
+class TestMalformedConfigRaises:
+    """Malformed values must raise ValueError, not silently fall back to defaults."""
+
+    class MockSettings:
+        def __init__(self, data):
+            self._data = data
+        def list(self, section):
+            return self._data.get(section, {})
+
+    def test_malformed_max_candidates_raises(self):
+        from newsbot.config import load_config
+        settings = self.MockSettings({"news": {"max_candidates": "not-an-int"}})
+        with pytest.raises(ValueError, match="max_candidates must be int"):
+            load_config(settings)
+
+    def test_malformed_sources_raises(self):
+        from newsbot.config import load_config
+        settings = self.MockSettings({"news": {"sources": "not-a-dict"}})
+        with pytest.raises(ValueError, match="sources must be a dict"):
+            load_config(settings)
+
+    def test_malformed_source_weights_raises(self):
+        from newsbot.config import load_config
+        settings = self.MockSettings({"news": {"source_weights": "not-a-dict"}})
+        with pytest.raises(ValueError, match="source_weights must be a dict"):
+            load_config(settings)
+
+    def test_malformed_topic_boost_raises(self):
+        from newsbot.config import load_config
+        settings = self.MockSettings({"news": {"topic_boost": "not-a-dict"}})
+        with pytest.raises(ValueError, match="topic_boost must be a dict"):
+            load_config(settings)
+
+    def test_missing_values_use_defaults(self):
+        from newsbot.config import load_config
+        settings = self.MockSettings({})
+        cfg = load_config(settings)  # should not raise — all defaults
+        assert cfg["max_candidates"] == 20
+        assert cfg["lookback_hours"] == 48
+
+
+class TestTopicMatchingBoundary:
+    """Verify single-word keywords use word-boundary matching."""
+
+    def test_unity_does_not_match_community(self):
+        """'unity' should NOT match 'community'."""
+        item = {"title": "Community platform launches", "snippet": "", "raw_text": ""}
+        bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
+        # Should NOT get the 'unity' boost
+        assert bonus < DEFAULT_TOPIC_BOOST["unity"]
+
+    def test_ar_does_not_match_article(self):
+        """'ar' should NOT match 'article'."""
+        item = {"title": "Article about new tech", "snippet": "", "raw_text": ""}
+        bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
+        assert bonus < DEFAULT_TOPIC_BOOST["vr_ar"]
+
+    def test_unity_matches_standalone(self):
+        """'Unity' as a standalone word should match."""
+        item = {"title": "Unity 6 released", "snippet": "", "raw_text": ""}
+        bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
+        assert bonus >= DEFAULT_TOPIC_BOOST["unity"]
+
+    def test_long_single_word_boundary(self):
+        """Longer single words like 'robot' should use word-boundary too."""
+        # "robot" should match "robot", not "robotics" (different boost key)
+        item = {"title": "New robot arm", "snippet": "", "raw_text": ""}
+        bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
+        assert bonus >= DEFAULT_TOPIC_BOOST["robotics"]
+
+    def test_multi_word_phrase_still_substring(self):
+        """Multi-word phrases should still use substring matching."""
+        item = {"title": "New language model architecture", "snippet": "", "raw_text": ""}
+        bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
+        assert bonus >= DEFAULT_TOPIC_BOOST["llm"]
