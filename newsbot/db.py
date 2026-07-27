@@ -402,7 +402,7 @@ class NewsStore:
                 seen_marked += 1
 
             cur.execute("COMMIT")
-        except sqlite3.Error as exc:
+        except Exception as exc:
             log.error("replace_unposted_batch failed, rolling back: %s", exc)
             try:
                 cur.execute("ROLLBACK")

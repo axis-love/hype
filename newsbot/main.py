@@ -113,12 +113,19 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     batches = await asyncio.gather(*coros, return_exceptions=True)
 
     items: list[dict[str, Any]] = []
+    failed_collectors: list[str] = []
     for (name, _), batch in zip(tasks, batches):
         if isinstance(batch, Exception):
             log.warning("collector %s failed: %s", name, batch)
+            failed_collectors.append(name)
             continue
         log.info("collector %s returned %d items", name, len(batch))
         items.extend(batch)
+    if failed_collectors and items:
+        log.warning(
+            "partial collection: %d/%d collectors failed (%s), proceeding with %d items",
+            len(failed_collectors), len(tasks), ", ".join(failed_collectors), len(items),
+        )
     return items
 
 
@@ -290,10 +297,19 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         log.warning("LLM styler produced zero posts; keeping existing queue")
         return 0
 
-    # 9. Atomically replace unposted queue with new posts and mark items as seen.
-    #    If insertion fails, the old queue remains intact (rollback).
+    # 9. Only mark seen the items that were actually styled into posts.
+    #    Items omitted by the styler must NOT be marked seen — they should
+    #    remain eligible for future generation cycles.
+    styled_ids = {p.get("candidate_id") for p in posts if p.get("candidate_id")}
+    seen_items = [item for item in final if item.get("candidate_id") in styled_ids]
+    omitted = len(final) - len(seen_items)
+    if omitted:
+        log.warning("LLM styler omitted %d items — not marking them seen", omitted)
+
+    # 10. Atomically replace unposted queue with new posts and mark items as seen.
+    #     If insertion fails, the old queue remains intact (rollback).
     try:
-        inserted, seen = store.replace_unposted_batch(posts, final)
+        inserted, seen = store.replace_unposted_batch(posts, seen_items)
     except sqlite3.Error as exc:
         log.error("transactional queue replacement failed: %s — keeping existing queue", exc)
         return 1
