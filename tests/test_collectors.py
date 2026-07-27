@@ -98,10 +98,17 @@ async def test_reddit_collect_captures_score_and_comments_from_rss():
     entry = _reddit_rss_entry()
     parsed = _make_parsed_feed([entry])
 
-    with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
-        mock_fp.parse = MagicMock(return_value=parsed)
-        mock_fp.__bool__ = lambda self: True  # not None
-        with patch("newsbot.collectors.reddit.asyncio.to_thread", new=AsyncMock(return_value=parsed)):
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.reddit.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.reddit.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
             items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
 
     assert len(items) == 1
@@ -117,9 +124,17 @@ async def test_reddit_collect_handles_empty_feed():
     """Empty RSS feed should return empty list."""
     parsed = _make_parsed_feed([])
 
-    with patch("newsbot.collectors.reddit.asyncio.to_thread", new=AsyncMock(return_value=parsed)):
-        with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
-            mock_fp.parse = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.reddit.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.reddit.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
             items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
 
     assert items == []
@@ -131,9 +146,18 @@ async def test_reddit_collect_handles_missing_engagement():
     entry = _reddit_rss_entry(title="Just a title without counts")
     parsed = _make_parsed_feed([entry])
 
-    with patch("newsbot.collectors.reddit.asyncio.to_thread", new=AsyncMock(return_value=parsed)):
-        with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
-            mock_fp.parse = MagicMock()
+    # Mock httpx to return the feed XML content, and feedparser to parse it.
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.reddit.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.reddit.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
             items = await reddit.collect({"subreddits": ["LocalLLaMA"], "limit": 10})
 
     assert len(items) == 1
@@ -151,14 +175,22 @@ async def test_reddit_collect_multiple_subreddits():
     parsed2 = _make_parsed_feed([entry2])
 
     call_count = 0
-    async def mock_to_thread(fn, *args, **kwargs):
+    def mock_parse(content):
         nonlocal call_count
         call_count += 1
         return parsed1 if call_count == 1 else parsed2
 
-    with patch("newsbot.collectors.reddit.asyncio.to_thread", new=mock_to_thread):
-        with patch("newsbot.collectors.reddit.feedparser", create=True) as mock_fp:
-            mock_fp.parse = MagicMock()
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.reddit.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.reddit.feedparser") as mock_fp:
+            mock_fp.parse = mock_parse
             items = await reddit.collect({"subreddits": ["LocalLLaMA", "MachineLearning"], "limit": 10})
 
     assert len(items) == 2
