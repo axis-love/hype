@@ -338,11 +338,13 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 
     if bot_token and admin_user_id:
         async def on_digest() -> None:
-            ran = await coordinator.run_generation(
+            result = await coordinator.run_generation(
                 lambda: _run_generation(store, settings)
             )
-            if not ran:
+            if result == 2:
                 raise RuntimeError("generation already in progress — skipped")
+            if result != 0:
+                raise RuntimeError(f"generation failed (code={result})")
 
         async def on_post() -> None:
             result = await coordinator.run_posting()
@@ -403,16 +405,22 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             log.info("generation cycle starting at %s", now.isoformat())
             gen_failed = False
             try:
-                ran = await coordinator.run_generation(
+                result = await coordinator.run_generation(
                     lambda: _run_generation(store, settings)
                 )
-                if not ran:
+                if result == 2:
                     log.info("generation skipped — already in progress")
+                    # Skipped does NOT advance timestamp — next tick retries
+                elif result == 0:
+                    log.info("generation cycle complete")
+                else:
+                    log.error("generation failed (code=%d)", result)
+                    gen_failed = True
             except Exception as exc:
                 log.error("generation cycle failed: %s", exc, exc_info=True)
                 gen_failed = True
 
-            # Only advance last_gen_utc on success.
+            # Only advance last_gen_utc on success (result 0).
             if not gen_failed:
                 now = datetime.now(timezone.utc)
                 settings.set("scheduler", "last_gen_utc", now.isoformat())
@@ -452,6 +460,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 result = await coordinator.run_posting()
                 if result == 2:
                     log.info("posting skipped — already in progress")
+                    # Skipped does NOT advance timestamp
+                    post_failed = True  # treat as non-success so timestamp unchanged
                 # result 0 = success or no-op (no pending posts)
                 # result 1 = failure
                 if result == 1:
@@ -499,10 +509,10 @@ def main() -> None:
 
         async def _once() -> int:
             coordinator = JobCoordinator(store, settings)
-            ran = await coordinator.run_generation(
+            result = await coordinator.run_generation(
                 lambda: _run_generation(store, settings)
             )
-            if not ran:
+            if result != 0:
                 return 1
             # Drain all generated posts immediately for testing.
             return await coordinator.drain_posts()

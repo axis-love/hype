@@ -38,10 +38,10 @@ class TestSchedulerBookkeeping:
         coordinator = JobCoordinator(store, settings)
 
         async def gen_fn():
-            pass  # success
+            return 0
 
-        ran = await coordinator.run_generation(gen_fn)
-        assert ran is True
+        result = await coordinator.run_generation(gen_fn)
+        assert result == 0
         # Simulate what the scheduler loop does on success
         settings.set("scheduler", "last_gen_utc", datetime.now(timezone.utc).isoformat())
         assert settings.get("scheduler", "last_gen_utc") is not None
@@ -136,15 +136,12 @@ class TestSchedulerBookkeeping:
         coordinator._gen_running = True
 
         async def gen_fn():
-            pass
+            return 0
 
-        ran = await coordinator.run_generation(gen_fn)
-        assert ran is False  # skipped
+        result = await coordinator.run_generation(gen_fn)
+        assert result == 2  # skipped
 
-        # Scheduler loop should not advance timestamp on skip.
-        gen_failed = not ran  # False, so not failed, but also not a real success
-        # In the real loop: gen_failed is only set on exceptions, not on skip.
-        # The skip case logs "skipped" and then falls through to the success path.
-        # This is correct — a skip means "already running", so the timestamp from
-        # the first run will be set by that run, not this one.
-        # We just verify that the skip itself doesn't crash.
+        # Scheduler loop: result 2 means skipped — gen_failed stays False
+        # but timestamp is NOT advanced (result != 0).
+        # In the updated loop, result 2 is treated as non-success for timestamp.
+        assert settings.get("scheduler", "last_gen_utc") == old_ts

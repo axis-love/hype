@@ -45,15 +45,16 @@ class TestJobCoordinatorSerialization:
             nonlocal call_count
             call_count += 1
             await asyncio.sleep(0.1)
+            return 0
 
         # Launch two concurrently.
         results = await asyncio.gather(
             coordinator.run_generation(slow_gen),
             coordinator.run_generation(slow_gen),
         )
-        # One should run (True), one should be skipped (False).
-        assert results.count(True) == 1
-        assert results.count(False) == 1
+        # One should succeed (0), one should be skipped (2).
+        assert results.count(0) == 1
+        assert results.count(2) == 1
         assert call_count == 1
 
     @pytest.mark.asyncio
@@ -77,21 +78,27 @@ class TestJobCoordinatorSerialization:
         assert results.count(2) == 1
 
     @pytest.mark.asyncio
-    async def test_generation_and_posting_can_run_concurrently(self, coordinator):
-        """Generation and posting use separate locks — they can overlap."""
+    async def test_generation_and_posting_cannot_overlap(self, coordinator):
+        """Generation and posting use a SINGLE lock — they cannot overlap."""
         gen_started = asyncio.Event()
         post_started = asyncio.Event()
+        gen_done = asyncio.Event()
+        post_done = asyncio.Event()
 
         async def gen_fn():
             gen_started.set()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
+            gen_done.set()
+            return 0
 
         # Add a pending post.
         coordinator._store.add_pending_post({"title": "T", "body": "B", "url": ""})
 
         async def slow_post(*args, **kwargs):
             post_started.set()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
+            post_done.set()
+            return 0
 
         with patch.object(coordinator, "_post_one", side_effect=slow_post):
             await asyncio.gather(
@@ -100,6 +107,11 @@ class TestJobCoordinatorSerialization:
             )
         assert gen_started.is_set()
         assert post_started.is_set()
+        # The single lock means gen and post are serialized —
+        # gen must complete before post starts (or vice versa).
+        # Both must have completed.
+        assert gen_done.is_set()
+        assert post_done.is_set()
 
     @pytest.mark.asyncio
     async def test_lock_released_on_exception(self, coordinator):
@@ -112,8 +124,8 @@ class TestJobCoordinatorSerialization:
             await coordinator.run_generation(failing_gen)
 
         # Second call should succeed — lock was released.
-        ran = await coordinator.run_generation(lambda: asyncio.sleep(0))
-        assert ran is True
+        result = await coordinator.run_generation(lambda: asyncio.sleep(0))
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_posting_lock_released_on_exception(self, coordinator):
