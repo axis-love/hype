@@ -204,15 +204,23 @@ def _select_diverse_candidates(
         src = str(c.get("source") or "unknown")
         by_source.setdefault(src, []).append(c)
     for src in by_source:
-        # Sort by score descending, then by title for deterministic tie-breaking.
+        # Sort by score descending, then title for deterministic tie-breaking,
+        # then source for further determinism.
         by_source[src].sort(
-            key=lambda c: (-float(c.get("score") or 0.0), str(c.get("title") or "")),
+            key=lambda c: (
+                -float(c.get("score") or 0.0),
+                str(c.get("title") or ""),
+                str(c.get("source") or ""),
+            ),
         )
 
     # Order sources by their top item's score (descending), then alphabetically.
     source_order = sorted(
         by_source,
-        key=lambda s: (-float(by_source[s][0].get("score") or 0.0), s),
+        key=lambda s: (
+            -float(by_source[s][0].get("score") or 0.0),
+            s,
+        ),
     )
 
     top: list[dict[str, Any]] = []
@@ -235,17 +243,27 @@ def _select_diverse_candidates(
             break
 
     # Phase 2: fill remaining slots by global score ranking.
+    # Use the same deterministic key: score desc, then title asc, then source asc.
     if len(top) < max_candidates:
         remaining = [c for c in scored if id(c) not in used]
-        remaining.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+        remaining.sort(key=lambda c: (
+            -float(c.get("score") or 0.0),
+            str(c.get("title") or ""),
+            str(c.get("source") or ""),
+        ))
         for item in remaining:
             top.append(item)
             if len(top) >= max_candidates:
                 break
 
     # Re-sort the final selection by score for the LLM filter.
-    # Deterministic tie-break: score descending, then title alphabetically.
-    top.sort(key=lambda c: (-float(c.get("score") or 0.0), str(c.get("title") or "")))
+    # Deterministic tie-break: score descending, then title alphabetically,
+    # then source alphabetically.
+    top.sort(key=lambda c: (
+        -float(c.get("score") or 0.0),
+        str(c.get("title") or ""),
+        str(c.get("source") or ""),
+    ))
     return top
 
 
