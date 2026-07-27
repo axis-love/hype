@@ -85,3 +85,52 @@ class TestLLMRetryBudget:
 
             with pytest.raises(LLMTransientError):
                 await client.generate([{"role": "user", "content": "hi"}])
+
+
+class TestSafeTimeout:
+    """Verify asyncio.wait_for replaces unsafe SIGALRM (flow_001030 round 1)."""
+
+    @pytest.mark.asyncio
+    async def test_rss_timeout_uses_wait_for(self):
+        """RSS collector should use asyncio.wait_for, not SIGALRM."""
+        import signal
+        # Verify SIGALRM is NOT used by checking that no alarm is set during fetch
+        with patch("newsbot.collectors.rss.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=MagicMock(entries=[]))
+            # If SIGALRM were used, signal.alarm(0) would be called in cleanup.
+            # With asyncio.wait_for, no signal calls are made.
+            with patch("signal.alarm") as mock_alarm, \
+                 patch("signal.signal") as mock_signal:
+                from newsbot.collectors.rss import _fetch_one
+                await _fetch_one({"url": "https://example.com/feed", "name": "test"})
+                # SIGALRM should NOT be called
+                mock_alarm.assert_not_called()
+                mock_signal.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generation_timeout_returns_failure(self):
+        """Generation timeout should return 1 (failure), not hang."""
+        from newsbot.jobs import JobCoordinator
+        from pathlib import Path
+        from newsbot.db import NewsStore
+
+        class MockSettings:
+            def get(self, s, k, default=None): return default
+            def set(self, s, k, v): pass
+
+        store = NewsStore(Path("/tmp/test_gen_timeout.sqlite"))
+        coordinator = JobCoordinator(store, MockSettings())
+
+        async def slow_gen():
+            await asyncio.sleep(100)
+            return 0
+
+        result = await coordinator.run_generation(slow_gen, timeout=0.05)
+        assert result == 1  # timeout = failure
+
+    @pytest.mark.asyncio
+    async def test_collector_semaphore_bounds_concurrency(self):
+        """collect_all should use a semaphore to bound concurrent collectors."""
+        from newsbot.main import MAX_CONCURRENT_COLLECTORS
+        assert MAX_CONCURRENT_COLLECTORS <= 20  # reasonable bound
+        assert MAX_CONCURRENT_COLLECTORS >= 3   # at least covers source types

@@ -83,21 +83,14 @@ async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
         return []
 
     try:
-        # Use a bounded timeout for the feedparser blocking network request.
-        import signal
-        def _timeout_handler(signum, frame):
-            raise TimeoutError(f"Reddit fetch timed out for {source_name}")
-        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(30)  # 30-second timeout
-        try:
-            parsed = await asyncio.to_thread(
-                feedparser.parse, url, agent=REDDIT_USER_AGENT
-            )
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-    except TimeoutError as exc:
-        log.warning("Reddit fetch timed out for %s url=%s: %s", source_name, url, exc)
+        # Use asyncio.wait_for for a safe, thread-safe timeout.
+        # SIGALRM is process-global and unsafe with concurrent threads.
+        parsed = await asyncio.wait_for(
+            asyncio.to_thread(feedparser.parse, url, agent=REDDIT_USER_AGENT),
+            timeout=30,
+        )
+    except asyncio.TimeoutError:
+        log.warning("Reddit fetch timed out for %s url=%s", source_name, url)
         return []
     except Exception as exc:
         log.warning("Reddit fetch failed for %s url=%s: %s", source_name, url, exc)

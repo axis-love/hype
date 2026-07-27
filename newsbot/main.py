@@ -88,8 +88,19 @@ def _build_filter_lm_client() -> LMClient:
     return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
 
 
+# Maximum concurrent collector coroutines.
+MAX_CONCURRENT_COLLECTORS = 10
+# Overall generation deadline (seconds). 2 LLM passes × 3 retries × 300s timeout
+# = ~30 min worst case. 1200s (20 min) bounds this without cutting off healthy runs.
+GENERATION_TIMEOUT_SECONDS = 1200
+
 async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
-    """Run every enabled collector concurrently and merge results."""
+    """Run every enabled collector concurrently and merge results.
+
+    Uses a semaphore to bound concurrency (MAX_CONCURRENT_COLLECTORS) so
+    that a large number of RSS feeds or Reddit subreddits doesn't create
+    hundreds of simultaneous connections.
+    """
     sources = cfg["sources"]
     tasks: list[tuple[str, Any]] = []
 
@@ -110,7 +121,13 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         log.warning("no collectors enabled in config")
         return []
 
-    coros = [c for _, c in tasks]
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_COLLECTORS)
+
+    async def _bounded(coro):
+        async with semaphore:
+            return await coro
+
+    coros = [_bounded(c) for _, c in tasks]
     batches = await asyncio.gather(*coros, return_exceptions=True)
 
     items: list[dict[str, Any]] = []
@@ -360,7 +377,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     if bot_token and admin_user_id:
         async def on_digest() -> None:
             result = await coordinator.run_generation(
-                lambda: _run_generation(store, settings)
+                lambda: _run_generation(store, settings),
+                timeout=GENERATION_TIMEOUT_SECONDS,
             )
             if result == 2:
                 raise RuntimeError("generation already in progress — skipped")
@@ -427,7 +445,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             gen_success = False
             try:
                 result = await coordinator.run_generation(
-                    lambda: _run_generation(store, settings)
+                    lambda: _run_generation(store, settings),
+                    timeout=GENERATION_TIMEOUT_SECONDS,
                 )
                 if result == 0:
                     gen_success = True
@@ -528,7 +547,8 @@ def main() -> None:
         async def _once() -> int:
             coordinator = JobCoordinator(store, settings)
             result = await coordinator.run_generation(
-                lambda: _run_generation(store, settings)
+                lambda: _run_generation(store, settings),
+                timeout=GENERATION_TIMEOUT_SECONDS,
             )
             if result != 0:
                 return 1
@@ -546,7 +566,8 @@ def main() -> None:
         async def _dry() -> int:
             coordinator = JobCoordinator(store, settings)
             await coordinator.run_generation(
-                lambda: _run_generation(store, settings)
+                lambda: _run_generation(store, settings),
+                timeout=GENERATION_TIMEOUT_SECONDS,
             )
             return await coordinator.drain_posts()
 
