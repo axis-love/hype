@@ -258,3 +258,63 @@ def test_split_does_not_break_html_tag():
         closes = chunk.count("</a>")
         # Either both 0 or both 1
         assert opens == closes, f"Unbalanced <a> tag in chunk: opens={opens}, closes={closes}"
+
+
+def test_split_long_anchor_balanced():
+    """Long <a> tags spanning multiple chunks must be balanced in every chunk."""
+    # An anchor longer than one chunk.
+    href = "http://example.com/" + "x" * 200
+    text = f'<a href="{href}">{"A" * 3500}</a>'
+    chunks = _split_for_telegram(text, limit=1000)
+    assert len(chunks) >= 3
+    for i, chunk in enumerate(chunks):
+        opens = chunk.count("<a ")
+        closes = chunk.count("</a>")
+        assert opens == closes, f"Chunk {i}: unbalanced <a> -- opens={opens}, closes={closes}"
+
+
+def test_split_nested_tags_balanced():
+    """Nested tags (<b><i>...</i></b>) must be balanced in every chunk."""
+    text = "<b><i>" + "A" * 3000 + "</i></b>"
+    chunks = _split_for_telegram(text, limit=1000)
+    assert len(chunks) >= 3
+    for i, chunk in enumerate(chunks):
+        b_opens = chunk.lower().count("<b>") + chunk.lower().count("<b ")
+        b_closes = chunk.lower().count("</b>")
+        i_opens = chunk.lower().count("<i>") + chunk.lower().count("<i ")
+        i_closes = chunk.lower().count("</i>")
+        assert b_opens == b_closes, f"Chunk {i}: unbalanced <b> -- opens={b_opens}, closes={b_closes}"
+        assert i_opens == i_closes, f"Chunk {i}: unbalanced <i> -- opens={i_opens}, closes={i_closes}"
+
+
+def test_strip_html_removes_tags_and_unescapes():
+    """_strip_html should remove all tags and unescape entities."""
+    from newsbot.telegram_poster import _strip_html
+    assert _strip_html("<b>Title</b>") == "Title"
+    assert _strip_html('<a href="http://x.com">Link</a>') == "Link"
+    assert _strip_html("A &amp; B") == "A & B"
+    assert _strip_html("&lt;script&gt;") == "<script>"
+    assert _strip_html("plain text") == "plain text"
+    assert _strip_html("") == ""
+
+
+@pytest.mark.asyncio
+async def test_post_digest_does_not_plain_text_retry_on_chat_not_found():
+    """HTTP 400 'chat not found' must NOT be retried as plain text."""
+    bad_resp = MagicMock()
+    bad_resp.status_code = 400
+    bad_resp.text = "Bad Request: chat not found"
+    bad_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+        "400", request=MagicMock(), response=bad_resp))
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(return_value=bad_resp)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        with pytest.raises(httpx.HTTPStatusError):
+            await post_digest("<b>text</b>", bot_token="t", chat_id="@c")
+
+    # Only one POST -- no plain-text retry for non-parse-error 400.
+    assert fake_client.post.call_count == 1
