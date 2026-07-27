@@ -107,10 +107,22 @@ class TestBatchedMarkSeen:
             {"url": "http://new.com", "title": "New"},
         ]
         count = store.mark_seen(items)
-        assert count == 3  # executemany returns count of rows attempted
-        # But only 2 unique entries should exist.
+        # rowcount reflects actual inserts, not rows attempted.
+        # 2 unique entries inserted (dup.com and new.com), 1 duplicate ignored.
+        assert count == 2
         rows = store._conn.execute("SELECT COUNT(*) AS n FROM seen").fetchone()
         assert rows["n"] == 2
+
+    def test_mark_seen_rowcount_after_reinsert(self, store):
+        """Re-inserting already-seen items should return 0 (all ignored)."""
+        items = [
+            {"url": "http://a.com", "title": "A"},
+        ]
+        first = store.mark_seen(items)
+        assert first == 1
+        # Re-insert the same item.
+        second = store.mark_seen(items)
+        assert second == 0  # already exists, INSERT OR IGNORE skipped it
 
     def test_mark_seen_empty(self, store):
         assert store.mark_seen([]) == 0
@@ -140,3 +152,30 @@ class TestRemovedAPIs:
     def test_prune_digests_retained(self):
         """prune_digests should still exist for cleanup."""
         assert hasattr(NewsStore, "prune_digests"), "prune_digests should be retained"
+
+    def test_prune_old_items_is_noop(self, store):
+        """prune_old_items should be a no-op (table dropped in migration 2)."""
+        assert store.prune_old_items(48) == 0
+
+    def test_prune_digests_is_noop(self, store):
+        """prune_digests should be a no-op (table dropped in migration 2)."""
+        assert store.prune_digests(90) == 0
+
+    def test_dead_tables_dropped_after_migration(self, store):
+        """news_items and news_digests tables should not exist after migration."""
+        # Migration 2 drops these tables.
+        items_exists = store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='news_items'"
+        ).fetchone()
+        digests_exists = store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='news_digests'"
+        ).fetchone()
+        assert items_exists is None, "news_items table should be dropped"
+        assert digests_exists is None, "news_digests table should be dropped"
+
+    def test_schema_version_is_2(self, store):
+        """Migration 2 should have been applied."""
+        row = store._conn.execute(
+            "SELECT MAX(version) AS v FROM schema_version"
+        ).fetchone()
+        assert row["v"] == 2

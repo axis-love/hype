@@ -3,8 +3,6 @@
 Tables:
   - pending_posts: individual posts waiting to be sent to Telegram
   - seen:          URLs/titles already delivered (dedup state)
-  - news_items:    raw fetched candidates (retained for prune window)
-  - news_digests:  posted digest history
   - schema_version: migration tracking
 
 WAL mode, autocommit, single connection per process — same pattern as
@@ -110,6 +108,19 @@ def _migration_1(cur: sqlite3.Cursor) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS ix_pending_posts_posted ON pending_posts(posted_at);")
 
 
+@_migration(2, "Drop unused news_items and news_digests tables")
+def _migration_2(cur: sqlite3.Cursor) -> None:
+    """Drop the unused news_items and news_digests tables and their indexes.
+
+    These tables are not used by the current pipeline. Keeping them
+    wastes disk and complicates schema evolution.
+    """
+    cur.execute("DROP INDEX IF EXISTS ix_news_items_fetched_at;")
+    cur.execute("DROP INDEX IF EXISTS ix_news_items_score;")
+    cur.execute("DROP TABLE IF EXISTS news_items;")
+    cur.execute("DROP TABLE IF EXISTS news_digests;")
+
+
 class NewsStore:
     """CRUD wrapper for news-bot tables."""
 
@@ -193,16 +204,13 @@ class NewsStore:
     def __exit__(self, *args) -> None:
         self.close()
 
-    # --- news_items -----------------------------------------------------
-    # Note: insert_items() was removed — the current pipeline does not
-    # persist candidates to news_items. prune_old_items() remains because
-    # it is called from the generation cycle and is harmless on an empty
-    # table. The table is created by migration 1 for backward compatibility.
+    # --- news_items (dropped in migration 2) -----------------------------
+    # The news_items table was dropped in migration 2. prune_old_items()
+    # is now a no-op, retained for backward compatibility with callers.
 
     def prune_old_items(self, max_age_hours: int = 48) -> int:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, max_age_hours))).isoformat(timespec="seconds")
-        cur = self._conn.execute("DELETE FROM news_items WHERE fetched_at < ?", (cutoff,))
-        return int(cur.rowcount or 0)
+        """No-op — news_items table was dropped in migration 2."""
+        return 0
 
     # --- seen (dedup state) --------------------------------------------
 
@@ -276,7 +284,11 @@ class NewsStore:
         return seen_indices
 
     def mark_seen(self, items: list[dict[str, Any]]) -> int:
-        """Mark items as seen using batched executemany."""
+        """Mark items as seen using batched executemany.
+
+        Returns the number of rows actually inserted (not attempted).
+        Uses INSERT OR IGNORE so duplicates are silently skipped.
+        """
         now = _utc_now_iso()
         rows: list[tuple] = []
         for item in items:
@@ -294,7 +306,8 @@ class NewsStore:
                 "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
                 rows,
             )
-            return len(rows)
+            # rowcount reflects actual inserts (duplicates ignored by OR IGNORE).
+            return cur.rowcount if cur.rowcount > 0 else 0
         except sqlite3.Error as exc:
             log.warning("mark_seen batch failed: %s", exc)
             return 0
@@ -480,19 +493,5 @@ class NewsStore:
         return total_deleted
 
     def prune_digests(self, max_age_days: int = 90, batch_size: int = 100) -> int:
-        """Delete old digest history entries older than max_age_days."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
-        total_deleted = 0
-        while True:
-            cur = self._conn.execute(
-                "DELETE FROM news_digests WHERE created_at < ? AND id IN "
-                "(SELECT id FROM news_digests WHERE created_at < ? LIMIT ?)",
-                (cutoff, cutoff, batch_size),
-            )
-            deleted = int(cur.rowcount or 0)
-            total_deleted += deleted
-            if deleted < batch_size:
-                break
-        if total_deleted:
-            log.info("Pruned %d digests older than %d days", total_deleted, max_age_days)
-        return total_deleted
+        """No-op — news_digests table was dropped in migration 2."""
+        return 0

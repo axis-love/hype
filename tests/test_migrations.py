@@ -34,16 +34,22 @@ class TestMigrations:
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
         # Should have exactly 1 migration applied, not duplicated.
-        assert rows["n"] == 1
+        assert rows["n"] == 2  # 2 migrations applied
         store2.close()
 
     def test_tables_exist_after_migration(self, store):
-        """All expected tables should exist after migration."""
-        for table in ("news_items", "seen", "news_digests", "pending_posts", "schema_version"):
+        """All expected tables should exist after migration (dead tables dropped in migration 2)."""
+        for table in ("seen", "pending_posts", "schema_version"):
             row = store._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
             ).fetchone()
             assert row is not None, f"Table {table} not found"
+        # Dead tables should be dropped by migration 2.
+        for dead in ("news_items", "news_digests"):
+            row = store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (dead,)
+            ).fetchone()
+            assert row is None, f"Dead table {dead} should be dropped"
 
     def test_connection_close(self, tmp_path):
         """close() should close the connection without error."""
@@ -131,17 +137,10 @@ class TestRetentionPruning:
         row = store._conn.execute("SELECT 1 FROM seen WHERE url=?", ("http://recent.com",)).fetchone()
         assert row is not None
 
-    def test_prune_digests_removes_old(self, store):
-        """Old digest entries should be removed."""
-        old_ts = (datetime.now(timezone.utc) - timedelta(days=180)).isoformat(timespec="seconds")
-        # Insert directly since insert_digest was removed.
-        store._conn.execute(
-            "INSERT INTO news_digests(created_at, digest_text, model_used, item_count) VALUES(?,?,?,?)",
-            (old_ts, "old digest", "model", 5),
-        )
-
+    def test_prune_digests_is_noop(self, store):
+        """prune_digests is a no-op after migration 2 drops the table."""
         deleted = store.prune_digests(max_age_days=90)
-        assert deleted == 1
+        assert deleted == 0
 
     def test_batched_pruning(self, store):
         """Large number of rows should be pruned in batches without long locks."""
