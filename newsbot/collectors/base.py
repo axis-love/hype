@@ -146,7 +146,7 @@ class Candidate:
             importance=d.get("importance"),
             reason=d.get("reason"),
             short_summary=d.get("short_summary"),
-            penalty=float(d.get("penalty") or 1.0),
+            penalty=float(d.get("penalty")) if d.get("penalty") is not None else 1.0,
             contributing_sources=list(d.get("contributing_sources") or []),
         )
 
@@ -173,14 +173,17 @@ def new_candidate(
     source_name: str,
     **extra: Any,
 ) -> dict[str, Any]:
-    """Build a Candidate dict with sane null defaults for every key.
+    """Build a candidate dict with sane null defaults for every key.
 
     This is a backward-compatible factory that returns a dict.
     Extra fields are validated against known Candidate field names —
     typos produce a warning instead of being silently accepted.
-    New code should use Candidate.from_dict() or the Candidate dataclass
-    directly for type safety.
+    The dict is constructed via the Candidate dataclass, so field
+    validation (non-empty title/source, non-negative engagement) is
+    enforced at construction time.
     """
+    # Start with a Candidate instance for validation, then convert to dict
+    # for backward compatibility with dict-based downstream code.
     c = Candidate(
         title=title,
         url=url,
@@ -197,6 +200,14 @@ def new_candidate(
                 k, ", ".join(sorted(_KNOWN_CANDIDATE_FIELDS)),
             )
         d[k] = v
+    # Re-validate through from_dict to catch invalid engagement values.
+    try:
+        Candidate.from_dict(d)
+    except (ValueError, TypeError) as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "new_candidate: validation failed for %r: %s", title, exc,
+        )
     return d
 
 
