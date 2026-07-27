@@ -135,3 +135,77 @@ class TestConfigValidation:
         cfg = self._make_config(sources={"rss": {"feeds": [{"url": "http://x.com/rss"}]}})
         with pytest.raises(ValueError, match="missing 'name'"):
             _validate_config(cfg)
+
+    def test_non_dict_rss_config(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"rss": "not-a-dict"})
+        with pytest.raises(ValueError, match="sources.rss must be a dict"):
+            _validate_config(cfg)
+
+    def test_non_list_rss_feeds(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"rss": {"feeds": "not-a-list"}})
+        with pytest.raises(ValueError, match="sources.rss.feeds must be a list"):
+            _validate_config(cfg)
+
+    def test_rss_feed_non_numeric_weight(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"rss": {"feeds": [
+            {"url": "http://x.com/rss", "name": "test", "weight": "heavy"}
+        ]}})
+        with pytest.raises(ValueError, match="weight must be numeric"):
+            _validate_config(cfg)
+
+    def test_non_dict_reddit_config(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"reddit": "bad"})
+        with pytest.raises(ValueError, match="sources.reddit must be a dict"):
+            _validate_config(cfg)
+
+    def test_non_list_subreddits(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"reddit": {"subreddits": "all"}})
+        with pytest.raises(ValueError, match="subreddits must be a list"):
+            _validate_config(cfg)
+
+    def test_non_dict_github_config(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"github": 42})
+        with pytest.raises(ValueError, match="sources.github must be a dict"):
+            _validate_config(cfg)
+
+    def test_non_list_github_queries(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"github": {"queries": "llm"}})
+        with pytest.raises(ValueError, match="sources.github.queries must be a list"):
+            _validate_config(cfg)
+
+    def test_non_int_max_candidates(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(max_candidates="twenty")
+        with pytest.raises(ValueError, match="max_candidates must be int"):
+            _validate_config(cfg)
+
+
+class TestLLMEnvValidation:
+    """Verify LLM env validation at startup (flow_001031 round 1)."""
+
+    def test_missing_lm_base_raises(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(RuntimeError, match="LM_BASE is not set"):
+                _validate_llm_env()
+
+    def test_missing_lm_model_raises(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1"}, clear=True):
+            with pytest.raises(RuntimeError, match="LM_MODEL is not set"):
+                _validate_llm_env()
+
+    def test_both_set_passes(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test"}, clear=True):
+            _validate_llm_env()  # should not raise
