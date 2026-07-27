@@ -60,19 +60,32 @@ class Candidate:
 
     # Dedup/scoring fields (filled by dedupe.py).
     penalty: float = 1.0
-    _contributing_sources: list[str] = field(default_factory=list, repr=False)
+    contributing_sources: list[str] = field(default_factory=list, repr=False)
     _source_names_set: set[str] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
-        """Validate required fields at construction time."""
+        """Validate required fields and engagement values at construction time."""
         if not self.title:
             raise ValueError("Candidate requires a non-empty title")
         if not self.source:
             raise ValueError("Candidate requires a non-empty source")
         if not self.source_name:
             raise ValueError("Candidate requires a non-empty source_name")
+        if not self.url:
+            raise ValueError("Candidate requires a non-empty url")
         if not self.source_type:
             self.source_type = self.source
+        # Validate engagement values are non-negative (if provided).
+        for fname in ("upvotes", "comments", "stars", "forks", "reposts"):
+            val = getattr(self, fname)
+            if val is not None and val < 0:
+                raise ValueError(f"Candidate.{fname} must be non-negative, got {val}")
+        if self.score < 0:
+            raise ValueError(f"Candidate.score must be non-negative, got {self.score}")
+        if self.penalty < 0:
+            raise ValueError(f"Candidate.penalty must be non-negative, got {self.penalty}")
+        if self.upvote_ratio is not None and not (0.0 <= self.upvote_ratio <= 1.0):
+            raise ValueError(f"Candidate.upvote_ratio must be in [0,1], got {self.upvote_ratio}")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a dict compatible with existing pipeline code."""
@@ -102,6 +115,7 @@ class Candidate:
             "reason": self.reason,
             "short_summary": self.short_summary,
             "penalty": self.penalty,
+            "contributing_sources": list(self.contributing_sources),
         }
 
     @classmethod
@@ -133,11 +147,22 @@ class Candidate:
             reason=d.get("reason"),
             short_summary=d.get("short_summary"),
             penalty=float(d.get("penalty") or 1.0),
+            contributing_sources=list(d.get("contributing_sources") or []),
         )
 
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
+
+
+_KNOWN_CANDIDATE_FIELDS = frozenset({
+    "title", "url", "source", "source_name", "source_type",
+    "snippet", "published_at", "score", "upvotes", "comments",
+    "stars", "forks", "reposts", "upvote_ratio", "velocity",
+    "category", "raw_text", "extracted_text", "crosspost_count",
+    "raw_json", "candidate_id", "importance", "reason",
+    "short_summary", "penalty", "contributing_sources",
+})
 
 
 def new_candidate(
@@ -151,6 +176,8 @@ def new_candidate(
     """Build a Candidate dict with sane null defaults for every key.
 
     This is a backward-compatible factory that returns a dict.
+    Extra fields are validated against known Candidate field names —
+    typos produce a warning instead of being silently accepted.
     New code should use Candidate.from_dict() or the Candidate dataclass
     directly for type safety.
     """
@@ -161,8 +188,14 @@ def new_candidate(
         source_name=source_name,
     )
     d = c.to_dict()
-    # Apply extra fields.
+    # Apply extra fields with validation.
     for k, v in extra.items():
+        if k not in _KNOWN_CANDIDATE_FIELDS:
+            import logging
+            logging.getLogger(__name__).warning(
+                "new_candidate: unknown field %r — possible typo. Known: %s",
+                k, ", ".join(sorted(_KNOWN_CANDIDATE_FIELDS)),
+            )
         d[k] = v
     return d
 

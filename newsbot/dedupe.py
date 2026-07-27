@@ -130,7 +130,7 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
       same-input runs).
     """
     # Track contributing sources in a persistent list.
-    if "contributing_sources" not in keep:
+    if not keep.get("contributing_sources"):
         keep["contributing_sources"] = [keep.get("source") or "unknown"]
     other_source = other.get("source") or "unknown"
 
