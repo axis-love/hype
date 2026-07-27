@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlsplit, parse_qsl
+from urllib.parse import urlsplit, parse_qsl, urlencode
 
 try:
     from rapidfuzz import fuzz
@@ -71,7 +71,8 @@ def _canonical_url(url: Any) -> str:
         if kept:
             # Sort for determinism (order-independent canonicalization).
             kept.sort()
-            query = "&".join(f"{k}={v}" for k, v in kept)
+            # Use urlencode for proper URL encoding of values.
+            query = urlencode(kept)
         else:
             query = ""
     else:
@@ -119,24 +120,35 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     Key rules:
     - Engagement is summed only when the other item comes from a different
       source than any already merged. Same-source duplicates (e.g. same GitHub
-      repo from multiple search queries) do NOT re-count engagement.
+      repo from multiple search queries) take the MAX engagement value
+      (not first-seen, not re-summed).
     - crosspost_count reflects all distinct contributing sources (not capped at 2).
-    - source_names set is accumulated across all merges.
-    - The representative source is the one with the highest score (deterministic).
+    - contributing_sources is a persistent list on the output item.
+    - The representative source is deterministic: highest score wins, tie-break
+      by source name alphabetically. Since dedupe runs before scoring, the
+      first-seen item is the default primary (stable, order-independent for
+      same-input runs).
     """
-    # Track contributing sources in a list on the keep item.
-    if "_contributing_sources" not in keep:
-        keep["_contributing_sources"] = [keep.get("source")]
-    other_source = other.get("source")
+    # Track contributing sources in a persistent list.
+    if "contributing_sources" not in keep:
+        keep["contributing_sources"] = [keep.get("source") or "unknown"]
+    other_source = other.get("source") or "unknown"
 
     # Only sum engagement if this is from a new source (prevents inflation).
-    if other_source and other_source not in keep["_contributing_sources"]:
-        keep["_contributing_sources"].append(other_source)
+    if other_source not in keep["contributing_sources"]:
+        keep["contributing_sources"].append(other_source)
         for field in ("upvotes", "comments", "stars", "forks", "reposts"):
             a = keep.get(field) or 0
             b = other.get(field) or 0
             if a or b:
                 keep[field] = (a or 0) + (b or 0)
+    else:
+        # Same-source duplicate: take max engagement (not first-seen).
+        for field in ("upvotes", "comments", "stars", "forks", "reposts"):
+            a = keep.get(field) or 0
+            b = other.get(field) or 0
+            if b > a:
+                keep[field] = b
 
     # upvote_ratio: take the max (Reddit-only field; non-Reddit items have None).
     if other.get("upvote_ratio") is not None:
@@ -167,15 +179,19 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     keep["source_name"] = " + ".join(sorted(keep["_source_names_set"]))
 
     # crosspost_count = number of distinct contributing sources (not capped at 2).
-    sources = set(keep["_contributing_sources"])
+    sources = set(keep["contributing_sources"])
     sources.discard(None)
     sources.discard("")
+    sources.discard("unknown")
     keep["crosspost_count"] = max(int(keep.get("crosspost_count") or 1), len(sources))
 
-    # Deterministic primary source: highest score wins, tie-break by name.
+    # Deterministic primary source selection:
+    # Since dedupe runs BEFORE scoring, candidates have equal/default scores.
+    # Tie-break: keep the first-seen item's source (stable, deterministic for
+    # same input order). If other has a higher score, switch.
     if other.get("score") is not None:
         if keep.get("score") is None or float(other["score"]) > float(keep["score"]):
-            keep["source"] = other_source or keep.get("source")
+            keep["source"] = other_source
 
     return keep
 
@@ -242,9 +258,8 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     log.info("dedupe: %d candidates -> %d unique", len(items), len(result))
 
-    # Clean up internal tracking fields.
+    # Clean up internal-only tracking fields (but keep contributing_sources).
     for item in result:
-        item.pop("_contributing_sources", None)
         item.pop("_source_names_set", None)
 
     return result
