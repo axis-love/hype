@@ -329,6 +329,7 @@ async def llm_style_posts(
             "category": original.get("category", ""),
             "importance": original.get("importance"),
             "url": original.get("url", ""),  # Always from trusted data
+            "candidate_id": cid,  # For tracking which items were styled
         })
 
     log.info("LLM styler: %d items in, %d posts out", len(items), len(result))

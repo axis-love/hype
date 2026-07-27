@@ -161,3 +161,27 @@ class TestReplaceUnpostedBatch:
 
         assert sorted(all_pending) == ["New0", "New1", "New2", "New3", "New4"]
         assert "Old" not in all_pending
+
+    def test_partial_llm_output_only_marks_styled_items_seen(self, store):
+        """When the styler omits some items, only styled items should be marked seen."""
+        # Simulate: 4 final items, but only 2 got styled into posts.
+        new_posts = [
+            {"title": "Post1", "body": "B1", "url": "http://x.com/1", "candidate_id": "c001"},
+            {"title": "Post2", "body": "B2", "url": "http://x.com/2", "candidate_id": "c002"},
+        ]
+        # Only the 2 styled items should be marked seen — not all 4 finals.
+        seen_items = [
+            {"url": "http://x.com/1", "title": "Item1", "candidate_id": "c001"},
+            {"url": "http://x.com/2", "title": "Item2", "candidate_id": "c002"},
+        ]
+
+        inserted, seen = store.replace_unposted_batch(new_posts, seen_items)
+        assert inserted == 2
+        assert seen == 2
+
+        # Styled items should be marked seen.
+        assert store.is_seen("http://x.com/1", "Item1")
+        assert store.is_seen("http://x.com/2", "Item2")
+        # Omitted items should NOT be marked seen.
+        assert not store.is_seen("http://x.com/3", "Item3")
+        assert not store.is_seen("http://x.com/4", "Item4")
