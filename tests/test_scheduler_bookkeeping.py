@@ -93,11 +93,11 @@ class TestSchedulerBookkeeping:
 
         coordinator = JobCoordinator(store, settings)
 
-        # Mock _post_one to fail.
+        # Mock _deliver_one to fail.
         async def failing_post():
             return 1
 
-        with patch.object(coordinator, "_post_one", side_effect=failing_post):
+        with patch.object(coordinator, "_deliver_one", side_effect=failing_post):
             result = await coordinator.run_posting()
 
         assert result == 1  # failure
