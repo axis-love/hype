@@ -60,6 +60,10 @@ class JobCoordinator:
     The poster can read a row and await Telegram while generation
     replaces the queue — a single lock prevents that race.
 
+    Admission flags are set *before* awaiting the lock so that additional
+    same-type requests immediately return 2 (skipped) instead of queuing
+    behind the lock and running after the first completes.
+
     - At most one job (generation OR posting) runs at a time.
     - Re-entrant calls of the same type are skipped (returns 2).
     - Generation result (0=success, 1=failure) is propagated to the caller.
@@ -89,12 +93,14 @@ class JobCoordinator:
         If *timeout* > 0, the generation is bounded to that many seconds.
         A timeout returns 1 (failure) — the prior queue remains intact.
         """
+        # Admission check: set flag BEFORE awaiting the lock so concurrent
+        # requests see the flag and immediately return 2 instead of queuing.
         if self._gen_running:
             log.info("generation already in progress — skipping")
             return 2
-        async with self._job_lock:
-            self._gen_running = True
-            try:
+        self._gen_running = True
+        try:
+            async with self._job_lock:
                 if timeout > 0:
                     try:
                         result = await asyncio.wait_for(gen_fn(), timeout=timeout)
@@ -104,8 +110,8 @@ class JobCoordinator:
                 else:
                     result = await gen_fn()
                 return int(result) if result is not None else 0
-            finally:
-                self._gen_running = False
+        finally:
+            self._gen_running = False
 
     async def run_posting(self) -> int:
         """Acquire the job lock and post one pending post.
@@ -116,12 +122,12 @@ class JobCoordinator:
         if self._post_running:
             log.info("posting already in progress — skipping")
             return 2
-        async with self._job_lock:
-            self._post_running = True
-            try:
-                return await self._post_one()
-            finally:
-                self._post_running = False
+        self._post_running = True
+        try:
+            async with self._job_lock:
+                return await self._deliver_one()
+        finally:
+            self._post_running = False
 
     async def drain_posts(self) -> int:
         """Acquire the job lock and drain all pending posts.
@@ -132,15 +138,27 @@ class JobCoordinator:
         if self._post_running:
             log.info("posting already in progress — cannot drain")
             return 1
-        async with self._job_lock:
-            self._post_running = True
-            try:
-                return await self._drain_all()
-            finally:
-                self._post_running = False
+        self._post_running = True
+        try:
+            async with self._job_lock:
+                while True:
+                    result = await self._deliver_one()
+                    if result != 0:
+                        return result
+                    # Continue until no more pending posts.
+                    if not self._store.get_next_pending_post():
+                        break
+                return 0
+        finally:
+            self._post_running = False
 
-    async def _post_one(self) -> int:
-        """Post the oldest pending post to Telegram (or stdout in dry-run)."""
+    async def _deliver_one(self) -> int:
+        """Fetch, format, deliver, and mark one pending post.
+
+        Shared by run_posting (single) and drain_posts (loop).
+        Returns 0 on success, 1 on failure. Returns 0 with no action
+        when there are no pending posts.
+        """
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
 
@@ -168,29 +186,4 @@ class JobCoordinator:
             log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
             return 1
 
-        return 0
-
-    async def _drain_all(self) -> int:
-        """Post all pending posts sequentially (for --once / dry-run)."""
-        bot_token = os.getenv("BOT_TOKEN", "").strip()
-        chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
-
-        while True:
-            post = self._store.get_next_pending_post()
-            if not post:
-                break
-            title = post["title"]
-            body = post["body"]
-            url = post.get("url") or ""
-            message = format_post_message(title, body, url)
-            if not bot_token or not chat_id:
-                print(message)
-                self._store.mark_posted(post["id"])
-            else:
-                try:
-                    await post_digest(message, bot_token=bot_token, chat_id=chat_id)
-                    self._store.mark_posted(post["id"])
-                except Exception as exc:
-                    log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
-                    return 1
         return 0
