@@ -139,14 +139,15 @@ def hype_score(item: dict[str, Any], config: dict[str, Any]) -> float:
     weight = float(source_weights.get(src, 1.0))
 
     # Official-RSS override: if the candidate carries a per-feed weight
-    # (RSS feeds in config can set 'weight'), use max(global, feed) so an
-    # official blog (1.3) outranks a normal RSS feed (0.5).
+    # (RSS feeds in config can set 'weight'), use the feed weight directly,
+    # replacing the global source weight. This allows individual feeds to
+    # be weighted lower (0.5) or higher (1.3) than the global RSS default.
     raw_json = item.get("raw_json")
     if isinstance(raw_json, dict):
         feed_weight = raw_json.get("weight")
-        if feed_weight:
+        if feed_weight is not None:
             try:
-                weight = max(weight, float(feed_weight))
+                weight = float(feed_weight)
             except (TypeError, ValueError):
                 pass
 

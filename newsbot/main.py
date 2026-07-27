@@ -163,7 +163,8 @@ def _select_diverse_candidates(
     if not scored:
         return []
 
-    source_quota = int(cfg.get("source_quota") or 8)
+    sq = cfg.get("source_quota")
+    source_quota = int(sq) if sq is not None else 8
 
     # Group by source, sorted by score within each group.
     by_source: dict[str, list[dict[str, Any]]] = {}
@@ -171,13 +172,15 @@ def _select_diverse_candidates(
         src = str(c.get("source") or "unknown")
         by_source.setdefault(src, []).append(c)
     for src in by_source:
-        by_source[src].sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+        # Sort by score descending, then by title for deterministic tie-breaking.
+        by_source[src].sort(
+            key=lambda c: (-float(c.get("score") or 0.0), str(c.get("title") or "")),
+        )
 
-    # Order sources by their top item's score (descending).
+    # Order sources by their top item's score (descending), then alphabetically.
     source_order = sorted(
         by_source,
-        key=lambda s: float(by_source[s][0].get("score") or 0.0),
-        reverse=True,
+        key=lambda s: (-float(by_source[s][0].get("score") or 0.0), s),
     )
 
     top: list[dict[str, Any]] = []
@@ -209,7 +212,8 @@ def _select_diverse_candidates(
                 break
 
     # Re-sort the final selection by score for the LLM filter.
-    top.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+    # Deterministic tie-break: score descending, then title alphabetically.
+    top.sort(key=lambda c: (-float(c.get("score") or 0.0), str(c.get("title") or "")))
     return top
 
 

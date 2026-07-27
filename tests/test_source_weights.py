@@ -123,3 +123,57 @@ class TestDiversitySelection:
     def test_empty_candidates(self):
         from newsbot.main import _select_diverse_candidates
         assert _select_diverse_candidates([], 10, {"source_quota": 3}) == []
+
+    def test_source_quota_zero_respected(self):
+        """source_quota=0 should mean no round-robin, all slots filled by score."""
+        from newsbot.main import _select_diverse_candidates
+
+        hn = self._make_candidates("hn", 3, 100)
+        reddit = self._make_candidates("reddit", 3, 50)
+        scored = sorted(hn + reddit, key=lambda c: c["score"], reverse=True)
+        cfg = {"source_quota": 0}
+        top = _select_diverse_candidates(scored, 4, cfg)
+        assert len(top) == 4
+        # With quota=0, round-robin gives 0 rounds; all filled by score.
+        # HN has higher scores, so HN items should dominate.
+        assert top[0]["source"] == "hn"
+
+
+class TestFeedWeightOverride:
+    """Verify that per-feed weight replaces global source weight (flow_001028 round 1)."""
+
+    def test_low_feed_weight_respected(self):
+        """A feed weight below the global RSS weight should lower the score."""
+        cfg = {
+            "source_weights": DEFAULT_SOURCE_WEIGHTS,
+            "topic_boosts": {},
+            "lookback_hours": 48,
+        }
+        # Global RSS weight is 0.5 in DEFAULT_SOURCE_WEIGHTS.
+        # RSS item with feed_weight=0.2 (below global 0.5)
+        item_low = {
+            "title": "Low weight feed",
+            "url": "https://blog.example.com/post",
+            "source": "rss",
+            "upvotes": 100,
+            "comments": 50,
+            "published_at": "2026-07-27",
+            "raw_json": {"weight": 0.2},
+        }
+        # RSS item with no feed weight (uses global 0.5)
+        item_default = {
+            "title": "Default weight feed",
+            "url": "https://other.example.com/post",
+            "source": "rss",
+            "upvotes": 100,
+            "comments": 50,
+            "published_at": "2026-07-27",
+            "raw_json": {},
+        }
+        score_low = hype_score(item_low, cfg)
+        score_default = hype_score(item_default, cfg)
+        # With the old max() approach, feed_weight=0.2 would be ignored (max(0.5, 0.2)=0.5)
+        # With the new direct override, weight=0.2 is used → lower score
+        assert score_low < score_default, f"Feed weight 0.2 ({score_low}) should be < default 0.5 ({score_default})"
+        ratio = score_low / score_default if score_default > 0 else 0
+        assert ratio < 0.5, f"Score ratio {ratio:.3f} should be < 0.5 (weight 0.2 vs 0.5)"
