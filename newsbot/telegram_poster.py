@@ -11,6 +11,7 @@ This is the entire delivery surface for the news bot.
 from __future__ import annotations
 
 import asyncio
+import html as html_module
 import logging
 import re
 from typing import Any
@@ -85,44 +86,56 @@ def _balance_tags(chunk: str, remaining: str) -> tuple[str, str]:
     re-opening them in the remaining text.
 
     Returns (balanced_chunk, prefix_to_prepend_to_remaining).
+
+    For <a> tags, the original opening tag (with attributes) is preserved
+    so the continuation chunk has a matching <a ...> before </a>.
     """
     # Count open vs close tags in the chunk.
     open_tags: list[str] = []
+    open_tag_strs: list[str] = []  # Full tag strings for re-opening (e.g. '<a href="...">')
     for m in _OPEN_TAG_RE.finditer(chunk):
         tag = m.group(1).lower()
         open_tags.append(tag)
+        open_tag_strs.append(m.group(0))  # Full tag match including attributes
     close_tags: list[str] = []
     for m in _CLOSE_TAG_RE.finditer(chunk):
         tag = m.group(1).lower()
         close_tags.append(tag)
 
     # Stack-based matching to find unclosed tags.
-    stack: list[str] = []
+    # Track both the tag name and the full opening tag string.
+    stack: list[tuple[str, str]] = []  # (tag_name, full_open_tag)
+    si = 0
     for tag in open_tags:
-        stack.append(tag)
+        stack.append((tag, open_tag_strs[si]))
+        si += 1
     for tag in close_tags:
-        if stack and stack[-1] == tag:
+        if stack and stack[-1][0] == tag:
             stack.pop()
-        elif tag in stack:
+        elif tag in [s[0] for s in stack]:
             # Close out of order — remove from stack
-            stack.remove(tag)
+            for i in range(len(stack) - 1, -1, -1):
+                if stack[i][0] == tag:
+                    stack.pop(i)
+                    break
 
     if not stack:
         return chunk, ""
 
     # Close unclosed tags at the end of the chunk.
-    closing = "".join(f"</{tag}>" for tag in reversed(stack))
+    closing = "".join(f"</{tag}>" for tag, _ in reversed(stack))
     balanced_chunk = chunk + closing
 
     # Re-open the same tags at the start of remaining.
-    # For <a> tags, we can't re-open without the href, so skip those —
-    # the content inside <a> will just appear as plain text in the next chunk.
+    # For <a> tags, use the original opening tag (with href) so the
+    # continuation has a matching <a ...> before </a>.
     reopening_parts: list[str] = []
-    for tag in stack:
+    for tag, full_tag in stack:
         if tag == "a":
-            # Can't re-open <a> without the href — skip
-            continue
-        reopening_parts.append(f"<{tag}>")
+            # Re-open <a> with original attributes
+            reopening_parts.append(full_tag)
+        else:
+            reopening_parts.append(f"<{tag}>")
     prefix = "".join(reopening_parts)
 
     return balanced_chunk, prefix
@@ -131,6 +144,23 @@ def _balance_tags(chunk: str, remaining: str) -> tuple[str, str]:
 def _is_transient(status_code: int) -> bool:
     """Check if an HTTP status code is a transient error worth retrying."""
     return status_code >= 500
+
+
+# Regex to strip HTML tags for plain-text fallback.
+_STRIP_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html(text: str) -> str:
+    """Strip HTML tags and unescape entities for plain-text fallback.
+
+    Converts <b>Title</b> → Title, &amp; → &, &lt; → <, etc.
+    """
+    if not text:
+        return ""
+    # Remove all HTML tags.
+    stripped = _STRIP_TAG_RE.sub("", text)
+    # Unescape HTML entities.
+    return html_module.unescape(stripped)
 
 
 async def _send_with_retry(
@@ -184,16 +214,34 @@ async def _send_with_retry(
 
         if r.status_code >= 400:
             # Non-transient error (400, 401, 403, 404, etc.)
-            # Only retry as plain text for HTML parse errors (400).
+            # Only retry as plain text for HTML parse errors (400 with parse
+            # error message). Do NOT retry chat-not-found, auth, or other 400s.
             if r.status_code == 400 and payload.get("parse_mode") == "HTML":
-                log.warning("chunk %d: Telegram 400 parse error; retrying as plain text", chunk_idx)
+                # Check if this is an actual HTML/entity parse error.
+                body = ""
                 try:
-                    r = await client.post(url, json={**payload, "parse_mode": ""})
-                except httpx.HTTPError as exc:
-                    log.error("chunk %d: plain-text retry failed: %s", chunk_idx, redact_exception(exc))
-                    raise
-                if r.status_code < 400:
-                    return r.json()
+                    body = r.text or ""
+                except Exception:
+                    pass
+                is_parse_error = any(marker in body.lower() for marker in (
+                    "can't parse entities",
+                    "can't parse ent",
+                    "bad request: can't parse",
+                    "entity",
+                    "tag",
+                    "unclosed",
+                ))
+                if is_parse_error:
+                    log.warning("chunk %d: Telegram 400 parse error; retrying as plain text", chunk_idx)
+                    # Strip HTML tags and unescape entities for plain-text fallback.
+                    plain_text = _strip_html(payload.get("text", ""))
+                    try:
+                        r = await client.post(url, json={**payload, "text": plain_text, "parse_mode": ""})
+                    except httpx.HTTPError as exc:
+                        log.error("chunk %d: plain-text retry failed: %s", chunk_idx, redact_exception(exc))
+                        raise
+                    if r.status_code < 400:
+                        return r.json()
             # Log only safe metadata — never log response bodies (may contain
             # echoed request content, chat payloads, or error details).
             log.error("chunk %d: Telegram send failed: status=%d", chunk_idx, r.status_code)
