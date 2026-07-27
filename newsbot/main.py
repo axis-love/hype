@@ -74,6 +74,21 @@ def _build_lm_client() -> LMClient:
     return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
 
 
+def _validate_llm_env() -> None:
+    """Validate that required LLM environment variables are set at startup.
+
+    In scheduled mode, collectors run before the LLM client is built.
+    This function catches missing env vars early instead of failing mid-generation.
+    """
+    errors: list[str] = []
+    if not os.getenv("LM_BASE", "").strip():
+        errors.append("LM_BASE is not set")
+    if not os.getenv("LM_MODEL", "").strip():
+        errors.append("LM_MODEL is not set")
+    if errors:
+        raise RuntimeError("LLM configuration error: " + "; ".join(errors))
+
+
 def _build_filter_lm_client() -> LMClient:
     """Build the LMClient for the LLM filter pass. Uses LM_FILTER_MODEL if set, else LM_MODEL."""
     base = os.getenv("LM_BASE", "").rstrip("/")
@@ -537,6 +552,9 @@ def main() -> None:
 
     load_dotenv()
     configure_logging(process_name="newsbot")
+
+    # Validate LLM env at startup (catches missing config before collectors run).
+    _validate_llm_env()
 
     db_path = os.getenv("NEWS_DB", "data/newsbot.sqlite")
     settings: SettingsStore = default_store(db_path)
