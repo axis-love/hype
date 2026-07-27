@@ -138,6 +138,44 @@ class TestDiversitySelection:
         # HN has higher scores, so HN items should dominate.
         assert top[0]["source"] == "hn"
 
+    def test_equal_score_deterministic_with_quota_zero(self):
+        """Equal-score candidates with quota=0 and one slot: same title regardless of input order."""
+        from newsbot.main import _select_diverse_candidates
+
+        # Two candidates with equal score, different titles.
+        alpha = {"source": "hn", "title": "Alpha", "score": 50.0, "url": "http://a"}
+        zulu = {"source": "hn", "title": "Zulu", "score": 50.0, "url": "http://z"}
+
+        cfg = {"source_quota": 0}
+        top1 = _select_diverse_candidates([alpha, zulu], 1, cfg)
+        top2 = _select_diverse_candidates([zulu, alpha], 1, cfg)
+
+        # With deterministic tie-break (title ascending), Alpha should always win.
+        assert len(top1) == 1
+        assert len(top2) == 1
+        assert top1[0]["title"] == top2[0]["title"] == "Alpha"
+
+    def test_deterministic_selection_across_permutations(self):
+        """Reversing input order must produce identical selection."""
+        from newsbot.main import _select_diverse_candidates
+
+        candidates = []
+        for src, score, i in [
+            ("hn", 100, 1), ("hn", 90, 2), ("hn", 80, 3),
+            ("reddit", 85, 4), ("reddit", 75, 5), ("reddit", 65, 6),
+            ("github", 70, 7), ("github", 60, 8),
+        ]:
+            candidates.append({"source": src, "title": f"{src}-{i}", "score": float(score), "url": f"http://{src}/{i}"})
+
+        cfg = {"source_quota": 2}
+        top1 = _select_diverse_candidates(list(candidates), 5, cfg)
+        top2 = _select_diverse_candidates(list(reversed(candidates)), 5, cfg)
+
+        assert len(top1) == len(top2) == 5
+        titles1 = [c["title"] for c in top1]
+        titles2 = [c["title"] for c in top2]
+        assert titles1 == titles2, f"Selection differs: {titles1} vs {titles2}"
+
 
 class TestFeedWeightOverride:
     """Verify that per-feed weight replaces global source weight (flow_001028 round 1)."""
