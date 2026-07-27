@@ -140,8 +140,8 @@ class BotCommandHandler:
                 try:
                     await self.on_digest()
                     await self._send(chat_id, "✅ Generation complete. Posts queued for hourly delivery.")
-                except Exception as exc:
-                    await self._send(chat_id, f"Generation failed: {exc}")
+                except Exception:
+                    await self._send(chat_id, "Generation failed. Check logs for details.")
             asyncio.create_task(_run_and_notify())
         else:
             await self._send(chat_id, "No generation handler registered.")
@@ -151,8 +151,8 @@ class BotCommandHandler:
             async def _post_and_notify() -> None:
                 try:
                     await self.on_post()
-                except Exception as exc:
-                    await self._send(chat_id, f"Post failed: {exc}")
+                except Exception:
+                    await self._send(chat_id, "Post failed. Check logs for details.")
             asyncio.create_task(_post_and_notify())
         else:
             await self._send(chat_id, "No post handler registered.")
@@ -162,8 +162,8 @@ class BotCommandHandler:
             try:
                 status_text = await self.on_status()
                 await self._send(chat_id, status_text)
-            except Exception as exc:
-                await self._send(chat_id, f"Status error: {exc}")
+            except Exception:
+                await self._send(chat_id, "Status error. Check logs for details.")
         else:
             await self._send(chat_id, "Status handler not available.")
 
@@ -178,13 +178,15 @@ class BotCommandHandler:
                 r = await self._client.post(url, json=params)
 
                 if r.status_code >= 400:
-                    log.warning("getUpdates failed: status=%s body=%s", r.status_code, redact_text(r.text[:200], max_length=150))
+                    log.warning("getUpdates failed: status=%d", r.status_code)
                     await asyncio.sleep(5)
                     continue
 
                 data = r.json()
                 if not data.get("ok"):
-                    log.warning("getUpdates not ok: %s", data)
+                    # Log only that the response was not ok — never log the
+                    # response object (may contain request echoes or error details).
+                    log.warning("getUpdates returned ok=false")
                     await asyncio.sleep(5)
                     continue
 

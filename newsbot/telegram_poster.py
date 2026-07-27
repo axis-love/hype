@@ -194,9 +194,9 @@ async def _send_with_retry(
                     raise
                 if r.status_code < 400:
                     return r.json()
-            # Log status code and a redacted snippet of the response.
-            safe_body = redact_text(r.text[:300], max_length=200)
-            log.error("chunk %d: Telegram send failed: status=%s body=%s", chunk_idx, r.status_code, safe_body)
+            # Log only safe metadata — never log response bodies (may contain
+            # echoed request content, chat payloads, or error details).
+            log.error("chunk %d: Telegram send failed: status=%d", chunk_idx, r.status_code)
             r.raise_for_status()
 
         # Success
