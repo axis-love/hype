@@ -80,11 +80,14 @@ class JobCoordinator:
     def posting_running(self) -> bool:
         return self._post_running
 
-    async def run_generation(self, gen_fn: Any) -> int:
+    async def run_generation(self, gen_fn: Any, *, timeout: float = 0) -> int:
         """Acquire the job lock and run the generation cycle.
 
         Returns the gen_fn's result (0=success, 1=failure), or 2 if
         another generation is already in progress (skipped).
+
+        If *timeout* > 0, the generation is bounded to that many seconds.
+        A timeout returns 1 (failure) — the prior queue remains intact.
         """
         if self._gen_running:
             log.info("generation already in progress — skipping")
@@ -92,7 +95,14 @@ class JobCoordinator:
         async with self._job_lock:
             self._gen_running = True
             try:
-                result = await gen_fn()
+                if timeout > 0:
+                    try:
+                        result = await asyncio.wait_for(gen_fn(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        log.error("generation timed out after %ds — keeping existing queue", timeout)
+                        return 1
+                else:
+                    result = await gen_fn()
                 return int(result) if result is not None else 0
             finally:
                 self._gen_running = False
