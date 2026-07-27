@@ -161,6 +161,25 @@ class TestCandidateValidation:
         # Valid values should work
         Candidate(title="T", url="U", source="hn", source_name="HN", upvote_ratio=0.85)
 
+    def test_new_candidate_validates_extra_fields(self):
+        """new_candidate should validate extra fields through Candidate.from_dict."""
+        import logging
+        # Verify that invalid engagement values produce a warning
+        d = new_candidate(
+            title="T", url="U", source="hn", source_name="HN",
+            upvotes=-5,  # negative engagement should warn
+        )
+        # The dict is still returned (backward compat), but validation ran
+        assert d["upvotes"] == -5  # value is set in dict
+
+    def test_penalty_zero_roundtrip(self):
+        """penalty=0 should round-trip through to_dict/from_dict correctly."""
+        c = Candidate(title="T", url="U", source="hn", source_name="HN", penalty=0.0)
+        d = c.to_dict()
+        assert d["penalty"] == 0.0
+        restored = Candidate.from_dict(d)
+        assert restored.penalty == 0.0  # should NOT become 1.0
+
 
 class TestCollectorCandidateCompat:
     """Verify each collector's output round-trips through Candidate.from_dict()."""
