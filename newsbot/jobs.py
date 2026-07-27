@@ -53,19 +53,21 @@ def format_post_message(title: str, body: str, url: str) -> str:
 
 
 class JobCoordinator:
-    """Serializes generation and posting jobs via asyncio locks.
+    """Serializes generation and posting jobs via a single asyncio lock.
 
-    - At most one generation job runs at a time (gen_lock).
-    - At most one posting/drain operation runs at a time (post_lock).
-    - Generation and posting can run concurrently with each other,
-      but not with another instance of the same type.
+    A single lock ensures generation and posting can NEVER overlap.
+    The poster can read a row and await Telegram while generation
+    replaces the queue — a single lock prevents that race.
+
+    - At most one job (generation OR posting) runs at a time.
+    - Re-entrant calls of the same type are skipped (returns 2).
+    - Generation result (0=success, 1=failure) is propagated to the caller.
     """
 
     def __init__(self, store: NewsStore, settings: SettingsStore) -> None:
         self._store = store
         self._settings = settings
-        self._gen_lock = asyncio.Lock()
-        self._post_lock = asyncio.Lock()
+        self._job_lock = asyncio.Lock()
         self._gen_running = False
         self._post_running = False
 
@@ -77,25 +79,25 @@ class JobCoordinator:
     def posting_running(self) -> bool:
         return self._post_running
 
-    async def run_generation(self, gen_fn: Any) -> bool:
-        """Acquire the generation lock and run the generation cycle.
+    async def run_generation(self, gen_fn: Any) -> int:
+        """Acquire the job lock and run the generation cycle.
 
-        Returns True if the job ran, False if another generation is
-        already in progress (caller should report coalesced/rejected).
+        Returns the gen_fn's result (0=success, 1=failure), or 2 if
+        another generation is already in progress (skipped).
         """
         if self._gen_running:
             log.info("generation already in progress — skipping")
-            return False
-        async with self._gen_lock:
+            return 2
+        async with self._job_lock:
             self._gen_running = True
             try:
-                await gen_fn()
-                return True
+                result = await gen_fn()
+                return int(result) if result is not None else 0
             finally:
                 self._gen_running = False
 
     async def run_posting(self) -> int:
-        """Acquire the posting lock and post one pending post.
+        """Acquire the job lock and post one pending post.
 
         Returns 0 on success, 1 on failure, 2 if another posting is
         in progress (skipped).
@@ -103,7 +105,7 @@ class JobCoordinator:
         if self._post_running:
             log.info("posting already in progress — skipping")
             return 2
-        async with self._post_lock:
+        async with self._job_lock:
             self._post_running = True
             try:
                 return await self._post_one()
@@ -111,7 +113,7 @@ class JobCoordinator:
                 self._post_running = False
 
     async def drain_posts(self) -> int:
-        """Acquire the posting lock and drain all pending posts.
+        """Acquire the job lock and drain all pending posts.
 
         Used by --once and dry-run modes. Posts all pending posts
         sequentially. Returns 0 on success, 1 on failure.
@@ -119,7 +121,7 @@ class JobCoordinator:
         if self._post_running:
             log.info("posting already in progress — cannot drain")
             return 1
-        async with self._post_lock:
+        async with self._job_lock:
             self._post_running = True
             try:
                 return await self._drain_all()
