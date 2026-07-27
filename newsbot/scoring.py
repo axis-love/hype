@@ -30,16 +30,22 @@ _SHORT_KEYWORD_PATTERNS: dict[str, list[tuple[re.Pattern, str]]] = {}
 
 
 def _build_keyword_patterns() -> None:
-    """Pre-compile keyword patterns for boundary-aware matching."""
+    """Pre-compile keyword patterns for boundary-aware matching.
+
+    Single-word keywords use word-boundary regex to prevent false positives
+    like "ai" matching "email", "unity" matching "community".
+    Multi-word phrases use substring matching (they are already specific enough).
+    """
     for boost_key, keywords in TOPIC_KEYWORDS.items():
         patterns: list[tuple[re.Pattern, str]] = []
         for kw in keywords:
             kw_lower = kw.lower()
-            # Multi-word phrases or long keywords: use substring match.
-            if " " in kw or len(kw_lower) > 4:
+            if " " in kw:
+                # Multi-word phrase: use substring match.
                 patterns.append((None, kw_lower))
             else:
-                # Short single-word: use word-boundary regex.
+                # Single word: use word-boundary regex to prevent
+                # matching substrings (unity -> community, ai -> email).
                 patterns.append((re.compile(r"\b" + re.escape(kw_lower) + r"\b"), kw_lower))
         _SHORT_KEYWORD_PATTERNS[boost_key] = patterns
 

@@ -139,23 +139,23 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
     """
     raw = settings.list("news") if hasattr(settings, "list") else {}
 
-    sources = _coerce_dict(raw.get("sources"), DEFAULT_SOURCES)
+    sources = _coerce_dict(raw.get("sources"), DEFAULT_SOURCES, key="sources")
     # Drop sources the operator disabled (set to None or empty dict).
     sources = {k: v for k, v in sources.items() if v}
 
     config = {
         "sources": sources,
-        "source_weights": _coerce_dict(raw.get("source_weights"), DEFAULT_SOURCE_WEIGHTS),
-        "topic_boost": {**DEFAULT_TOPIC_BOOST, **_coerce_dict(raw.get("topic_boost"), {})},
-        "lookback_hours": _as_int(raw.get("lookback_hours"), DEFAULT_RUN["lookback_hours"]),
-        "max_candidates": _as_int(raw.get("max_candidates"), DEFAULT_RUN["max_candidates"]),
-        "max_final_news": _as_int(raw.get("max_final_news"), DEFAULT_RUN["max_final_news"]),
-        "min_score": _as_float(raw.get("min_score"), DEFAULT_RUN["min_score"]),
-        "source_quota": _as_int(raw.get("source_quota"), DEFAULT_RUN["source_quota"]),
-        "item_prune_hours": _as_int(raw.get("item_prune_hours"), DEFAULT_RUN["item_prune_hours"]),
-        "llm_temperature": _as_float(raw.get("llm_temperature"), DEFAULT_LLM["temperature"]),
-        "llm_max_tokens_filter": _as_int(raw.get("llm_max_tokens_filter"), DEFAULT_LLM["max_tokens_filter"]),
-        "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"]),
+        "source_weights": _coerce_dict(raw.get("source_weights"), DEFAULT_SOURCE_WEIGHTS, key="source_weights"),
+        "topic_boost": {**DEFAULT_TOPIC_BOOST, **_coerce_dict(raw.get("topic_boost"), {}, key="topic_boost")},
+        "lookback_hours": _as_int(raw.get("lookback_hours"), DEFAULT_RUN["lookback_hours"], key="lookback_hours"),
+        "max_candidates": _as_int(raw.get("max_candidates"), DEFAULT_RUN["max_candidates"], key="max_candidates"),
+        "max_final_news": _as_int(raw.get("max_final_news"), DEFAULT_RUN["max_final_news"], key="max_final_news"),
+        "min_score": _as_float(raw.get("min_score"), DEFAULT_RUN["min_score"], key="min_score"),
+        "source_quota": _as_int(raw.get("source_quota"), DEFAULT_RUN["source_quota"], key="source_quota"),
+        "item_prune_hours": _as_int(raw.get("item_prune_hours"), DEFAULT_RUN["item_prune_hours"], key="item_prune_hours"),
+        "llm_temperature": _as_float(raw.get("llm_temperature"), DEFAULT_LLM["temperature"], key="llm_temperature"),
+        "llm_max_tokens_filter": _as_int(raw.get("llm_max_tokens_filter"), DEFAULT_LLM["max_tokens_filter"], key="llm_max_tokens_filter"),
+        "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"], key="llm_max_tokens_digest"),
         "style_prompt": str(raw.get("style_prompt") or DEFAULT_STYLE_PROMPT),
     }
 
@@ -275,21 +275,54 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError("Configuration validation failed:\n  " + "\n  ".join(errors))
 
 
-def _coerce_dict(value: Any, default: dict[str, Any]) -> dict[str, Any]:
+def _coerce_dict(value: Any, default: dict[str, Any], *, key: str = "") -> dict[str, Any]:
+    """Coerce to dict. If value is present but not a dict, raise ValueError."""
+    if value is None:
+        return dict(default)
     if isinstance(value, dict):
         return value
-    return dict(default)
+    raise ValueError(
+        f"{key or 'value'} must be a dict, got {type(value).__name__}: {value!r}"
+    )
 
 
-def _as_int(value: Any, default: int) -> int:
+def _as_int(value: Any, default: int, *, key: str = "") -> int:
+    """Convert to int. If value is present but not parseable, raise ValueError."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{key or 'value'} must be int, got bool: {value!r}"
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != int(value):
+            raise ValueError(
+                f"{key or 'value'} must be int, got non-integer float: {value!r}"
+            )
+        return int(value)
     try:
         return int(value)
     except (TypeError, ValueError):
+        raise ValueError(
+            f"{key or 'value'} must be int, got {type(value).__name__}: {value!r}"
+        )
+
+
+def _as_float(value: Any, default: float, *, key: str = "") -> float:
+    """Convert to float. If value is present but not parseable, raise ValueError."""
+    if value is None or value == "":
         return default
-
-
-def _as_float(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{key or 'value'} must be numeric, got bool: {value!r}"
+        )
+    if isinstance(value, (int, float)):
+        return float(value)
     try:
         return float(value)
     except (TypeError, ValueError):
-        return default
+        raise ValueError(
+            f"{key or 'value'} must be numeric, got {type(value).__name__}: {value!r}"
+        )
