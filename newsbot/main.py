@@ -353,6 +353,11 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
 
     log.info("queued %d posts for delivery (marked %d items as seen)", inserted, seen)
     store.prune_old_items(cfg["item_prune_hours"])
+    # Run retention cleanup: posted posts older than 30 days, seen entries
+    # older than 14 days, digests older than 90 days. Bounded batches.
+    store.prune_posted_posts(max_age_days=30)
+    store.prune_seen(max_age_days=14)
+    store.prune_digests(max_age_days=90)
 
     return 0
 

@@ -156,8 +156,8 @@ class NewsStore:
                 continue
             fn = globals().get(f"_migration_{version}")
             if fn is None:
-                log.error("Migration %d not found: %s", version, description)
-                continue
+                log.error("Migration %d not found: %s — ABORTING migrations", version, description)
+                raise RuntimeError(f"Migration {version} function not found: {description}")
             try:
                 cur.execute("BEGIN IMMEDIATE")
                 fn(cur)
@@ -449,15 +449,16 @@ class NewsStore:
         """Delete seen entries older than max_age_days, in bounded batches.
 
         Never removes entries within the deduplication window.
-        Returns the total count of deleted rows.
+        Prunes by rowid (not url) so title-only entries (url IS NULL)
+        are also pruned. Returns the total count of deleted rows.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
         total_deleted = 0
         while True:
             cur = self._conn.execute(
-                "DELETE FROM seen WHERE first_seen_at < ? AND url IN "
-                "(SELECT url FROM seen WHERE first_seen_at < ? LIMIT ?)",
-                (cutoff, cutoff, batch_size),
+                "DELETE FROM seen WHERE rowid IN "
+                "(SELECT rowid FROM seen WHERE first_seen_at < ? LIMIT ?)",
+                (cutoff, batch_size),
             )
             deleted = int(cur.rowcount or 0)
             total_deleted += deleted
