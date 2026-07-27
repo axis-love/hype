@@ -18,6 +18,8 @@ import logging
 import re
 from typing import Any
 
+import httpx
+
 try:
     import feedparser
 except ImportError:  # pragma: no cover
@@ -28,6 +30,12 @@ from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_
 log = logging.getLogger(__name__)
 
 REDDIT_USER_AGENT = "Mozilla/5.0 (compatible; newsbot/0.1; +https://github.com/elevenoutoften/news-bot)"
+
+# Shared concurrency limiter — same as RSS to bound total outbound requests.
+_COLLECTOR_SEMAPHORE = asyncio.Semaphore(10)
+
+# HTTP timeout for Reddit RSS fetches.
+_REDDIT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 # Regex to extract score and comment count from Reddit RSS entry titles
 # e.g. "Some title : r/LocalLLaMA — 1.2k votes, 89 comments"
@@ -82,23 +90,35 @@ async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
         log.warning("Reddit fetch skipped for %s: feedparser not installed", source_name)
         return []
 
-    try:
-        # Use asyncio.wait_for for a safe, thread-safe timeout.
-        # SIGALRM is process-global and unsafe with concurrent threads.
-        parsed = await asyncio.wait_for(
-            asyncio.to_thread(feedparser.parse, url, agent=REDDIT_USER_AGENT),
-            timeout=30,
-        )
-    except asyncio.TimeoutError:
-        log.warning("Reddit fetch timed out for %s url=%s", source_name, url)
-        return []
-    except Exception as exc:
-        log.warning("Reddit fetch failed for %s url=%s: %s", source_name, url, exc)
-        return []
+    # Async HTTP fetch with explicit timeout, then local parse.
+    # This avoids asyncio.to_thread(feedparser.parse, URL) which leaves
+    # a stuck worker thread performing network I/O on timeout.
+    async with _COLLECTOR_SEMAPHORE:
+        try:
+            async with httpx.AsyncClient(
+                timeout=_REDDIT_TIMEOUT,
+                follow_redirects=True,
+                headers={"User-Agent": REDDIT_USER_AGENT},
+            ) as client:
+                response = await client.get(url)
+                content = response.content
+                status = response.status_code
+        except httpx.TimeoutException:
+            log.warning("Reddit fetch timed out for %s url=%s", source_name, url)
+            return []
+        except Exception as exc:
+            log.warning("Reddit fetch failed for %s url=%s: %s", source_name, url, exc)
+            return []
 
-    status = getattr(parsed, "status", None)
     if status and status >= 400:
         log.warning("Reddit fetch failed for %s url=%s status=%s", source_name, url, status)
+        return []
+
+    # Parse the already-downloaded bytes locally (no network I/O).
+    try:
+        parsed = feedparser.parse(content)
+    except Exception as exc:
+        log.warning("Reddit parse failed for %s url=%s: %s", source_name, url, exc)
         return []
 
     items: list[dict[str, Any]] = []

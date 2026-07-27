@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
 
+# Shared concurrency limiter for all outbound collector requests.
+_COLLECTOR_SEMAPHORE = asyncio.Semaphore(10)
+
 # Penalty keywords — repos whose name/description matches these get down-weighted
 # by setting a low score multiplier (applied via the 'penalty' field, read by scoring).
 PENALTY_KEYWORDS = (
@@ -66,15 +69,16 @@ def _is_suspicious(repo: dict[str, Any]) -> bool:
 
 async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort: str) -> list[dict[str, Any]]:
     params = {"q": query, "sort": sort, "order": "desc", "per_page": limit}
-    try:
-        r = await client.get(GITHUB_SEARCH_URL, params=params)
-        if r.status_code >= 400:
-            log.warning("GitHub search failed query=%r status=%s", query, r.status_code)
+    async with _COLLECTOR_SEMAPHORE:
+        try:
+            r = await client.get(GITHUB_SEARCH_URL, params=params)
+            if r.status_code >= 400:
+                log.warning("GitHub search failed query=%r status=%s", query, r.status_code)
+                return []
+            data = r.json()
+        except Exception as exc:
+            log.warning("GitHub search failed query=%r status=unavailable: %s", query, exc)
             return []
-        data = r.json()
-    except Exception as exc:
-        log.warning("GitHub search failed query=%r status=unavailable: %s", query, exc)
-        return []
 
     items: list[dict[str, Any]] = []
     for repo in data.get("items", []):

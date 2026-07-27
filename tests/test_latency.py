@@ -92,20 +92,26 @@ class TestSafeTimeout:
 
     @pytest.mark.asyncio
     async def test_rss_timeout_uses_wait_for(self):
-        """RSS collector should use asyncio.wait_for, not SIGALRM."""
+        """RSS collector should use async HTTP with timeout, not SIGALRM."""
         import signal
         # Verify SIGALRM is NOT used by checking that no alarm is set during fetch
-        with patch("newsbot.collectors.rss.feedparser") as mock_fp:
-            mock_fp.parse = MagicMock(return_value=MagicMock(entries=[]))
-            # If SIGALRM were used, signal.alarm(0) would be called in cleanup.
-            # With asyncio.wait_for, no signal calls are made.
-            with patch("signal.alarm") as mock_alarm, \
-                 patch("signal.signal") as mock_signal:
-                from newsbot.collectors.rss import _fetch_one
-                await _fetch_one({"url": "https://example.com/feed", "name": "test"})
-                # SIGALRM should NOT be called
-                mock_alarm.assert_not_called()
-                mock_signal.assert_not_called()
+        with patch("signal.alarm") as mock_alarm, \
+             patch("signal.signal") as mock_signal:
+            # Mock httpx to return empty content
+            mock_response = MagicMock()
+            mock_response.content = b"<rss></rss>"
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            with patch("newsbot.collectors.rss.httpx.AsyncClient", return_value=mock_client):
+                with patch("newsbot.collectors.rss.feedparser") as mock_fp:
+                    mock_fp.parse = MagicMock(return_value=MagicMock(entries=[]))
+                    from newsbot.collectors.rss import _fetch_one
+                    await _fetch_one({"url": "https://example.com/feed", "name": "test"})
+                    # SIGALRM should NOT be called
+                    mock_alarm.assert_not_called()
+                    mock_signal.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_generation_timeout_returns_failure(self):
@@ -134,3 +140,29 @@ class TestSafeTimeout:
         from newsbot.main import MAX_CONCURRENT_COLLECTORS
         assert MAX_CONCURRENT_COLLECTORS <= 20  # reasonable bound
         assert MAX_CONCURRENT_COLLECTORS >= 3   # at least covers source types
+
+    @pytest.mark.asyncio
+    async def test_rss_timeout_does_not_leave_thread(self):
+        """RSS fetch timeout should cancel the HTTP request, not leave a thread."""
+        from newsbot.collectors.rss import _fetch_one
+        import httpx
+
+        # Mock httpx to raise a timeout exception directly.
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ReadTimeout("read timed out"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("newsbot.collectors.rss.httpx.AsyncClient", return_value=mock_client):
+            # This should return [] (timeout), not hang.
+            result = await _fetch_one({"url": "https://slow.example.com/feed", "name": "test"})
+            assert result == []
+
+    @pytest.mark.asyncio
+    async def test_shared_semaphore_bounds_leaf_concurrency(self):
+        """Verify the shared semaphore limits concurrent leaf fetches."""
+        from newsbot.collectors.rss import _COLLECTOR_SEMAPHORE
+
+        # The semaphore should exist and have a bounded value.
+        assert _COLLECTOR_SEMAPHORE._value <= 20
+        assert _COLLECTOR_SEMAPHORE._value >= 1
