@@ -33,6 +33,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from core.logging_config import configure_logging
+from core.log_sanitizer import redact_exception
 from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
@@ -433,7 +434,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                     log.error("generation failed (code=%d)", result)
                     gen_failed = True
             except Exception as exc:
-                log.error("generation cycle failed: %s", exc, exc_info=True)
+                log.error("generation cycle failed: %s", redact_exception(exc))
                 gen_failed = True
 
             # Only advance last_gen_utc on success (result 0).
@@ -483,7 +484,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 if result == 1:
                     post_failed = True
             except Exception as exc:
-                log.error("posting cycle failed: %s", exc, exc_info=True)
+                log.error("posting cycle failed: %s", redact_exception(exc))
                 post_failed = True
 
             # Only advance last_post_utc on success (or no pending posts).

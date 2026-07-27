@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from newsbot.db import NewsStore
 from newsbot.telegram_poster import post_digest
@@ -154,7 +155,7 @@ class JobCoordinator:
             self._store.mark_posted(post["id"])
             log.info("posted pending post id=%d to Telegram", post["id"])
         except Exception as exc:
-            log.error("failed to post pending post id=%d: %s", post["id"], exc)
+            log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
             return 1
 
         return 0
@@ -180,6 +181,6 @@ class JobCoordinator:
                     await post_digest(message, bot_token=bot_token, chat_id=chat_id)
                     self._store.mark_posted(post["id"])
                 except Exception as exc:
-                    log.error("failed to post pending post id=%d: %s", post["id"], exc)
+                    log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
                     return 1
         return 0
