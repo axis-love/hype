@@ -420,30 +420,28 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                     log.warning("invalid last_gen_utc: %s — generating now", last_gen_str)
 
             log.info("generation cycle starting at %s", now.isoformat())
-            gen_failed = False
+            gen_success = False
             try:
                 result = await coordinator.run_generation(
                     lambda: _run_generation(store, settings)
                 )
-                if result == 2:
+                if result == 0:
+                    gen_success = True
+                elif result == 2:
                     log.info("generation skipped — already in progress")
                     # Skipped does NOT advance timestamp — next tick retries
-                elif result == 0:
-                    log.info("generation cycle complete")
                 else:
                     log.error("generation failed (code=%d)", result)
-                    gen_failed = True
             except Exception as exc:
                 log.error("generation cycle failed: %s", redact_exception(exc))
-                gen_failed = True
 
-            # Only advance last_gen_utc on success (result 0).
-            if not gen_failed:
+            # Only advance last_gen_utc on actual success (result 0).
+            if gen_success:
                 now = datetime.now(timezone.utc)
                 settings.set("scheduler", "last_gen_utc", now.isoformat())
                 log.info("generation cycle complete, next in %.1fh", gen_interval_hours)
             else:
-                log.warning("generation failed — will retry on next tick (last_gen_utc unchanged)")
+                log.warning("generation did not succeed — will retry on next tick (last_gen_utc unchanged)")
 
             await asyncio.sleep(60)
 
@@ -472,27 +470,26 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 except (ValueError, TypeError):
                     pass  # run now
 
-            post_failed = False
+            post_success = False
             try:
                 result = await coordinator.run_posting()
-                if result == 2:
+                if result == 0:
+                    # result 0 = success or no-op (no pending posts)
+                    post_success = True
+                elif result == 2:
                     log.info("posting skipped — already in progress")
                     # Skipped does NOT advance timestamp
-                    post_failed = True  # treat as non-success so timestamp unchanged
-                # result 0 = success or no-op (no pending posts)
-                # result 1 = failure
-                if result == 1:
-                    post_failed = True
+                else:
+                    log.error("posting failed (code=%d)", result)
             except Exception as exc:
                 log.error("posting cycle failed: %s", redact_exception(exc))
-                post_failed = True
 
             # Only advance last_post_utc on success (or no pending posts).
-            if not post_failed:
+            if post_success:
                 now = datetime.now(timezone.utc)
                 settings.set("scheduler", "last_post_utc", now.isoformat())
             else:
-                log.warning("posting failed — will retry on next tick (last_post_utc unchanged)")
+                log.warning("posting did not succeed — will retry on next tick (last_post_utc unchanged)")
 
             await asyncio.sleep(30)
 
