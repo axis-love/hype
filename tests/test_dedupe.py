@@ -157,6 +157,32 @@ def test_dedupe_contributing_sources_set():
     assert "Hacker News" in merged["source_name"]
     assert "r/LocalLLaMA" in merged["source_name"]
     assert "Product Hunt" in merged["source_name"]
-    # Internal tracking fields should be cleaned up.
-    assert "_contributing_sources" not in merged
+    # Internal-only tracking field should be cleaned up.
     assert "_source_names_set" not in merged
+    # contributing_sources is a persistent field (not deleted).
+    assert "contributing_sources" in merged
+    assert set(merged["contributing_sources"]) == {"hn", "reddit", "producthunt"}
+
+
+def test_dedupe_same_source_takes_max_engagement():
+    """Same-source duplicates (e.g. GitHub from multiple queries) take max, not sum."""
+    a = new_candidate(title="Popular Repo", url="https://github.com/x/y",
+                      source="github", source_name="GitHub", stars=1000, forks=100)
+    b = new_candidate(title="Popular Repo", url="https://github.com/x/y",
+                      source="github", source_name="GitHub", stars=1500, forks=80)
+    out = dedupe_and_merge([a, b])
+    assert len(out) == 1
+    merged = out[0]
+    # Same source: take max, not sum (would be 2500 if summed)
+    assert merged["stars"] == 1500
+    assert merged["forks"] == 100  # max(100, 80) = 100
+
+
+def test_dedupe_url_encoding_preserved():
+    """Query params with special characters should be URL-encoded properly."""
+    from newsbot.dedupe import _canonical_url
+    # Param value with spaces/special chars should be encoded
+    url = "https://example.com/search?q=hello world&sort=desc"
+    canon = _canonical_url(url)
+    assert "hello+world" in canon or "hello%20world" in canon
+    assert "sort=desc" in canon
