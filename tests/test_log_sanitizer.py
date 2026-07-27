@@ -1,6 +1,8 @@
 """Tests for log sanitization — redact secrets from error messages (flow_001024)."""
 import logging
 from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -103,6 +105,50 @@ class TestTelegramLoggerOutput:
         # Check no captured log record contains the token.
         for record in caplog.records:
             assert token not in record.getMessage(), f"Bot token leaked in log: {record.getMessage()}"
+
+
+class TestCoordinatorRedaction:
+    """Verify that JobCoordinator error logs do not leak bot tokens (flow_001024 round 1)."""
+
+    @pytest.fixture
+    def store(self, tmp_path: Path):
+        from newsbot.db import NewsStore
+        return NewsStore(tmp_path / "test.sqlite")
+
+    @pytest.fixture
+    def settings(self):
+        class MockSettings:
+            def __init__(self):
+                self._data: dict[str, dict[str, object]] = {}
+            def get(self, section, key, default=None):
+                return self._data.get(section, {}).get(key, default)
+            def set(self, section, key, value):
+                self._data.setdefault(section, {})[key] = value
+        return MockSettings()
+
+    @pytest.mark.asyncio
+    async def test_post_one_redacts_bot_token(self, store, settings, caplog):
+        """When post_digest raises with bot token in URL, coordinator must redact it."""
+        from newsbot.jobs import JobCoordinator
+
+        coordinator = JobCoordinator(store, settings)
+        store.add_pending_post({"title": "T", "body": "B", "url": "http://x.com"})
+
+        token = "123456789:AAExxxxxxxxxxxxxxxxxxxx"
+
+        async def fake_post(*args, **kwargs):
+            raise Exception(f"Request to https://api.telegram.org/bot{token}/sendMessage failed")
+
+        with patch.dict("os.environ", {"BOT_TOKEN": token, "NEWS_CHANNEL_ID": "@test"}):
+            with patch("newsbot.jobs.post_digest", side_effect=fake_post):
+                with caplog.at_level(logging.ERROR):
+                    result = await coordinator.run_posting()
+
+        assert result == 1
+        # Bot token must NOT appear in any log record
+        for record in caplog.records:
+            assert token not in record.getMessage(), f"Bot token leaked in log: {record.getMessage()}"
+            assert "AAExxxxxxxxxxxxxxxxxxxx" not in record.getMessage()
 
 
 class TestLLMErrorMessages:
