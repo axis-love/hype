@@ -185,3 +185,40 @@ class TestReplaceUnpostedBatch:
         # Omitted items should NOT be marked seen.
         assert not store.is_seen("http://x.com/3", "Item3")
         assert not store.is_seen("http://x.com/4", "Item4")
+
+
+class TestBatchSeenDuplicateHandling:
+    """Verify duplicate URLs/titles in batch seen filtering (flow_001033 round 1)."""
+
+    def test_duplicate_urls_all_filtered(self, store, tmp_path):
+        """When multiple candidates share the same seen URL, ALL should be filtered."""
+        # Mark a URL as seen
+        store.mark_seen([{"url": "http://dup.com", "title": "dup"}])
+
+        items = [
+            {"url": "http://dup.com", "title": "First"},
+            {"url": "http://dup.com", "title": "Second"},
+            {"url": "http://dup.com", "title": "Third"},
+            {"url": "http://other.com", "title": "Unique"},
+        ]
+        seen_idx = store.is_seen_batch(items)
+        # All three dup.com items should be in seen_idx (indices 0, 1, 2)
+        assert 0 in seen_idx
+        assert 1 in seen_idx
+        assert 2 in seen_idx
+        # The unique one should NOT be seen
+        assert 3 not in seen_idx
+
+    def test_duplicate_titles_all_filtered(self, store, tmp_path):
+        """When multiple candidates share the same seen title, ALL should be filtered."""
+        store.mark_seen([{"url": "", "title": "same title"}])
+
+        items = [
+            {"url": "http://a.com", "title": "Same Title"},
+            {"url": "http://b.com", "title": "Same Title"},
+            {"url": "http://c.com", "title": "Different"},
+        ]
+        seen_idx = store.is_seen_batch(items)
+        assert 0 in seen_idx
+        assert 1 in seen_idx
+        assert 2 not in seen_idx
