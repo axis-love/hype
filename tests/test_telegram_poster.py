@@ -1,11 +1,11 @@
-"""Tests for newsbot/telegram_poster.py — chunking and 429 retry."""
+"""Tests for newsbot/telegram_poster.py — chunking, retries, tag balance."""
 
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import httpx
 import pytest
 
-from newsbot.telegram_poster import _split_for_telegram, post_digest
+from newsbot.telegram_poster import _split_for_telegram, post_digest, _balance_tags
 
 
 def test_split_keeps_short_text_as_one_chunk():
@@ -20,6 +20,46 @@ def test_split_on_blank_line_boundary():
     assert all(len(c) <= 3000 for c in chunks)
     # No chunk should start with a leftover newline from the split.
     assert all(not c.startswith("\n") for c in chunks)
+
+
+def test_split_balances_open_tags():
+    """When a chunk has an unclosed <b> tag, it should be closed and re-opened."""
+    # Text where <b> opens but content exceeds limit before </b>
+    text = "<b>" + "A" * 3000 + "</b>"
+    chunks = _split_for_telegram(text, limit=1000)
+    assert len(chunks) >= 2
+    # Each chunk should have balanced <b> tags
+    for chunk in chunks:
+        opens = chunk.lower().count("<b>")
+        closes = chunk.lower().count("</b>")
+        assert opens == closes, f"Unbalanced <b> tag: opens={opens}, closes={closes}"
+
+
+def test_balance_tags_closes_and_reopens():
+    """_balance_tags should close open tags and provide a re-open prefix."""
+    chunk = "<b>hello world"
+    remaining = " more text"
+    balanced, prefix = _balance_tags(chunk, remaining)
+    assert balanced == "<b>hello world</b>"
+    assert prefix == "<b>"
+
+
+def test_balance_tags_handles_nested():
+    """Nested tags should be closed in reverse order."""
+    chunk = "<b><i>hello"
+    remaining = " world"
+    balanced, prefix = _balance_tags(chunk, remaining)
+    assert "</i></b>" in balanced
+    assert "<b><i>" in prefix
+
+
+def test_balance_tags_no_change_when_balanced():
+    """Already-balanced tags should return unchanged."""
+    chunk = "<b>hello</b>"
+    remaining = " world"
+    balanced, prefix = _balance_tags(chunk, remaining)
+    assert balanced == "<b>hello</b>"
+    assert prefix == ""
 
 
 @pytest.mark.asyncio
@@ -41,6 +81,52 @@ async def test_post_digest_retries_on_429():
     with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
          patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
         results = await post_digest("digest", bot_token="t", chat_id="@c")
+
+    assert fake_client.post.call_count == 2
+    assert results[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_digest_retries_on_500():
+    """5xx should be retried (bounded transient retries)."""
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    server_err = MagicMock()
+    server_err.status_code = 500
+    server_err.text = "Internal Server Error"
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[server_err, ok_resp])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
+        results = await post_digest("text", bot_token="t", chat_id="@c")
+
+    assert fake_client.post.call_count == 2
+    assert results[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_digest_retries_on_timeout():
+    """Transport timeout should be retried (bounded)."""
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[httpx.TimeoutException("timeout"), ok_resp])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
+        results = await post_digest("text", bot_token="t", chat_id="@c")
 
     assert fake_client.post.call_count == 2
     assert results[0]["ok"] is True
@@ -104,24 +190,58 @@ async def test_post_digest_does_not_retry_on_auth_failure():
 
 
 @pytest.mark.asyncio
-async def test_post_digest_does_not_retry_on_server_error():
-    """500 should NOT be retried as plain text."""
+async def test_post_digest_500_exhausts_retries_and_raises():
+    """5xx after all retries should raise RuntimeError for partial delivery."""
     server_err = MagicMock()
     server_err.status_code = 500
     server_err.text = "Internal Server Error"
-    server_err.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
-        "500", request=MagicMock(), response=server_err))
 
     fake_client = AsyncMock()
     fake_client.post = AsyncMock(return_value=server_err)
     fake_client.__aenter__ = AsyncMock(return_value=fake_client)
     fake_client.__aexit__ = AsyncMock(return_value=None)
 
-    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
-        with pytest.raises(httpx.HTTPStatusError):
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(RuntimeError, match="transient retries"):
             await post_digest("text", bot_token="t", chat_id="@c")
 
-    assert fake_client.post.call_count == 1
+    # Should have tried MAX_TRANSIENT_RETRIES + 1 times
+    from newsbot.telegram_poster import MAX_TRANSIENT_RETRIES
+    assert fake_client.post.call_count == MAX_TRANSIENT_RETRIES + 1
+
+
+@pytest.mark.asyncio
+async def test_post_digest_caps_retry_after():
+    """retry_after from server should be capped at MAX_RETRY_AFTER."""
+    from newsbot.telegram_poster import MAX_RETRY_AFTER
+
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    rate_limited = MagicMock()
+    rate_limited.status_code = 429
+    rate_limited.json.return_value = {"parameters": {"retry_after": 9999.0}}
+
+    sleep_calls: list[float] = []
+
+    async def mock_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[rate_limited, ok_resp])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=mock_sleep):
+        await post_digest("text", bot_token="t", chat_id="@c")
+
+    # The sleep should have been capped
+    assert len(sleep_calls) >= 1
+    assert sleep_calls[0] <= MAX_RETRY_AFTER
 
 
 def test_split_does_not_break_html_tag():
