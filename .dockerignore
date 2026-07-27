@@ -29,6 +29,23 @@ deploy/docker/.env.*
 *.sqlite-wal
 *.sqlite3
 
+# Credential files — never copy secrets into image layers
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service_account.json
+*.service-account.json
+.npmrc
+.pypirc
+.netrc
+.aws/
+.gcloud/
+.ssh/
+.kube/
+.docker/
+
 # Models and binaries — huge, never needed in image
 ollama_models/
 *.gguf
