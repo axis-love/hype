@@ -32,7 +32,7 @@ Posts are delivered one at a time, spread over the interval.
 
 ```bash
 cp .env.example .env        # fill in BOT_TOKEN, NEWS_CHANNEL_ID, LM_*, ADMIN_USER_ID
-pip install -r requirements.txt
+pip install -e ".[dev]"
 python -m newsbot.main      # scheduled mode (stays alive, generates + posts on timers)
 python -m newsbot.main --once  # one-shot mode (generates + posts all immediately)
 ```
@@ -40,6 +40,10 @@ python -m newsbot.main --once  # one-shot mode (generates + posts all immediatel
 Without `BOT_TOKEN` and `NEWS_CHANNEL_ID`, the bot runs in dry-run mode
 (printing posts to stdout). Without `NEWS_INTERVAL_HOURS`, it runs once
 and exits.
+
+> **Note:** `NEWS_INTERVAL_HOURS=0` does NOT mean one-shot — it causes
+> generation every 60 seconds. Use `--once` for one-shot mode, or leave
+> `NEWS_INTERVAL_HOURS` unset for dry-run single execution.
 
 ## Bot Commands
 
@@ -56,19 +60,26 @@ user can issue commands.
 | `/status` | Show pending posts count + schedule info |
 | `/help` | List commands |
 
-## Cron
+## Scheduling
 
-For scheduled (long-lived) mode:
+The bot has a **built-in scheduler** — do NOT use external cron for
+scheduled mode. The container runs three concurrent async loops
+(generation, posting, bot commands) and stays alive as long as needed.
 
-```cron
-0 9,18 * * * cd /opt/newsbot && python -m newsbot.main
+```bash
+# Scheduled mode (recommended) — stays alive, handles its own timing
+python -m newsbot.main
 ```
 
-For one-shot mode:
+If you need one-shot execution (e.g. from a cron job or CI):
 
 ```cron
 0 9 * * * cd /opt/newsbot && python -m newsbot.main --once
 ```
+
+> **Warning:** Do NOT run `python -m newsbot.main` (without `--once`)
+> from cron — it starts a long-lived process that never exits. Multiple
+> invocations will create duplicate bot instances posting to the same channel.
 
 ## Environment
 
