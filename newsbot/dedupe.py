@@ -12,11 +12,17 @@ dropping the weaker item: sum upvotes/comments/stars (only across distinct
 sources), take the max published_at, and stamp crosspost_count = number of
 distinct sources. The crosspost bonus (+30 in scoring) is one of the
 strongest signals.
+
+Primary-source selection is deterministic regardless of collector order:
+a pre-merge preference is computed from configured source weights and
+engagement signals, so reversing the input order produces the same primary
+source.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 from urllib.parse import urlsplit, parse_qsl, urlencode
 
@@ -40,6 +46,58 @@ _TRACKING_PARAMS = frozenset({
     "spm", "scm", "campaign", "_hsenc", "_hsmi", "hsCtaTracking",
     "feature", "ocid", "ito", "cmpid", "src", "share",
 })
+
+# Default source weights for pre-merge ranking (must match config defaults).
+_PRE_MERGE_WEIGHTS: dict[str, float] = {
+    "hackernews": 1.2,
+    "hn": 1.2,
+    "reddit": 1.0,
+    "github": 1.1,
+    "producthunt": 0.8,
+    "huggingface_papers": 1.2,
+    "rss": 0.5,
+}
+
+_SOURCE_ALIASES_PRE: dict[str, str] = {
+    "hn": "hackernews",
+}
+
+
+def _pre_merge_preference(item: dict[str, Any]) -> float:
+    """Compute a deterministic pre-merge preference for primary-source selection.
+
+    Uses configured source weights and engagement signals to rank candidates
+    before scoring. This ensures the primary source is deterministic regardless
+    of collector order, even when all candidates have equal default scores.
+
+    Higher preference = more likely to be the primary representative.
+    """
+    src = str(item.get("source") or "").strip()
+    src = _SOURCE_ALIASES_PRE.get(src, src)
+    weight = _PRE_MERGE_WEIGHTS.get(src, 1.0)
+
+    # RSS feed weight override.
+    raw_json = item.get("raw_json")
+    if isinstance(raw_json, dict):
+        feed_weight = raw_json.get("weight")
+        if feed_weight is not None:
+            try:
+                weight = float(feed_weight)
+            except (TypeError, ValueError):
+                pass
+
+    # Engagement signal: log1p-weighted (same formula as scoring.py, minus recency).
+    eng = (
+        math.log1p(max(0, item.get("upvotes") or 0)) * 10.0
+        + math.log1p(max(0, item.get("comments") or 0)) * 25.0
+        + math.log1p(max(0, item.get("stars") or 0)) * 15.0
+        + math.log1p(max(0, item.get("reposts") or 0)) * 20.0
+    )
+
+    # Preference = engagement * source_weight. Deterministic, order-independent.
+    # If scores are set (rare at dedupe stage), use as a secondary signal.
+    score = float(item.get("score") or 0.0)
+    return eng * weight + score
 
 
 def _canonical_url(url: Any) -> str:
@@ -124,15 +182,24 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
       (not first-seen, not re-summed).
     - crosspost_count reflects all distinct contributing sources (not capped at 2).
     - contributing_sources is a persistent list on the output item.
-    - The representative source is deterministic: highest score wins, tie-break
-      by source name alphabetically. Since dedupe runs before scoring, the
-      first-seen item is the default primary (stable, order-independent for
-      same-input runs).
+    - The representative source is deterministic: highest pre-merge preference
+      wins, tie-break by normalized source ID alphabetically. This is
+      order-independent — reversing collector input produces the same primary.
+    - When the primary changes, all representative fields (source, url, title,
+      snippet, published_at) are copied consistently from the new primary.
     """
     # Track contributing sources in a persistent list.
     if not keep.get("contributing_sources"):
         keep["contributing_sources"] = [keep.get("source") or "unknown"]
     other_source = other.get("source") or "unknown"
+
+    # Track the individual preference of the current primary candidate.
+    # This is set on first merge and updated when primary switches.
+    # It represents the pre-merge preference of the candidate that is
+    # currently the primary — NOT the inflated merged value.
+    if "_primary_preference" not in keep:
+        keep["_primary_preference"] = _pre_merge_preference(keep)
+    other_pref = _pre_merge_preference(other)
 
     # Only sum engagement if this is from a new source (prevents inflation).
     if other_source not in keep["contributing_sources"]:
@@ -185,13 +252,26 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     sources.discard("unknown")
     keep["crosspost_count"] = max(int(keep.get("crosspost_count") or 1), len(sources))
 
-    # Deterministic primary source selection:
-    # Since dedupe runs BEFORE scoring, candidates have equal/default scores.
-    # Tie-break: keep the first-seen item's source (stable, deterministic for
-    # same input order). If other has a higher score, switch.
-    if other.get("score") is not None:
-        if keep.get("score") is None or float(other["score"]) > float(keep["score"]):
-            keep["source"] = other_source
+    # Deterministic primary-source selection using pre-merge preference:
+    # Compares individual candidate preferences (stored in _primary_preference),
+    # not the inflated merged engagement value. Order-independent.
+    # Tie-break: source ID alphabetically.
+    if other_pref > keep["_primary_preference"] or (
+        other_pref == keep["_primary_preference"]
+        and str(other.get("source") or "") < str(keep.get("source") or "")
+    ):
+        # Switch primary: copy all representative fields from other.
+        keep["source"] = other.get("source") or keep.get("source")
+        keep["url"] = other.get("url") or keep.get("url")
+        keep["title"] = other.get("title") or keep.get("title")
+        if other.get("snippet"):
+            keep["snippet"] = other["snippet"]
+        if other.get("published_at"):
+            keep["published_at"] = other["published_at"]
+        if other.get("score") is not None:
+            keep["score"] = other["score"]
+        # Update primary preference to the new primary's individual value.
+        keep["_primary_preference"] = other_pref
 
     return keep
 
@@ -261,5 +341,6 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # Clean up internal-only tracking fields (but keep contributing_sources).
     for item in result:
         item.pop("_source_names_set", None)
+        item.pop("_primary_preference", None)
 
     return result

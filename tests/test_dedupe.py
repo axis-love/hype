@@ -123,24 +123,57 @@ def test_dedupe_three_sources_crosspost_count():
 
 
 def test_dedupe_source_order_independence():
-    """Primary source should be deterministic regardless of collector order."""
-    # Same item from different sources, different order.
+    """Primary source should be deterministic regardless of collector order.
+
+    Uses unscored candidates (as in production) — pre-merge preference
+    uses source weights and engagement, not scores.
+    """
+    # Same item from different sources, different order, NO scores set.
     a1 = new_candidate(title="Story X", url="https://example.com/x",
-                       source="hn", source_name="HN", upvotes=100, score=50.0)
+                       source="hn", source_name="HN", upvotes=100)
     a2 = new_candidate(title="Story X", url="https://example.com/x",
-                       source="reddit", source_name="Reddit", upvotes=200, score=80.0)
+                       source="reddit", source_name="Reddit", upvotes=200)
 
     b1 = new_candidate(title="Story X", url="https://example.com/x",
-                       source="reddit", source_name="Reddit", upvotes=200, score=80.0)
+                       source="reddit", source_name="Reddit", upvotes=200)
     b2 = new_candidate(title="Story X", url="https://example.com/x",
-                       source="hn", source_name="HN", upvotes=100, score=50.0)
+                       source="hn", source_name="HN", upvotes=100)
 
     out1 = dedupe_and_merge([a1, a2])
     out2 = dedupe_and_merge([b1, b2])
     assert len(out1) == 1
     assert len(out2) == 1
-    # Primary source should be the one with the highest score (reddit, score=80).
-    assert out1[0]["source"] == out2[0]["source"] == "reddit"
+    # Primary source should be the same regardless of input order.
+    # HN has weight 1.2, Reddit has weight 1.0. HN upvotes=100, Reddit upvotes=200.
+    # HN preference: log1p(100)*10*1.2 = 4.62*10*1.2 = 55.4
+    # Reddit preference: log1p(200)*10*1.0 = 5.30*10*1.0 = 53.0
+    # HN wins due to higher source weight despite lower engagement.
+    assert out1[0]["source"] == out2[0]["source"]
+    # The primary should be HN (higher source weight).
+    assert out1[0]["source"] == "hn"
+
+
+def test_dedupe_source_order_independence_equal_engagement():
+    """Equal engagement across sources — tie-break by source ID alphabetically."""
+    a1 = new_candidate(title="Story Y", url="https://example.com/y",
+                       source="hn", source_name="HN", upvotes=100)
+    a2 = new_candidate(title="Story Y", url="https://example.com/y",
+                       source="github", source_name="GitHub", upvotes=100)
+
+    b1 = new_candidate(title="Story Y", url="https://example.com/y",
+                       source="github", source_name="GitHub", upvotes=100)
+    b2 = new_candidate(title="Story Y", url="https://example.com/y",
+                       source="hn", source_name="HN", upvotes=100)
+
+    out1 = dedupe_and_merge([a1, a2])
+    out2 = dedupe_and_merge([b1, b2])
+    assert len(out1) == 1
+    assert len(out2) == 1
+    # Same primary regardless of order. Tie-break: alphabetical source ID.
+    # HN preference: log1p(100)*10*1.2 = 55.4
+    # GitHub preference: log1p(100)*10*1.1 = 50.8
+    # HN wins (higher weight). Both should pick HN.
+    assert out1[0]["source"] == out2[0]["source"]
 
 
 def test_dedupe_contributing_sources_set():
