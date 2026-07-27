@@ -141,7 +141,30 @@ class TestSchedulerBookkeeping:
         result = await coordinator.run_generation(gen_fn)
         assert result == 2  # skipped
 
-        # Scheduler loop: result 2 means skipped — gen_failed stays False
-        # but timestamp is NOT advanced (result != 0).
-        # In the updated loop, result 2 is treated as non-success for timestamp.
+        # In the updated scheduler loop, gen_success is only True when result == 0.
+        # result 2 (skipped) does NOT set gen_success, so timestamp unchanged.
+        gen_success = (result == 0)
+        if gen_success:
+            settings.set("scheduler", "last_gen_utc", datetime.now(timezone.utc).isoformat())
+
+        assert settings.get("scheduler", "last_gen_utc") == old_ts
+
+    @pytest.mark.asyncio
+    async def test_gen_db_failure_does_not_advance_timestamp(self, store, settings):
+        """When _run_generation returns 1 (DB failure), timestamp should not advance."""
+        old_ts = "2026-07-26T10:00:00+00:00"
+        settings.set("scheduler", "last_gen_utc", old_ts)
+        coordinator = JobCoordinator(store, settings)
+
+        async def failing_gen():
+            return 1  # DB failure
+
+        result = await coordinator.run_generation(failing_gen)
+        assert result == 1  # failure propagated
+
+        # In the scheduler loop, gen_success is only True when result == 0.
+        gen_success = (result == 0)
+        if gen_success:
+            settings.set("scheduler", "last_gen_utc", datetime.now(timezone.utc).isoformat())
+
         assert settings.get("scheduler", "last_gen_utc") == old_ts
