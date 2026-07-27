@@ -256,7 +256,12 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     deleted until the new batch is fully built and ready. If any step fails
     (collection, LLM, insertion), the prior queue remains intact.
 
-    Returns 0 on success, 1 on failure.
+    Returns:
+        0 — success: new posts were queued and seen-items marked.
+        1 — failure: an error occurred (DB, LLM exception, etc.).
+        3 — no-progress: no new posts produced (empty collection, all seen,
+            LLM filter empty, styler empty). Distinct from success so the
+            scheduler can decide whether to advance the timestamp.
     """
     cfg = load_config(settings)
 
@@ -268,7 +273,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     candidates = await collect_all(cfg)
     if not candidates:
         log.warning("no candidates collected; keeping existing queue")
-        return 0
+        return 3
     log.info("collected %d raw candidates", len(candidates))
 
     # 2. Drop already-seen items.
@@ -294,7 +299,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
 
     if not top:
         log.warning("no candidates above min_score=%.1f; nothing to do", min_score)
-        return 0
+        return 3
 
     source_counts: dict[str, int] = {}
     for c in top:
@@ -315,7 +320,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     )
     if not kept:
         log.warning("LLM filter kept zero items; nothing to post")
-        return 0
+        return 3
 
     # 7. Select a diverse top-N for styling.
     final = select_diverse_top_items(kept, cfg["max_final_news"])
@@ -332,7 +337,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     )
     if not posts:
         log.warning("LLM styler produced zero posts; keeping existing queue")
-        return 0
+        return 3
 
     # 9. Only mark seen the items that were actually styled into posts.
     #    Items omitted by the styler must NOT be marked seen — they should
@@ -438,9 +443,10 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     async def generation_loop() -> None:
         """Generation timer: runs the full pipeline on schedule.
 
-        last_gen_utc advances only after successful generation.
-        Failed jobs retain the previous timestamp so the scheduler
-        retries on the next tick (bounded by the 60s sleep).
+        last_gen_utc advances only after successful generation (result 0).
+        Failed jobs (1), skipped (2), and no-progress (3) retain the
+        previous timestamp so the scheduler retries on the next tick
+        (bounded by the 60s sleep).
         """
         log.info("generation timer started: interval=%.1fh", gen_interval_hours)
         while True:
@@ -473,6 +479,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 elif result == 2:
                     log.info("generation skipped — already in progress")
                     # Skipped does NOT advance timestamp — next tick retries
+                elif result == 3:
+                    log.info("generation no-progress — will retry on next tick")
                 else:
                     log.error("generation failed (code=%d)", result)
             except Exception as exc:
@@ -491,9 +499,10 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     async def posting_loop() -> None:
         """Posting timer: posts one pending post on schedule.
 
-        last_post_utc advances only after a successful post (or when
-        there are no pending posts). Failed posts retain the previous
-        timestamp so the scheduler retries on the next tick.
+        last_post_utc advances only after a post is fully delivered and
+        marked posted (result 0). Failure (1), skip (2), and empty queue
+        (3) retain the previous timestamp so the scheduler retries on the
+        next tick.
         """
         log.info("posting timer started: interval=%.0fmin", post_interval_minutes)
         while True:
@@ -517,17 +526,19 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             try:
                 result = await coordinator.run_posting()
                 if result == 0:
-                    # result 0 = success or no-op (no pending posts)
                     post_success = True
                 elif result == 2:
                     log.info("posting skipped — already in progress")
                     # Skipped does NOT advance timestamp
+                elif result == 3:
+                    log.debug("no pending posts to deliver")
+                    # Empty queue does NOT advance timestamp
                 else:
                     log.error("posting failed (code=%d)", result)
             except Exception as exc:
                 log.error("posting cycle failed: %s", redact_exception(exc))
 
-            # Only advance last_post_utc on success (or no pending posts).
+            # Only advance last_post_utc on actual delivery success (result 0).
             if post_success:
                 now = datetime.now(timezone.utc)
                 settings.set("scheduler", "last_post_utc", now.isoformat())

@@ -143,12 +143,12 @@ class JobCoordinator:
             async with self._job_lock:
                 while True:
                     result = await self._deliver_one()
+                    if result == 3:
+                        # No more pending posts — done.
+                        return 0
                     if result != 0:
                         return result
-                    # Continue until no more pending posts.
-                    if not self._store.get_next_pending_post():
-                        break
-                return 0
+            # Continue until no more pending posts.
         finally:
             self._post_running = False
 
@@ -156,8 +156,10 @@ class JobCoordinator:
         """Fetch, format, deliver, and mark one pending post.
 
         Shared by run_posting (single) and drain_posts (loop).
-        Returns 0 on success, 1 on failure. Returns 0 with no action
-        when there are no pending posts.
+        Returns:
+            0 — success: a post was delivered and marked posted.
+            1 — failure: delivery or marking failed.
+            3 — no-op: no pending posts to deliver.
         """
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
@@ -165,7 +167,7 @@ class JobCoordinator:
         post = self._store.get_next_pending_post()
         if not post:
             log.debug("no pending posts to deliver")
-            return 0
+            return 3
 
         title = post["title"]
         body = post["body"]
