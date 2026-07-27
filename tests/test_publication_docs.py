@@ -111,3 +111,19 @@ class TestDocumentationCorrectness:
         with open("README.md") as f:
             content = f.read()
         assert "/v1" in content, "README should mention LM_BASE includes /v1"
+
+    def test_readme_no_one_shot_zero(self):
+        """README should not say 0 = one-shot for NEWS_INTERVAL_HOURS."""
+        with open("README.md") as f:
+            content = f.read()
+        # The old documentation said "0 = one-shot" which is wrong.
+        # 0 causes 60s polling, not one-shot. --once is the one-shot flag.
+        assert "0 = one-shot" not in content, "README should not say 0 = one-shot"
+        assert "0 = every 60s" in content, "README should say 0 = every 60s"
+
+    def test_env_example_no_one_shot_zero(self):
+        """.env.example should not say 0 = one-shot for NEWS_INTERVAL_HOURS."""
+        with open(".env.example") as f:
+            content = f.read()
+        assert "0 for one-shot" not in content, ".env.example should not say 0 for one-shot"
+        assert "0 = every 60s" in content, ".env.example should say 0 = every 60s"

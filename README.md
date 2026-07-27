@@ -95,7 +95,7 @@ If you need one-shot execution (e.g. from a cron job or CI):
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
-| `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8; 0 = one-shot) |
+| `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8; 0 = every 60s, NOT one-shot — use `--once`) |
 | `NEWS_POST_INTERVAL_MINUTES` | Minutes between individual post deliveries (default 60) |
 | `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
