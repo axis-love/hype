@@ -70,10 +70,15 @@ class TestSchedulerBookkeeping:
 
     @pytest.mark.asyncio
     async def test_post_timestamp_advances_on_success(self, store, settings):
-        """last_post_utc should be set after a successful post."""
+        """last_post_utc should be set after a successful post (result 0)."""
         coordinator = JobCoordinator(store, settings)
-        # No pending posts — run_posting returns 0 (no-op success).
-        result = await coordinator.run_posting()
+        store.add_pending_post({"title": "T", "body": "B", "url": "http://x.com"})
+
+        async def ok_deliver():
+            return 0
+
+        with patch.object(coordinator, "_deliver_one", new=ok_deliver):
+            result = await coordinator.run_posting()
         assert result == 0
 
         post_failed = (result == 1)
@@ -81,6 +86,23 @@ class TestSchedulerBookkeeping:
             settings.set("scheduler", "last_post_utc", datetime.now(timezone.utc).isoformat())
 
         assert settings.get("scheduler", "last_post_utc") is not None
+
+    @pytest.mark.asyncio
+    async def test_post_timestamp_preserved_on_empty_queue(self, store, settings):
+        """last_post_utc should NOT advance when queue is empty (result 3)."""
+        old_ts = "2026-07-26T10:00:00+00:00"
+        settings.set("scheduler", "last_post_utc", old_ts)
+
+        coordinator = JobCoordinator(store, settings)
+        # No pending posts — _deliver_one returns 3.
+        result = await coordinator.run_posting()
+        assert result == 3  # no-op
+
+        post_success = (result == 0)
+        if post_success:
+            settings.set("scheduler", "last_post_utc", datetime.now(timezone.utc).isoformat())
+
+        assert settings.get("scheduler", "last_post_utc") == old_ts
 
     @pytest.mark.asyncio
     async def test_post_timestamp_preserved_on_failure(self, store, settings):
@@ -110,20 +132,20 @@ class TestSchedulerBookkeeping:
 
     @pytest.mark.asyncio
     async def test_post_timestamp_advances_on_noop(self, store, settings):
-        """last_post_utc should advance when there are no pending posts (result 0)."""
+        """last_post_utc should NOT advance when there are no pending posts (result 3, was 0)."""
         old_ts = "2026-07-26T10:00:00+00:00"
         settings.set("scheduler", "last_post_utc", old_ts)
 
         coordinator = JobCoordinator(store, settings)
-        # No pending posts — returns 0.
+        # No pending posts — returns 3 (no-op, not success).
         result = await coordinator.run_posting()
-        assert result == 0
+        assert result == 3
 
-        post_failed = (result == 1)
-        if not post_failed:
+        post_success = (result == 0)
+        if post_success:
             settings.set("scheduler", "last_post_utc", datetime.now(timezone.utc).isoformat())
 
-        assert settings.get("scheduler", "last_post_utc") != old_ts
+        assert settings.get("scheduler", "last_post_utc") == old_ts
 
     @pytest.mark.asyncio
     async def test_gen_skipped_does_not_advance_timestamp(self, store, settings):
@@ -163,6 +185,25 @@ class TestSchedulerBookkeeping:
         assert result == 1  # failure propagated
 
         # In the scheduler loop, gen_success is only True when result == 0.
+        gen_success = (result == 0)
+        if gen_success:
+            settings.set("scheduler", "last_gen_utc", datetime.now(timezone.utc).isoformat())
+
+        assert settings.get("scheduler", "last_gen_utc") == old_ts
+
+    @pytest.mark.asyncio
+    async def test_gen_no_progress_does_not_advance_timestamp(self, store, settings):
+        """When _run_generation returns 3 (no-progress), timestamp should not advance."""
+        old_ts = "2026-07-26T10:00:00+00:00"
+        settings.set("scheduler", "last_gen_utc", old_ts)
+        coordinator = JobCoordinator(store, settings)
+
+        async def no_progress_gen():
+            return 3  # no-progress: empty collection, LLM filter empty, etc.
+
+        result = await coordinator.run_generation(no_progress_gen)
+        assert result == 3  # no-progress propagated
+
         gen_success = (result == 0)
         if gen_success:
             settings.set("scheduler", "last_gen_utc", datetime.now(timezone.utc).isoformat())
