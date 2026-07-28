@@ -71,6 +71,35 @@ def _assign_candidate_ids(items: list[dict[str, Any] | Candidate]) -> dict[str, 
     return id_map
 
 
+def _assign_missing_candidate_ids(items: list[dict[str, Any] | Candidate]) -> dict[str, dict[str, Any] | Candidate]:
+    """Assign IDs to items that lack one, skipping existing IDs to avoid collisions.
+
+    Used by llm_filter() and llm_style_posts() when some items already have IDs
+    (assigned upstream in _run_generation) and others don't (direct test calls).
+    """
+    id_map: dict[str, dict[str, Any] | Candidate] = {}
+    existing_ids: set[str] = set()
+    for item in items:
+        cid = item.get("candidate_id")
+        if cid:
+            existing_ids.add(cid)
+            id_map[cid] = item
+
+    counter = 1
+    for item in items:
+        if item.get("candidate_id"):
+            continue
+        while f"c{counter:03d}" in existing_ids:
+            counter += 1
+        cid = f"c{counter:03d}"
+        item["candidate_id"] = cid
+        existing_ids.add(cid)
+        id_map[cid] = item
+        counter += 1
+
+    return id_map
+
+
 def _format_candidate(item: dict[str, Any] | Candidate) -> str:
     """Render one candidate for the filter prompt."""
     # Handle both dict and Candidate via dict-like access.
@@ -106,8 +135,10 @@ async def llm_filter(
     if not items:
         return []
 
-    # Assign opaque IDs to each candidate for binding LLM output.
-    id_map = _assign_candidate_ids(items)
+    # Preserve existing candidate IDs (assigned in _run_generation before logging).
+    # Only assign new IDs to items that lack one (e.g. direct test calls).
+    # Use _assign_missing_candidate_ids to avoid collisions with existing IDs.
+    id_map = _assign_missing_candidate_ids(items)
 
     numbered = "\n".join(_format_candidate(item) for item in items)
     messages = [
@@ -270,10 +301,8 @@ async def llm_style_posts(
 
     # Assign IDs to items for binding LLM output.
     # Handle mixed lists: assign IDs to any items that don't already have one.
-    items_needing_ids = [item for item in items if "candidate_id" not in item]
-    if items_needing_ids:
-        _assign_candidate_ids(items_needing_ids)
-    id_map = {item["candidate_id"]: item for item in items if "candidate_id" in item}
+    # Use _assign_missing_candidate_ids to avoid collisions with existing IDs.
+    id_map = _assign_missing_candidate_ids(items)
 
     def signal_line(item: dict[str, Any] | Candidate) -> str:
         bits = []
