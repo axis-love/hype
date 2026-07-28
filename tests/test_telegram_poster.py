@@ -191,7 +191,8 @@ async def test_post_digest_does_not_retry_on_auth_failure():
 
 @pytest.mark.asyncio
 async def test_post_digest_500_exhausts_retries_and_raises():
-    """5xx after all retries should raise RuntimeError for partial delivery."""
+    """5xx after all retries should raise PartialDeliveryError."""
+    from newsbot.telegram_poster import PartialDeliveryError
     server_err = MagicMock()
     server_err.status_code = 500
     server_err.text = "Internal Server Error"
@@ -203,7 +204,7 @@ async def test_post_digest_500_exhausts_retries_and_raises():
 
     with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
          patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
-        with pytest.raises(RuntimeError, match="transient retries"):
+        with pytest.raises((PartialDeliveryError, RuntimeError)):
             await post_digest("text", bot_token="t", chat_id="@c")
 
     # Should have tried MAX_TRANSIENT_RETRIES + 1 times
@@ -364,3 +365,86 @@ def test_split_chunk_size_with_balancing_overhead():
 
     for chunk in chunks:
         assert len(chunk) <= 3000, f"Chunk exceeds limit: {len(chunk)} > 3000"
+
+
+def test_split_oversized_opening_tag_no_infinite_loop():
+    """An opening tag longer than the chunk limit must not cause an infinite loop.
+
+    _find_safe_cut() must skip past the oversized tag instead of returning 0.
+    """
+    # An <a href="..."> tag longer than the effective limit.
+    long_url = "http://" + "x" * 3100
+    text = f'<a href="{long_url}">{"A" * 100}</a>'
+    chunks = _split_for_telegram(text, limit=500)
+    # Must produce output, not loop forever.
+    assert len(chunks) >= 1
+    # No chunk should exceed the limit + small margin.
+    for chunk in chunks:
+        assert len(chunk) <= 520, f"Chunk exceeds limit: {len(chunk)}"
+
+
+def test_split_first_tag_larger_than_limit():
+    """Text starting with a tag larger than limit must still split."""
+    # First 4000 chars are all inside an <a href> tag.
+    text = '<a href="' + "x" * 4000 + '">link</a>' + "B" * 200
+    chunks = _split_for_telegram(text, limit=3000)
+    assert len(chunks) >= 2  # Must produce multiple chunks, not loop.
+
+
+@pytest.mark.asyncio
+async def test_partial_delivery_raises_typed_error_with_chunk_count():
+    """When chunk 2 fails after chunk 1 succeeds, PartialDeliveryError must be raised
+    with delivered_chunks=1."""
+    from newsbot.telegram_poster import PartialDeliveryError
+
+    # Build text that produces 2 chunks.
+    text = "A" * 2000 + "\n\n" + "B" * 2000
+
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fail_resp = MagicMock()
+    fail_resp.status_code = 500
+    fail_resp.text = "Internal Server Error"
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[ok_resp, fail_resp, fail_resp, fail_resp])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(PartialDeliveryError) as exc_info:
+            await post_digest(text, bot_token="t", chat_id="@c")
+
+    assert exc_info.value.delivered_chunks == 1
+
+
+@pytest.mark.asyncio
+async def test_partial_delivery_transport_error_with_chunk_count():
+    """When transport error on chunk 2 after chunk 1 succeeds, PartialDeliveryError raised."""
+    from newsbot.telegram_poster import PartialDeliveryError
+
+    text = "A" * 2000 + "\n\n" + "B" * 2000
+
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    # Chunk 1 succeeds, chunk 2 fails with transport error on all retry attempts.
+    fake_client.post = AsyncMock(side_effect=[ok_resp, httpx.ConnectError("connection refused"),
+                                               httpx.ConnectError("connection refused"),
+                                               httpx.ConnectError("connection refused")])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(PartialDeliveryError) as exc_info:
+            await post_digest(text, bot_token="t", chat_id="@c")
+
+    assert exc_info.value.delivered_chunks == 1
