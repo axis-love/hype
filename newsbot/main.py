@@ -564,15 +564,19 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             _run_retention(store)
             if result == 2:
                 raise RuntimeError("generation already in progress — skipped")
-            if result != 0:
-                raise RuntimeError(f"generation failed (code={result})")
+            if result == 3:
+                raise RuntimeError("no new posts generated (empty collection, all seen, or LLM returned nothing)")
+            if result == 1:
+                raise RuntimeError("generation failed — check logs for details")
 
         async def on_post() -> None:
             result = await coordinator.run_posting()
             if result == 2:
                 raise RuntimeError("posting already in progress — skipped")
-            if result != 0:
-                raise RuntimeError(f"posting failed (code={result})")
+            if result == 3:
+                raise RuntimeError("no pending posts to deliver")
+            if result == 1:
+                raise RuntimeError("posting failed — check logs for details")
 
         async def on_status() -> str:
             pending = store.count_pending()
@@ -660,10 +664,14 @@ def main() -> None:
             )
             # Run retention even on no-progress or failure.
             _run_retention(store)
-            if result != 0 and result != 3:
-                return 1
-            # Drain all generated posts immediately for testing.
-            return await coordinator.drain_posts()
+            # Only drain if generation succeeded (result 0).
+            # No-progress (3) or failure (1) should not proceed to drain —
+            # the old queue is intact and draining it would report false success.
+            if result == 0:
+                return await coordinator.drain_posts()
+            # Return the generation result code — do not drain.
+            # No-progress (3) is not an error exit code, but also not a drain success.
+            return 1 if result == 1 else 0
 
         try:
             code = asyncio.run(_once())
@@ -678,12 +686,16 @@ def main() -> None:
 
         async def _dry() -> int:
             coordinator = JobCoordinator(store, settings)
-            await coordinator.run_generation(
+            result = await coordinator.run_generation(
                 lambda: _run_generation(store, settings),
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
             _run_retention(store)
-            return await coordinator.drain_posts()
+            # Only drain if generation succeeded (result 0).
+            # No-progress (3) or failure (1) should not drain the old queue.
+            if result == 0:
+                return await coordinator.drain_posts()
+            return 1 if result == 1 else 0
 
         try:
             code = asyncio.run(_dry())
