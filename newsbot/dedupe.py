@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import math
 from typing import Any
-from urllib.parse import urlsplit, parse_qsl
+from urllib.parse import urlsplit
 
 try:
     from rapidfuzz import fuzz
@@ -47,7 +47,8 @@ _TRACKING_PARAMS = frozenset({
     "feature", "ocid", "ito", "cmpid", "src", "share",
 })
 
-# Default source weights for pre-merge ranking (must match config defaults).
+# Default source weights for pre-merge ranking. Overridden by config at runtime
+# via _set_pre_merge_weights(). This avoids a hard dependency on config in dedupe.
 _PRE_MERGE_WEIGHTS: dict[str, float] = {
     "hackernews": 1.2,
     "hn": 1.2,
@@ -57,6 +58,16 @@ _PRE_MERGE_WEIGHTS: dict[str, float] = {
     "huggingface_papers": 1.2,
     "rss": 0.5,
 }
+
+
+def _set_pre_merge_weights(weights: dict[str, float]) -> None:
+    """Override the default pre-merge weights with the active config values.
+
+    Called by main.py after config is loaded so that pre-merge preference
+    uses the operator's configured source weights, not hard-coded defaults.
+    """
+    global _PRE_MERGE_WEIGHTS
+    _PRE_MERGE_WEIGHTS = dict(weights)
 
 _SOURCE_ALIASES_PRE: dict[str, str] = {
     "hn": "hackernews",
@@ -104,6 +115,10 @@ def _canonical_url(url: Any) -> str:
     """Normalize a URL for dedup: lowercase host, strip scheme, drop tracking
     query params and fragment, but preserve content-identifying query params.
 
+    Preserves original URL encoding (%xx, +) so signed URLs and encoded
+    paths remain distinct. Tracking params are stripped by name only —
+    the remaining query string is kept in its original encoded form.
+
     Examples:
       item?id=1 and item?id=2 → distinct canonical URLs (preserved)
       example.com/post?utm_source=x → example.com/post (tracking stripped)
@@ -122,17 +137,23 @@ def _canonical_url(url: Any) -> str:
     path = parts.path.rstrip("/") or "/"
 
     # Preserve query params that are NOT tracking params.
+    # Keep the original encoded form — do not decode %xx or + via parse_qsl.
     query = parts.query
     if query:
-        kept = [(k, v) for k, v in parse_qsl(query, keep_blank_values=True)
-                if k.lower() not in _TRACKING_PARAMS]
+        # Split into key=value pairs by & to check param names,
+        # but preserve the original encoded values.
+        kept = []
+        for pair in query.split("&"):
+            if not pair:
+                continue
+            # Extract just the key (before =) to check against tracking params.
+            key = pair.split("=", 1)[0].lower()
+            if key not in _TRACKING_PARAMS:
+                kept.append(pair)
         if kept:
             # Sort for determinism (order-independent canonicalization).
             kept.sort()
-            # Preserve original encoding: reconstruct from raw key=value pairs
-            # without re-encoding via urlencode. This preserves signed URLs
-            # where byte order and encoding matter.
-            query = "&".join(f"{k}={v}" for k, v in kept)
+            query = "&".join(kept)
         else:
             query = ""
     else:
@@ -352,6 +373,17 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 gh_index[gh_key] = idx
         else:
             _merge_pair(result[match_idx], item)
+            # After merging, update indexes with the merged item's
+            # canonical URL and normalized title so that future candidates
+            # matching the merged item (or the item just absorbed) find
+            # the same group. This prevents transitive duplicates from
+            # splitting into separate groups.
+            if canon:
+                url_index[canon] = match_idx
+            if norm_title:
+                title_index[norm_title] = match_idx
+            if gh_key:
+                gh_index[gh_key] = match_idx
 
     log.info("dedupe: %d candidates -> %d unique", len(items), len(result))
 
