@@ -277,3 +277,98 @@ def test_mark_seen_large_batch(tmp_path):
     ]
     count = store.mark_seen(items)
     assert count == 600  # all 600 newly inserted
+
+# --- flow_001040: score data join by candidate_id ---
+
+
+def test_replace_stores_scores_after_styler_reorder(tmp_path):
+    """Score data should be joined by candidate_id, not positional zip.
+
+    The styler can reorder or omit items. replace_unposted_batch should
+    receive the correct score_breakdown for each post regardless of order.
+    """
+    from newsbot.db import NewsStore
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    # Simulate: final items have score_breakdown, styler returns reordered.
+    final = [
+        {"candidate_id": "c001", "title": "A", "score_breakdown": {"score": 100.0, "engagement": 50.0, "source": "hn", "matched_topics": ["ai"], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "published_at": "2026-07-28T06:00:00+00:00", "upvotes": 100, "comments": 10, "stars": 0, "reposts": 0, "crosspost_count": 1, "recency": 0.88, "source_weight": 1.2, "topic_bonus": 20, "crosspost_bonus": 0.0, "penalty": 1.0}},
+        {"candidate_id": "c002", "title": "B", "score_breakdown": {"score": 200.0, "engagement": 150.0, "source": "reddit", "matched_topics": ["llm"], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "published_at": "2026-07-28T08:00:00+00:00", "upvotes": 200, "comments": 50, "stars": 0, "reposts": 0, "crosspost_count": 2, "recency": 0.92, "source_weight": 1.0, "topic_bonus": 25, "crosspost_bonus": 30.0, "penalty": 1.0}},
+    ]
+
+    # Styler returns reversed order (c002 first, then c001).
+    posts = [
+        {"title": "B styled", "body": "Body B", "url": "https://b.com", "candidate_id": "c002"},
+        {"title": "A styled", "body": "Body A", "url": "https://a.com", "candidate_id": "c001"},
+    ]
+
+    # Join by candidate_id (same logic as _run_generation).
+    final_by_id = {item["candidate_id"]: item["score_breakdown"] for item in final}
+    for post in posts:
+        cid = post.get("candidate_id")
+        if cid and cid in final_by_id:
+            post["score_breakdown"] = final_by_id[cid]
+
+    # Replace and verify each post got the correct score data.
+    inserted, _ = store.replace_unposted_batch(posts, [])
+    assert inserted == 2
+
+    rows = store.list_unposted_posts()
+    assert len(rows) == 2
+
+    # First row (c002, posted first) should have score=200.
+    assert rows[0]["title"] == "B styled"
+    assert rows[0]["score_at_queue"] == 200.0
+    assert rows[0]["source"] == "reddit"
+
+    # Second row (c001) should have score=100.
+    assert rows[1]["title"] == "A styled"
+    assert rows[1]["score_at_queue"] == 100.0
+    assert rows[1]["source"] == "hn"
+
+    store.close()
+
+
+def test_replace_stores_scores_after_styler_omission(tmp_path):
+    """When styler omits an item, only styled posts get score data."""
+    from newsbot.db import NewsStore
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    final = [
+        {"candidate_id": "c001", "title": "A", "score_breakdown": {"score": 100.0, "source": "hn", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 50.0, "recency": 0.88, "source_weight": 1.2, "topic_bonus": 0, "crosspost_bonus": 0.0, "penalty": 1.0, "published_at": None, "upvotes": 100, "comments": 10, "stars": 0, "reposts": 0, "crosspost_count": 1}},
+        {"candidate_id": "c002", "title": "B", "score_breakdown": {"score": 200.0, "source": "reddit", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 150.0, "recency": 0.92, "source_weight": 1.0, "topic_bonus": 0, "crosspost_bonus": 30.0, "penalty": 1.0, "published_at": None, "upvotes": 200, "comments": 50, "stars": 0, "reposts": 0, "crosspost_count": 2}},
+        {"candidate_id": "c003", "title": "C", "score_breakdown": {"score": 50.0, "source": "github", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 10.0, "recency": 0.5, "source_weight": 1.1, "topic_bonus": 0, "crosspost_bonus": 0.0, "penalty": 1.0, "published_at": None, "upvotes": 0, "comments": 0, "stars": 10, "reposts": 0, "crosspost_count": 1}},
+    ]
+
+    # Styler only returns c001 and c003 (omits c002).
+    posts = [
+        {"title": "A styled", "body": "Body A", "url": "https://a.com", "candidate_id": "c001"},
+        {"title": "C styled", "body": "Body C", "url": "https://c.com", "candidate_id": "c003"},
+    ]
+
+    # Join by candidate_id.
+    final_by_id = {item["candidate_id"]: item["score_breakdown"] for item in final}
+    for post in posts:
+        cid = post.get("candidate_id")
+        if cid and cid in final_by_id:
+            post["score_breakdown"] = final_by_id[cid]
+
+    inserted, _ = store.replace_unposted_batch(posts, [])
+    assert inserted == 2
+
+    rows = store.list_unposted_posts()
+    assert len(rows) == 2
+    # c002 should not be in the queue.
+    titles = [r["title"] for r in rows]
+    assert "A styled" in titles
+    assert "C styled" in titles
+    # Score data should match.
+    for r in rows:
+        if r["title"] == "A styled":
+            assert r["score_at_queue"] == 100.0
+            assert r["source"] == "hn"
+        elif r["title"] == "C styled":
+            assert r["score_at_queue"] == 50.0
+            assert r["source"] == "github"
+
+    store.close()

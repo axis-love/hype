@@ -121,6 +121,34 @@ def _migration_2(cur: sqlite3.Cursor) -> None:
     cur.execute("DROP TABLE IF EXISTS news_digests;")
 
 
+@_migration(3, "Add hype score columns to pending_posts")
+def _migration_3(cur: sqlite3.Cursor) -> None:
+    """Add score component and raw engagement columns to pending_posts.
+
+    All new columns are nullable so existing rows survive the migration
+    with NULL score data (legacy rows).
+    """
+    # Raw scoring inputs (for recalculation).
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN source TEXT")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN published_at TEXT")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN upvotes INTEGER")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN comments INTEGER")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN stars INTEGER")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN reposts INTEGER")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN crosspost_count INTEGER")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN penalty REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN lookback_hours REAL")
+    # Queue-time breakdown (historical snapshot).
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN score_at_queue REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN engagement_score REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN recency_at_queue REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN source_weight REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN topic_bonus REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN crosspost_bonus REAL")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN matched_topics TEXT")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN scored_at TEXT")
+
+
 class NewsStore:
     """CRUD wrapper for news-bot tables."""
 
@@ -373,6 +401,10 @@ class NewsStore:
     ) -> tuple[int, int]:
         """Atomically replace unposted posts with a new batch and mark items as seen.
 
+        Each post in new_posts may carry a 'score_breakdown' dict (from
+        score_all()) with all hype score components. These are stored in
+        dedicated columns for audit/debugging via /scores.
+
         This performs clear + insert + mark-seen in a single transaction.
         If any insertion fails, the transaction is rolled back and the
         previous queue remains intact.
@@ -392,23 +424,47 @@ class NewsStore:
             # 1. Clear old unposted posts.
             cur.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
 
-            # 2. Insert new posts (batched via executemany).
-            post_rows = [
-                (
+            # 2. Insert new posts with score data (batched via executemany).
+            post_rows = []
+            for post in new_posts:
+                bd = post.get("score_breakdown") or {}
+                post_rows.append((
                     str(post.get("title") or "").strip(),
                     str(post.get("body") or "").strip(),
                     str(post.get("category") or "").strip() or None,
                     post.get("importance"),
                     str(post.get("url") or "").strip() or None,
                     now,
-                )
-                for post in new_posts
-            ]
+                    # Score columns (from score_breakdown, nullable for legacy).
+                    bd.get("source"),
+                    bd.get("published_at"),
+                    bd.get("upvotes"),
+                    bd.get("comments"),
+                    bd.get("stars"),
+                    bd.get("reposts"),
+                    bd.get("crosspost_count"),
+                    bd.get("penalty"),
+                    bd.get("lookback_hours"),
+                    bd.get("score"),
+                    bd.get("engagement"),
+                    bd.get("recency"),
+                    bd.get("source_weight"),
+                    bd.get("topic_bonus"),
+                    bd.get("crosspost_bonus"),
+                    json.dumps(bd.get("matched_topics") or []) if bd else None,
+                    bd.get("scored_at"),
+                ))
             if post_rows:
                 cur.executemany(
                     """
-                    INSERT INTO pending_posts(title, body, category, importance, url, created_at)
-                    VALUES(?,?,?,?,?,?)
+                    INSERT INTO pending_posts(
+                        title, body, category, importance, url, created_at,
+                        source, published_at, upvotes, comments, stars, reposts,
+                        crosspost_count, penalty, lookback_hours,
+                        score_at_queue, engagement_score, recency_at_queue,
+                        source_weight, topic_bonus, crosspost_bonus,
+                        matched_topics, scored_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     post_rows,
                 )
@@ -450,6 +506,20 @@ class NewsStore:
             "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NULL"
         ).fetchone()
         return int(row["n"] if row else 0)
+
+    def list_unposted_posts(self) -> list[dict[str, Any]]:
+        """Return all unposted posts ordered by created_at, id (oldest first).
+
+        Used by the /scores command to show queued posts with score breakdown.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT * FROM pending_posts
+            WHERE posted_at IS NULL
+            ORDER BY created_at ASC, id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- Retention / cleanup --------------------------------------------
 

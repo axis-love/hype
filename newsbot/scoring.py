@@ -241,6 +241,15 @@ def score_breakdown(
         "penalty": penalty,
         "matched_topics": matched,
         "scored_at": effective_now.isoformat(timespec="seconds"),
+        "lookback_hours": lookback_hours,
+        # Raw scoring inputs (for DB persistence and recalculation).
+        "source": str(item.get("source") or "").strip(),
+        "published_at": item.get("published_at"),
+        "upvotes": item.get("upvotes"),
+        "comments": item.get("comments"),
+        "stars": item.get("stars"),
+        "reposts": item.get("reposts"),
+        "crosspost_count": cp_count,
     }
 
 
