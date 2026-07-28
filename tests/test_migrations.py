@@ -137,10 +137,9 @@ class TestRetentionPruning:
         row = store._conn.execute("SELECT 1 FROM seen WHERE url=?", ("http://recent.com",)).fetchone()
         assert row is not None
 
-    def test_prune_digests_is_noop(self, store):
-        """prune_digests is a no-op after migration 2 drops the table."""
-        deleted = store.prune_digests(max_age_days=90)
-        assert deleted == 0
+    def test_prune_digests_removed(self, store):
+        """prune_digests should not exist — it was removed (table dropped in migration 2)."""
+        assert not hasattr(store, "prune_digests"), "prune_digests should be removed"
 
     def test_batched_pruning(self, store):
         """Large number of rows should be pruned in batches without long locks."""

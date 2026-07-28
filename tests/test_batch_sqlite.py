@@ -145,21 +145,10 @@ class TestRemovedAPIs:
     def test_insert_digest_removed(self):
         assert not hasattr(NewsStore, "insert_digest"), "insert_digest should be removed"
 
-    def test_prune_old_items_retained(self):
-        """prune_old_items should still exist (called from generation cycle)."""
-        assert hasattr(NewsStore, "prune_old_items"), "prune_old_items should be retained"
-
-    def test_prune_digests_retained(self):
-        """prune_digests should still exist for cleanup."""
-        assert hasattr(NewsStore, "prune_digests"), "prune_digests should be retained"
-
-    def test_prune_old_items_is_noop(self, store):
-        """prune_old_items should be a no-op (table dropped in migration 2)."""
-        assert store.prune_old_items(48) == 0
-
-    def test_prune_digests_is_noop(self, store):
-        """prune_digests should be a no-op (table dropped in migration 2)."""
-        assert store.prune_digests(90) == 0
+    def test_no_dead_pruning_functions(self):
+        """Dead pruning functions (prune_old_items, prune_digests) should NOT exist."""
+        assert not hasattr(NewsStore, "prune_old_items"), "prune_old_items should be removed"
+        assert not hasattr(NewsStore, "prune_digests"), "prune_digests should be removed"
 
     def test_dead_tables_dropped_after_migration(self, store):
         """news_items and news_digests tables should not exist after migration."""

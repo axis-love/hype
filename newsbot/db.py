@@ -205,12 +205,7 @@ class NewsStore:
         self.close()
 
     # --- news_items (dropped in migration 2) -----------------------------
-    # The news_items table was dropped in migration 2. prune_old_items()
-    # is now a no-op, retained for backward compatibility with callers.
-
-    def prune_old_items(self, max_age_hours: int = 48) -> int:
-        """No-op — news_items table was dropped in migration 2."""
-        return 0
+    # The news_items table was dropped in migration 2. No pruning needed.
 
     # --- seen (dedup state) --------------------------------------------
 
@@ -231,7 +226,8 @@ class NewsStore:
         """Check which items are seen, returning a set of indices that ARE seen.
 
         Uses set-based SQL instead of per-item queries: at most 2 queries
-        total for the entire batch, regardless of batch size.
+        per chunk (one URL, one title). Batches exceeding the SQLite parameter
+        limit (999) are split into bounded 500-item chunks.
         Returns a set of indices into the input list.
         """
         if not items:
@@ -323,9 +319,8 @@ class NewsStore:
         finally:
             cur.close()
 
-    # --- news_digests ---------------------------------------------------
-    # Note: insert_digest() was removed — the current pipeline does not
-    # persist digests to news_digests. prune_digests() remains for cleanup.
+    # --- news_digests (dropped in migration 2) -----------------------------
+    # The news_digests table was dropped in migration 2. No pruning needed.
 
     # --- pending_posts (individual posts waiting to be sent) -----------
 
@@ -502,7 +497,3 @@ class NewsStore:
         if total_deleted:
             log.info("Pruned %d seen entries older than %d days", total_deleted, max_age_days)
         return total_deleted
-
-    def prune_digests(self, max_age_days: int = 90, batch_size: int = 100) -> int:
-        """No-op — news_digests table was dropped in migration 2."""
-        return 0
