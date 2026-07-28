@@ -309,6 +309,207 @@ class TestJobCoordinatorDrain:
         assert result == 0
 
 
+class TestConcurrentGenerationPostingIntegration:
+    """Integration tests using real NewsStore DB to verify queue integrity
+    under concurrent generation+posting.
+
+    These tests exercise the real DB operations (replace_unposted_batch,
+    get_next_pending_post, mark_posted) through the JobCoordinator's
+    single-lock serialization, verifying no duplicate posts, no lost rows,
+    and no reordering.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_gen_post_no_duplicate_delivery(self, coordinator, store):
+        """Concurrent generation+posting must not deliver any post twice.
+
+        Scenario: 3 pending posts in queue. Posting starts draining them
+        (with a simulated slow Telegram call). Concurrently, generation
+        fires and replaces the unposted batch with new posts. The single
+        lock ensures posting finishes before generation replaces the queue,
+        so no post is delivered twice and no row is lost.
+        """
+        # Pre-populate the queue with 3 posts.
+        for i in range(3):
+            store.add_pending_post({"title": f"Old{i}", "body": f"Body{i}", "url": f"http://old{i}.com"})
+
+        delivered_titles: list[str] = []
+
+        async def slow_post_digest(message, **kwargs):
+            await asyncio.sleep(0.05)  # Simulate network latency
+            # Extract title from the HTML message for tracking.
+            import re
+            m = re.search(r"<b>(.*?)</b>", message)
+            if m:
+                delivered_titles.append(m.group(1))
+
+        new_posts = [{"title": f"New{i}", "body": f"NewBody{i}", "url": f"http://new{i}.com"} for i in range(3)]
+        seen_items = [{"url": f"http://new{i}.com", "title": f"New{i}"} for i in range(3)]
+
+        async def gen_fn():
+            store.replace_unposted_batch(new_posts, seen_items)
+            return 0
+
+        with patch("newsbot.jobs.post_digest", new=slow_post_digest):
+            with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
+                # Launch generation and posting concurrently.
+                gen_task = asyncio.create_task(coordinator.run_generation(gen_fn))
+                await asyncio.sleep(0.01)  # Let gen acquire the lock first.
+                post_task = asyncio.create_task(coordinator.run_posting())
+
+                gen_result = await gen_task
+                post_result = await post_task
+
+        # Generation should succeed.
+        assert gen_result == 0
+        # Posting should succeed (delivered one of the old posts).
+        assert post_result == 0
+
+        # No title should appear more than once — no duplicate delivery.
+        assert len(delivered_titles) == len(set(delivered_titles)), \
+            f"Duplicate delivery detected: {delivered_titles}"
+
+        # The delivered post is from whichever batch was in the queue when
+        # posting acquired the lock. Since generation starts first, it
+        # replaces the queue before posting runs — so the delivered post
+        # is from the new batch. Either way, no duplicate delivery occurs.
+        assert len(delivered_titles) == 1, f"Expected 1 delivery, got {delivered_titles}"
+
+        # After both jobs, the queue should have the remaining new posts
+        # (3 new posts minus the 1 that was posted).
+        remaining = store.count_pending()
+        assert remaining == 2
+
+    @pytest.mark.asyncio
+    async def test_concurrent_posting_no_duplicate_or_loss(self, coordinator, store):
+        """Multiple concurrent posting calls through real DB must not
+        duplicate delivery or lose posts.
+
+        With 5 pending posts and 3 concurrent posting calls, the single
+        lock serializes them. Each call delivers at most 1 post. No post
+        is delivered twice, no row is lost.
+        """
+        for i in range(5):
+            store.add_pending_post({"title": f"Post{i}", "body": f"B{i}", "url": f"http://x{i}.com"})
+
+        delivered_ids: list[int] = []
+
+        async def tracking_post_digest(message, **kwargs):
+            await asyncio.sleep(0.02)
+            # Don't track here — tracking happens in _deliver_one via mark_posted.
+
+        # Monkey-patch _deliver_one to add a tiny delay so calls overlap.
+        original_deliver = coordinator._deliver_one
+
+        async def slow_deliver_one():
+            await asyncio.sleep(0.02)
+            return await original_deliver()
+
+        with patch("newsbot.jobs.post_digest", new=tracking_post_digest):
+            with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
+                with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver_one):
+                    results = await asyncio.gather(
+                        coordinator.run_posting(),
+                        coordinator.run_posting(),
+                        coordinator.run_posting(),
+                    )
+
+        # Only one should succeed (0), others skipped (2).
+        assert results.count(0) == 1
+        assert results.count(2) == 2
+
+        # Exactly 1 post was marked posted.
+        posted_count = store._conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
+        ).fetchone()
+        assert int(posted_count["n"]) == 1
+
+        # 4 posts still pending.
+        assert store.count_pending() == 4
+
+    @pytest.mark.asyncio
+    async def test_generation_during_drain_preserves_order(self, coordinator, store):
+        """Generation replacing the queue while drain_posts is running
+        must not lose or reorder posts.
+
+        Drain is processing posts one by one. A concurrent generation
+        call must wait for drain to finish, then replace the remaining
+        unposted posts. No delivered post should disappear, and new posts
+        should be in the queue afterward.
+        """
+        for i in range(3):
+            store.add_pending_post({"title": f"Old{i}", "body": f"B{i}", "url": f"http://old{i}.com"})
+
+        delivered: list[str] = []
+
+        async def tracking_post_digest(message, **kwargs):
+            import re
+            m = re.search(r"<b>(.*?)</b>", message)
+            if m:
+                delivered.append(m.group(1))
+
+        new_posts = [{"title": "FreshPost", "body": "Fresh", "url": "http://fresh.com"}]
+        seen_items = [{"url": "http://fresh.com", "title": "FreshPost"}]
+
+        async def gen_fn():
+            store.replace_unposted_batch(new_posts, seen_items)
+            return 0
+
+        with patch("newsbot.jobs.post_digest", new=tracking_post_digest):
+            with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
+                # Start drain (processes all 3 old posts sequentially).
+                drain_task = asyncio.create_task(coordinator.drain_posts())
+                await asyncio.sleep(0.01)
+
+                # Concurrently attempt generation — must wait for drain.
+                gen_task = asyncio.create_task(coordinator.run_generation(gen_fn))
+
+                drain_result = await drain_task
+                gen_result = await gen_task
+
+        assert drain_result == 0
+        assert gen_result == 0
+
+        # All 3 old posts were delivered in order (no reordering).
+        assert delivered == ["Old0", "Old1", "Old2"]
+
+        # New post is in the queue.
+        assert store.count_pending() == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_generation_no_queue_corruption(self, coordinator, store):
+        """Two concurrent generation calls through real DB — only one
+        should run, the other skipped. Queue must not be corrupted."""
+        posts_a = [{"title": "A", "body": "BA", "url": "http://a.com"}]
+        posts_b = [{"title": "B", "body": "BB", "url": "http://b.com"}]
+        seen_a = [{"url": "http://a.com", "title": "A"}]
+        seen_b = [{"url": "http://b.com", "title": "B"}]
+
+        async def gen_a():
+            await asyncio.sleep(0.02)
+            store.replace_unposted_batch(posts_a, seen_a)
+            return 0
+
+        async def gen_b():
+            store.replace_unposted_batch(posts_b, seen_b)
+            return 0
+
+        results = await asyncio.gather(
+            coordinator.run_generation(gen_a),
+            coordinator.run_generation(gen_b),
+        )
+
+        # One succeeds (0), one skipped (2).
+        assert results.count(0) == 1
+        assert results.count(2) == 1
+
+        # Queue has exactly 1 post (from whichever generation ran).
+        assert store.count_pending() == 1
+        post = store.get_next_pending_post()
+        assert post is not None
+        assert post["title"] in ("A", "B")
+
+
 class TestFormatPostMessage:
     """Verify format_post_message produces correct HTML."""
 
