@@ -140,6 +140,8 @@ class BotCommandHandler:
                 try:
                     await self.on_digest()
                     await self._send(chat_id, "✅ Generation complete. Posts queued for hourly delivery.")
+                except RuntimeError as exc:
+                    await self._send(chat_id, str(exc))
                 except Exception:
                     await self._send(chat_id, "Generation failed. Check logs for details.")
             asyncio.create_task(_run_and_notify())
@@ -151,6 +153,9 @@ class BotCommandHandler:
             async def _post_and_notify() -> None:
                 try:
                     await self.on_post()
+                    await self._send(chat_id, "✅ Post delivered to channel.")
+                except RuntimeError as exc:
+                    await self._send(chat_id, str(exc))
                 except Exception:
                     await self._send(chat_id, "Post failed. Check logs for details.")
             asyncio.create_task(_post_and_notify())

@@ -133,11 +133,12 @@ class JobCoordinator:
         """Acquire the job lock and drain all pending posts.
 
         Used by --once and dry-run modes. Posts all pending posts
-        sequentially. Returns 0 on success, 1 on failure.
+        sequentially. Returns 0 on success, 1 on failure, 2 if
+        another posting is already in progress (skipped).
         """
         if self._post_running:
             log.info("posting already in progress — cannot drain")
-            return 1
+            return 2
         self._post_running = True
         try:
             async with self._job_lock:
