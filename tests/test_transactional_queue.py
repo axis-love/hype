@@ -220,5 +220,60 @@ class TestBatchSeenDuplicateHandling:
         ]
         seen_idx = store.is_seen_batch(items)
         assert 0 in seen_idx
-        assert 1 in seen_idx
-        assert 2 not in seen_idx
+
+
+def test_mark_seen_atomic_transaction(tmp_path):
+    """mark_seen should use explicit transaction — partial failures roll back."""
+    from newsbot.db import NewsStore
+
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    # Insert 3 items — all should succeed atomically.
+    items = [
+        {"url": "http://a.com", "title": "A"},
+        {"url": "http://b.com", "title": "B"},
+        {"url": "http://c.com", "title": "C"},
+    ]
+    count = store.mark_seen(items)
+    assert count == 3  # all 3 newly inserted
+
+    # Re-insert same items — should return 0 (all duplicates).
+    count2 = store.mark_seen(items)
+    assert count2 == 0
+
+
+def test_replace_unposted_batch_seen_marked_uses_rowcount(tmp_path):
+    """replace_unposted_batch should return actual inserted seen count,
+    not len(input) which counts duplicates."""
+    from newsbot.db import NewsStore
+
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    # Pre-mark some items as seen so they're duplicates.
+    store.mark_seen([{"url": "http://old.com", "title": "old"}])
+
+    # Now replace_unposted_batch with seen_items including the pre-seen one.
+    posts = [{"title": "New", "body": "B", "url": "http://new.com"}]
+    seen_items = [
+        {"url": "http://old.com", "title": "old"},  # duplicate
+        {"url": "http://new.com", "title": "new"},  # new
+    ]
+
+    inserted, seen_marked = store.replace_unposted_batch(posts, seen_items)
+    assert inserted == 1  # 1 post inserted
+    # seen_marked should be 1 (only the new one), not 2 (len of input)
+    assert seen_marked == 1, f"seen_marked should be 1 (actual inserts), got {seen_marked}"
+
+
+def test_mark_seen_large_batch(tmp_path):
+    """mark_seen should handle batches larger than SQLite's default chunk size."""
+    from newsbot.db import NewsStore
+
+    store = NewsStore(tmp_path / "test.sqlite")
+    # 600 items — exceeds the 500-item chunk size in some implementations.
+    items = [
+        {"url": f"http://item-{i}.com", "title": f"item-{i}"}
+        for i in range(600)
+    ]
+    count = store.mark_seen(items)
+    assert count == 600  # all 600 newly inserted

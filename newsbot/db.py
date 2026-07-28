@@ -288,6 +288,7 @@ class NewsStore:
 
         Returns the number of rows actually inserted (not attempted).
         Uses INSERT OR IGNORE so duplicates are silently skipped.
+        Wrapped in an explicit transaction for atomicity.
         """
         now = _utc_now_iso()
         rows: list[tuple] = []
@@ -301,16 +302,26 @@ class NewsStore:
             return 0
         # Use executemany for batched insertion (much faster than per-row).
         # INSERT OR IGNORE handles duplicates silently.
+        # Wrap in explicit transaction for atomicity.
+        cur = self._conn.cursor()
         try:
-            cur = self._conn.executemany(
+            cur.execute("BEGIN IMMEDIATE")
+            cur.executemany(
                 "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
                 rows,
             )
-            # rowcount reflects actual inserts (duplicates ignored by OR IGNORE).
-            return cur.rowcount if cur.rowcount > 0 else 0
+            rowcount = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            cur.execute("COMMIT")
+            return rowcount
         except sqlite3.Error as exc:
+            try:
+                cur.execute("ROLLBACK")
+            except Exception:
+                pass
             log.warning("mark_seen batch failed: %s", exc)
             return 0
+        finally:
+            cur.close()
 
     # --- news_digests ---------------------------------------------------
     # Note: insert_digest() was removed — the current pipeline does not
@@ -359,10 +370,8 @@ class NewsStore:
             (_utc_now_iso(), post_id),
         )
 
-    def clear_unposted(self) -> int:
-        """Delete all unposted posts (called before a new generation cycle)."""
-        cur = self._conn.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
-        return int(cur.rowcount or 0)
+    # Note: clear_unposted() was removed — replace_unposted_batch()
+    # handles queue replacement transactionally. No callers remain.
 
     def replace_unposted_batch(
         self, new_posts: list[dict[str, Any]], seen_items: list[dict[str, Any]]
@@ -423,7 +432,9 @@ class NewsStore:
                     "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
                     seen_rows,
                 )
-                seen_marked = len(seen_rows)
+                # Use actual rowcount (duplicates ignored by OR IGNORE),
+                # not len(seen_rows) which counts attempted inserts.
+                seen_marked = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
             cur.execute("COMMIT")
         except Exception as exc:
