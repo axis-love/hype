@@ -10,6 +10,7 @@ Commands:
   /digest           — run the generation cycle immediately
   /post             — post the next pending post to the channel now
   /status           — show pending posts count + next gen/post time
+  /scores           — show hype scores for all queued posts
   /help             — list commands
 """
 
@@ -44,6 +45,7 @@ class BotCommandHandler:
         on_digest: Callable[[], Awaitable[None]] | None = None,
         on_post: Callable[[], Awaitable[None]] | None = None,
         on_status: Callable[[], Awaitable[str]] | None = None,
+        on_scores: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
@@ -51,6 +53,7 @@ class BotCommandHandler:
         self.on_digest = on_digest
         self.on_post = on_post
         self.on_status = on_status
+        self.on_scores = on_scores
         self._offset = 0  # getUpdates offset for ack
         self._client = httpx.AsyncClient(timeout=POLL_TIMEOUT + 10)
 
@@ -120,6 +123,8 @@ class BotCommandHandler:
             await self._cmd_post(chat_id)
         elif command == "/status":
             await self._cmd_status(chat_id)
+        elif command == "/scores":
+            await self._cmd_scores(chat_id)
         elif command == "/help":
             await self._send(chat_id, self._help_text())
         else:
@@ -133,6 +138,7 @@ class BotCommandHandler:
             "/digest — run the generation cycle now (collect → filter → style → queue)\n"
             "/post — post the next pending post to the channel immediately\n"
             "/status — show pending posts and schedule info\n"
+            "/scores — show hype scores for all queued posts\n"
             "/help — show this message"
         )
 
@@ -186,6 +192,16 @@ class BotCommandHandler:
                 await self._send(chat_id, "Status error. Check logs for details.")
         else:
             await self._send(chat_id, "Status handler not available.")
+
+    async def _cmd_scores(self, chat_id: int) -> None:
+        if self.on_scores:
+            try:
+                scores_text = await self.on_scores()
+                await self._send(chat_id, scores_text)
+            except Exception:
+                await self._send(chat_id, "Scores error. Check logs for details.")
+        else:
+            await self._send(chat_id, "Scores handler not available.")
 
     async def poll_loop(self) -> None:
         """Long-poll getUpdates forever."""
