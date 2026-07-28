@@ -370,3 +370,112 @@ class TestLLMErrorMessages:
         assert "sensitive prompt content" not in message
         assert "overloaded" not in message  # The marker itself shouldn't appear
         assert "HTTP 400" in message
+
+
+class TestBotCommandSendValidation:
+    """Verify _send() validates HTTP status and Telegram ok field."""
+
+    @pytest.mark.asyncio
+    async def test_send_returns_false_on_http_error(self):
+        """_send must return False when Telegram returns HTTP >= 400."""
+        from newsbot.bot_commands import BotCommandHandler
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler = BotCommandHandler(
+            bot_token="fake_token", admin_user_id="123",
+            settings=MagicMock(),
+        )
+        # Mock the httpx client to return a 403 response.
+        bad_resp = MagicMock()
+        bad_resp.status_code = 403
+        bad_resp.json.return_value = {"ok": False, "description": "forbidden"}
+        handler._client = AsyncMock()
+        handler._client.post = AsyncMock(return_value=bad_resp)
+
+        result = await handler._send(chat_id=123, text="test")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_returns_false_on_ok_false(self):
+        """_send must return False when Telegram returns ok=false."""
+        from newsbot.bot_commands import BotCommandHandler
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler = BotCommandHandler(
+            bot_token="fake_token", admin_user_id="123",
+            settings=MagicMock(),
+        )
+        ok_false_resp = MagicMock()
+        ok_false_resp.status_code = 200
+        ok_false_resp.json.return_value = {"ok": False, "description": "chat not found"}
+        handler._client = AsyncMock()
+        handler._client.post = AsyncMock(return_value=ok_false_resp)
+
+        result = await handler._send(chat_id=123, text="test")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_returns_true_on_success(self):
+        """_send must return True when Telegram returns ok=true."""
+        from newsbot.bot_commands import BotCommandHandler
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler = BotCommandHandler(
+            bot_token="fake_token", admin_user_id="123",
+            settings=MagicMock(),
+        )
+        ok_resp = MagicMock()
+        ok_resp.status_code = 200
+        ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+        handler._client = AsyncMock()
+        handler._client.post = AsyncMock(return_value=ok_resp)
+
+        result = await handler._send(chat_id=123, text="test")
+        assert result is True
+
+
+class TestPollingOkFalse:
+    """Verify ok=false polling responses don't leak response data."""
+
+    @pytest.mark.asyncio
+    async def test_ok_false_does_not_log_response_body(self, caplog):
+        """When Telegram returns ok=false, response description/JSON must not be logged."""
+        from newsbot.bot_commands import BotCommandHandler
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler = BotCommandHandler(
+            bot_token="fake_token", admin_user_id="123",
+            settings=MagicMock(),
+        )
+        # Response with ok=false and sensitive description.
+        bad_resp = MagicMock()
+        bad_resp.status_code = 200
+        bad_resp.json.return_value = {
+            "ok": False,
+            "description": "token has been revoked",
+            "error_code": 401,
+        }
+        handler._client = AsyncMock()
+        handler._client.post = AsyncMock(return_value=bad_resp)
+
+        with caplog.at_level(logging.WARNING):
+            # Run one iteration of the poll loop, then break.
+            # Patch asyncio.sleep to raise CancelledError after first call.
+            import asyncio
+            call_count = 0
+            async def mock_sleep(seconds):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 1:
+                    raise asyncio.CancelledError()
+
+            with patch("newsbot.bot_commands.asyncio.sleep", new=mock_sleep):
+                with pytest.raises(asyncio.CancelledError):
+                    await handler.poll_loop()
+
+        # The response description must NOT appear in logs.
+        for record in caplog.records:
+            assert "token has been revoked" not in record.getMessage()
+            assert "error_code" not in record.getMessage()
+        # Should log that ok=false was returned (safe metadata only).
+        assert any("ok=false" in r.getMessage() for r in caplog.records)
