@@ -395,7 +395,6 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         return 1
 
     log.info("queued %d posts for delivery (marked %d items as seen)", inserted, seen)
-    store.prune_old_items(cfg["item_prune_hours"])
 
     return 0
 
@@ -413,11 +412,9 @@ def _run_retention(store: NewsStore) -> None:
     """
     posted_days = int(os.getenv("NEWS_RETENTION_POSTED_DAYS", "30"))
     seen_days = int(os.getenv("NEWS_RETENTION_SEEN_DAYS", "14"))
-    digest_days = int(os.getenv("NEWS_RETENTION_DIGEST_DAYS", "90"))
     try:
         store.prune_posted_posts(max_age_days=posted_days)
         store.prune_seen(max_age_days=seen_days)
-        store.prune_digests(max_age_days=digest_days)
     except Exception as exc:
         log.warning("retention cleanup failed: %s", exc)
 
@@ -473,6 +470,9 @@ async def _scheduler_gen_iteration(
             log.error("generation failed (code=%d)", result)
     except Exception as exc:
         log.error("generation cycle failed: %s", redact_exception(exc))
+    finally:
+        # Retention runs on EVERY outcome (success, failure, no-progress, exception).
+        _run_retention(store)
 
     if gen_success:
         now = datetime.now(timezone.utc)
@@ -481,7 +481,6 @@ async def _scheduler_gen_iteration(
     else:
         log.warning("generation did not succeed — will retry on next tick (last_gen_utc unchanged)")
 
-    _run_retention(store)
     return 0 if gen_success else result
 
 
