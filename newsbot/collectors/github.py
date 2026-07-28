@@ -26,12 +26,11 @@ import httpx
 
 from newsbot.collectors.base import new_candidate, truncate, to_iso_utc
 
+from newsbot.collectors._shared import get_shared_semaphore
+
 log = logging.getLogger(__name__)
 
 GITHUB_SEARCH_URL = "https://api.github.com/search/repositories"
-
-# Shared concurrency limiter for all outbound collector requests.
-_COLLECTOR_SEMAPHORE = asyncio.Semaphore(10)
 
 # Penalty keywords — repos whose name/description matches these get down-weighted
 # by setting a low score multiplier (applied via the 'penalty' field, read by scoring).
@@ -69,7 +68,8 @@ def _is_suspicious(repo: dict[str, Any]) -> bool:
 
 async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort: str) -> list[dict[str, Any]]:
     params = {"q": query, "sort": sort, "order": "desc", "per_page": limit}
-    async with _COLLECTOR_SEMAPHORE:
+    sem = get_shared_semaphore()
+    async with sem:
         try:
             r = await client.get(GITHUB_SEARCH_URL, params=params)
             if r.status_code >= 400:

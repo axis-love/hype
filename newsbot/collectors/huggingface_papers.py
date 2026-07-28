@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from newsbot.collectors.base import new_candidate, truncate
+from newsbot.collectors._shared import get_shared_semaphore
 
 log = logging.getLogger(__name__)
 
@@ -32,16 +33,18 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
     limit = max(1, min(int(config.get("limit") or 10), 30))
     source_name = "Hugging Face Papers"
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            r = await client.get(HF_DAILY_PAPERS_URL)
-            if r.status_code >= 400:
-                log.warning("HF Papers fetch failed url=%s status=%s", HF_DAILY_PAPERS_URL, r.status_code)
-                return []
-            data = r.json()
-    except Exception as exc:
-        log.warning("HF Papers fetch failed url=%s status=unavailable: %s", HF_DAILY_PAPERS_URL, exc)
-        return []
+    sem = get_shared_semaphore()
+    async with sem:
+        try:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                r = await client.get(HF_DAILY_PAPERS_URL)
+                if r.status_code >= 400:
+                    log.warning("HF Papers fetch failed url=%s status=%s", HF_DAILY_PAPERS_URL, r.status_code)
+                    return []
+                data = r.json()
+        except Exception as exc:
+            log.warning("HF Papers fetch failed url=%s status=unavailable: %s", HF_DAILY_PAPERS_URL, exc)
+            return []
 
     # The endpoint returns a list of paper objects.
     papers = data if isinstance(data, list) else []

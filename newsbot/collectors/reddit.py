@@ -27,12 +27,11 @@ except ImportError:  # pragma: no cover
 
 from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_utc
 
+from newsbot.collectors._shared import get_shared_semaphore
+
 log = logging.getLogger(__name__)
 
 REDDIT_USER_AGENT = "Mozilla/5.0 (compatible; newsbot/0.1; +https://github.com/elevenoutoften/news-bot)"
-
-# Shared concurrency limiter — same as RSS to bound total outbound requests.
-_COLLECTOR_SEMAPHORE = asyncio.Semaphore(10)
 
 # HTTP timeout for Reddit RSS fetches.
 _REDDIT_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -93,7 +92,8 @@ async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
     # Async HTTP fetch with explicit timeout, then local parse.
     # This avoids asyncio.to_thread(feedparser.parse, URL) which leaves
     # a stuck worker thread performing network I/O on timeout.
-    async with _COLLECTOR_SEMAPHORE:
+    sem = get_shared_semaphore()
+    async with sem:
         try:
             async with httpx.AsyncClient(
                 timeout=_REDDIT_TIMEOUT,

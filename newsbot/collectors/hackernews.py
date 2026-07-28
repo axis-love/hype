@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_utc
+from newsbot.collectors._shared import get_shared_semaphore
 
 log = logging.getLogger(__name__)
 
@@ -24,15 +25,17 @@ HN_ALGOLIA_URL = "https://hn.algolia.com/api/v1/search"
 
 
 async def _fetch_one(client: httpx.AsyncClient, *, params: dict[str, Any], source_name: str) -> list[dict[str, Any]]:
-    try:
-        r = await client.get(HN_ALGOLIA_URL, params=params)
-        if r.status_code >= 400:
-            log.warning("HN fetch failed url=%s status=%s", HN_ALGOLIA_URL, r.status_code)
+    sem = get_shared_semaphore()
+    async with sem:
+        try:
+            r = await client.get(HN_ALGOLIA_URL, params=params)
+            if r.status_code >= 400:
+                log.warning("HN fetch failed url=%s status=%s", HN_ALGOLIA_URL, r.status_code)
+                return []
+            data = r.json()
+        except Exception as exc:
+            log.warning("HN fetch failed url=%s status=unavailable: %s", HN_ALGOLIA_URL, exc)
             return []
-        data = r.json()
-    except Exception as exc:
-        log.warning("HN fetch failed url=%s status=unavailable: %s", HN_ALGOLIA_URL, exc)
-        return []
 
     items: list[dict[str, Any]] = []
     for hit in data.get("hits", []):
