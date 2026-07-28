@@ -144,7 +144,6 @@ class SettingsStore:
 
     def import_text_file_once(self, namespace: str, key: str, text_path: Path) -> bool:
         """Import plain text file into a key if that key doesn't exist yet."""
-
         if not text_path.exists():
             return False
         if self.exists(namespace, key):
@@ -154,6 +153,21 @@ class SettingsStore:
             return True
         except Exception:
             return False
+
+    # --- lifecycle management ---
+
+    def close(self) -> None:
+        """Close the database connection."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "SettingsStore":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
 
 def default_store(db_path: Optional[str] = None) -> SettingsStore:

@@ -384,16 +384,23 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
 
 
 def _run_retention(store: NewsStore) -> None:
-    """Run retention cleanup: posted posts older than 30 days, seen entries
-    older than 14 days, digests older than 90 days. Bounded batches.
+    """Run retention cleanup using configurable ages from env vars.
+
+    Retention ages (days):
+      NEWS_RETENTION_POSTED_DAYS (default 30) — posted_posts cleanup
+      NEWS_RETENTION_SEEN_DAYS   (default 14)  — seen entries cleanup
+      NEWS_RETENTION_DIGEST_DAYS  (default 90)  — digests cleanup
 
     Called on every generation cycle outcome (success, no-progress, failure)
     so cleanup is not skipped when generation produces no new posts.
     """
+    posted_days = int(os.getenv("NEWS_RETENTION_POSTED_DAYS", "30"))
+    seen_days = int(os.getenv("NEWS_RETENTION_SEEN_DAYS", "14"))
+    digest_days = int(os.getenv("NEWS_RETENTION_DIGEST_DAYS", "90"))
     try:
-        store.prune_posted_posts(max_age_days=30)
-        store.prune_seen(max_age_days=14)
-        store.prune_digests(max_age_days=90)
+        store.prune_posted_posts(max_age_days=posted_days)
+        store.prune_seen(max_age_days=seen_days)
+        store.prune_digests(max_age_days=digest_days)
     except Exception as exc:
         log.warning("retention cleanup failed: %s", exc)
 
@@ -551,6 +558,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 lambda: _run_generation(store, settings),
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
+            # Run retention after manual /digest too (same as scheduled).
+            _run_retention(store)
             if result == 2:
                 raise RuntimeError("generation already in progress — skipped")
             if result != 0:
@@ -620,6 +629,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     finally:
         if bot_handler:
             await bot_handler.close()
+        store.close()
 
 
 def main() -> None:
