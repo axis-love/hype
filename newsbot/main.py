@@ -48,7 +48,7 @@ from newsbot.collectors import (
 )
 from newsbot.config import load_config
 from newsbot.db import NewsStore
-from newsbot.dedupe import dedupe_and_merge
+from newsbot.dedupe import dedupe_and_merge, _set_pre_merge_weights
 from newsbot.jobs import JobCoordinator
 from newsbot.scoring import score_all
 from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
@@ -285,6 +285,8 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
             scheduler can decide whether to advance the timestamp.
     """
     cfg = load_config(settings)
+    # Sync pre-merge weights with active config so dedupe uses configured weights.
+    _set_pre_merge_weights(cfg.get("source_weights") or {})
 
     # NOTE: Do NOT clear unposted items here. The old queue stays intact
     # until the new batch is ready (transactional replacement at the end).

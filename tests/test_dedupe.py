@@ -212,10 +212,10 @@ def test_dedupe_same_source_takes_max_engagement():
 
 
 def test_dedupe_url_encoding_preserved():
-    """Query params should preserve their original encoding (no re-encoding).
+    """Query params should preserve their original encoding (no decoding).
 
-    Signed/encoding-sensitive URLs must not be re-encoded via urlencode
-    because that can destroy signed URLs where byte order and encoding matter.
+    Tracking params are stripped by name, but the remaining query string
+    preserves the original encoded form — %xx and + are NOT decoded.
     """
     from newsbot.dedupe import _canonical_url
     # Param value with spaces — original encoding preserved (not re-encoded)
@@ -225,15 +225,12 @@ def test_dedupe_url_encoding_preserved():
     assert "hello world" in canon
     assert "sort=desc" in canon
 
-    # Signed URL with percent-encoding preserved (not re-encoded).
-    # parse_qsl decodes %2B and + to space — the key point is we don't
-    # RE-encode the decoded value back. A value like "abc%2Bdef" is decoded
-    # to "abc def" (with a literal space) and stays that way.
+    # Percent-encoded values preserved (not decoded by parse_qsl).
     signed_url = "https://example.com/s?sig=abc%2Bdef&ts=12345"
     canon2 = _canonical_url(signed_url)
     assert "ts=12345" in canon2
-    # The decoded value is preserved without re-encoding to %2B or +.
-    assert "abc def" in canon2 or "abc+def" in canon2
+    # %2B must stay as %2B (not decoded to + or space).
+    assert "abc%2Bdef" in canon2, f"Percent encoding destroyed: {canon2}"
 
 
 def test_dedupe_interleaved_same_source_engagement_order_independent():
@@ -293,3 +290,51 @@ def test_dedupe_interleaved_same_source_engagement_order_independent():
                        source="reddit", source_name="Reddit", upvotes=50)
     out4 = dedupe_and_merge([a4, a4b, b4])
     assert out4[0]["upvotes"] == 250, f"grouped max got {out4[0]['upvotes']}"
+
+
+def test_canonical_url_preserves_percent_encoding():
+    """URLs with %xx encoding must preserve the encoded form, not decode it."""
+    # %2F is encoded slash — must stay as %2F, not become /
+    url = "https://example.com/path%2Fsegment?id=42"
+    canon = _canonical_url(url)
+    assert "%2F" in canon or "path%2Fsegment" in canon, f"Encoding destroyed: {canon}"
+    assert "id=42" in canon
+
+
+def test_canonical_url_preserves_plus_sign():
+    """Plus signs in query values must be preserved, not decoded to spaces."""
+    url = "https://example.com/search?q=hello+world&sort=desc"
+    canon = _canonical_url(url)
+    assert "hello+world" in canon, f"Plus sign decoded: {canon}"
+
+
+def test_dedupe_transitive_merge_three_sources():
+    """A+B merged, then C matches B's URL — should find the merged group, not split.
+
+    Without index updates after merge, C would form a separate group.
+    With index updates, C finds the merged group and crosspost_count == 3.
+    """
+    a = new_candidate(title="Story A", url="https://example.com/a",
+                      source="hn", source_name="Hacker News", upvotes=100)
+    b = new_candidate(title="Story A", url="https://example.com/b",
+                      source="reddit", source_name="Reddit", upvotes=200)
+    c = new_candidate(title="Story A", url="https://example.com/b",
+                      source="github", source_name="GitHub", stars=500)
+    out = dedupe_and_merge([a, b, c])
+    # All three should be in one group (A matches B by title, C matches B by URL)
+    assert len(out) == 1
+    assert out[0]["crosspost_count"] == 3
+
+
+def test_dedupe_transitive_url_match():
+    """C matches B's URL only (not title) — should still find the merged group."""
+    a = new_candidate(title="Breaking News", url="https://example.com/original",
+                      source="hn", source_name="Hacker News", upvotes=100)
+    b = new_candidate(title="Breaking News", url="https://example.com/different",
+                      source="reddit", source_name="Reddit", upvotes=200)
+    # C has same URL as B but different title — must match the merged group via URL index
+    c = new_candidate(title="Different Title Entirely", url="https://example.com/different",
+                      source="github", source_name="GitHub", stars=500)
+    out = dedupe_and_merge([a, b, c])
+    assert len(out) == 1, f"Transitive duplicate split: got {len(out)} groups"
+    assert out[0]["crosspost_count"] == 3
