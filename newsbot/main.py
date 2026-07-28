@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sqlite3
@@ -51,7 +52,7 @@ from newsbot.db import NewsStore
 from newsbot.dedupe import dedupe_and_merge, _set_pre_merge_weights
 from newsbot.jobs import JobCoordinator
 from newsbot.scoring import score_all
-from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
+from newsbot.summarizer import _assign_candidate_ids, llm_filter, llm_style_posts, select_diverse_top_items
 
 log = logging.getLogger(__name__)
 
@@ -347,6 +348,37 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         "top %d candidates (score >= %.1f) sent to LLM filter — sources: %s",
         len(top), min_score, ", ".join(f"{k}={v}" for k, v in sorted(source_counts.items(), key=lambda x: -x[1])),
     )
+
+    # 5b. Assign candidate IDs here (after diverse selection, before LLM filter)
+    #     so they can be logged and preserved through the filter pass.
+    _assign_candidate_ids(top)
+
+    # 5c. Log each candidate sent to the LLM filter as one JSON line at INFO.
+    for rank, c in enumerate(top, start=1):
+        bd = c.get("score_breakdown") or {}
+        log_line = json.dumps({
+            "event": "score_candidate",
+            "id": c.get("candidate_id"),
+            "rank": rank,
+            "score": float(c.get("score") or 0.0),
+            "scored_at": bd.get("scored_at", ""),
+            "source": str(c.get("source") or ""),
+            "title": str(c.get("title") or "")[:80],
+            "published_at": str(c.get("published_at") or "") if c.get("published_at") else "",
+            "upvotes": c.get("upvotes") or 0,
+            "comments": c.get("comments") or 0,
+            "stars": c.get("stars") or 0,
+            "reposts": c.get("reposts") or 0,
+            "crosspost_count": c.get("crosspost_count") or 1,
+            "engagement": float(bd.get("engagement") or 0.0),
+            "recency": float(bd.get("recency") or 0.0),
+            "source_weight": float(bd.get("source_weight")) if bd.get("source_weight") is not None else 1.0,
+            "topic_bonus": int(bd.get("topic_bonus") or 0),
+            "crosspost_bonus": float(bd.get("crosspost_bonus") or 0.0),
+            "penalty": float(bd.get("penalty")) if bd.get("penalty") is not None else 1.0,
+            "matched_topics": bd.get("matched_topics") or [],
+        })
+        log.info(log_line)
 
     # 6. Pass A — LLM filter.
     filter_lm = _build_filter_lm_client()
