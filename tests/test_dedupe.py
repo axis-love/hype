@@ -212,10 +212,84 @@ def test_dedupe_same_source_takes_max_engagement():
 
 
 def test_dedupe_url_encoding_preserved():
-    """Query params with special characters should be URL-encoded properly."""
+    """Query params should preserve their original encoding (no re-encoding).
+
+    Signed/encoding-sensitive URLs must not be re-encoded via urlencode
+    because that can destroy signed URLs where byte order and encoding matter.
+    """
     from newsbot.dedupe import _canonical_url
-    # Param value with spaces/special chars should be encoded
+    # Param value with spaces — original encoding preserved (not re-encoded)
     url = "https://example.com/search?q=hello world&sort=desc"
     canon = _canonical_url(url)
-    assert "hello+world" in canon or "hello%20world" in canon
+    # Original encoding preserved — no + or %20 added.
+    assert "hello world" in canon
     assert "sort=desc" in canon
+
+    # Signed URL with percent-encoding preserved (not re-encoded).
+    # parse_qsl decodes %2B and + to space — the key point is we don't
+    # RE-encode the decoded value back. A value like "abc%2Bdef" is decoded
+    # to "abc def" (with a literal space) and stays that way.
+    signed_url = "https://example.com/s?sig=abc%2Bdef&ts=12345"
+    canon2 = _canonical_url(signed_url)
+    assert "ts=12345" in canon2
+    # The decoded value is preserved without re-encoding to %2B or +.
+    assert "abc def" in canon2 or "abc+def" in canon2
+
+
+def test_dedupe_interleaved_same_source_engagement_order_independent():
+    """Same-source engagement must use MAX (not sum) even when duplicates
+    are interleaved with other-source merges.
+
+    (A, B, A') and (A, A', B) should produce identical results.
+    """
+    from newsbot.collectors.base import new_candidate
+
+    # (A, B, A') order: A=hn(100), B=reddit(50), A'=hn(80)
+    a1 = new_candidate(title="Story", url="https://example.com/s",
+                       source="hn", source_name="Hacker News", upvotes=100)
+    b1 = new_candidate(title="Story", url="https://example.com/s",
+                       source="reddit", source_name="Reddit", upvotes=50)
+    a1b = new_candidate(title="Story", url="https://example.com/s",
+                        source="hn", source_name="Hacker News", upvotes=80)
+    out1 = dedupe_and_merge([a1, b1, a1b])
+
+    # (A, A', B) order: A=hn(100), A'=hn(80), B=reddit(50)
+    a2 = new_candidate(title="Story", url="https://example.com/s",
+                       source="hn", source_name="Hacker News", upvotes=100)
+    a2b = new_candidate(title="Story", url="https://example.com/s",
+                        source="hn", source_name="Hacker News", upvotes=80)
+    b2 = new_candidate(title="Story", url="https://example.com/s",
+                       source="reddit", source_name="Reddit", upvotes=50)
+    out2 = dedupe_and_merge([a2, a2b, b2])
+
+    assert len(out1) == 1
+    assert len(out2) == 1
+    # Both should have same total upvotes: max(100,80) for hn + 50 for reddit = 150
+    assert out1[0]["upvotes"] == 150, f"(A,B,A') got {out1[0]['upvotes']}"
+    assert out2[0]["upvotes"] == 150, f"(A,A',B) got {out2[0]['upvotes']}"
+    # Both should have same contributing sources
+    assert set(out1[0]["contributing_sources"]) == {"hn", "reddit"}
+    assert set(out2[0]["contributing_sources"]) == {"hn", "reddit"}
+    # Both should have same crosspost_count
+    assert out1[0]["crosspost_count"] == out2[0]["crosspost_count"]
+
+    # Test with a HIGHER same-source value in the interleaved position.
+    # (A, B, A'') where A''=hn(200) — should be max(100,200)=200 for hn, +50=250 total
+    a3 = new_candidate(title="Story", url="https://example.com/s",
+                       source="hn", source_name="Hacker News", upvotes=100)
+    b3 = new_candidate(title="Story", url="https://example.com/s",
+                       source="reddit", source_name="Reddit", upvotes=50)
+    a3b = new_candidate(title="Story", url="https://example.com/s",
+                        source="hn", source_name="Hacker News", upvotes=200)
+    out3 = dedupe_and_merge([a3, b3, a3b])
+    assert out3[0]["upvotes"] == 250, f"interleaved max got {out3[0]['upvotes']}"
+
+    # Same result regardless of order
+    a4 = new_candidate(title="Story", url="https://example.com/s",
+                       source="hn", source_name="Hacker News", upvotes=100)
+    a4b = new_candidate(title="Story", url="https://example.com/s",
+                        source="hn", source_name="Hacker News", upvotes=200)
+    b4 = new_candidate(title="Story", url="https://example.com/s",
+                       source="reddit", source_name="Reddit", upvotes=50)
+    out4 = dedupe_and_merge([a4, a4b, b4])
+    assert out4[0]["upvotes"] == 250, f"grouped max got {out4[0]['upvotes']}"
