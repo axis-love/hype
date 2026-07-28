@@ -107,7 +107,11 @@ def _build_filter_lm_client() -> LMClient:
 MAX_CONCURRENT_COLLECTORS = 10
 # Overall generation deadline (seconds). 2 LLM passes × 3 retries × 300s timeout
 # = ~30 min worst case. 1200s (20 min) bounds this without cutting off healthy runs.
-GENERATION_TIMEOUT_SECONDS = 1200
+# Generation timeout: 600s (10 min). Operationally acceptable — allows
+# collectors + LLM filter + LLM style to complete without a 25-min stall.
+# Collectors have explicit per-request timeouts (15-30s), LLM has its own
+# timeout (LM_TIMEOUT), and the shared semaphore bounds concurrency to 10.
+GENERATION_TIMEOUT_SECONDS = 600
 
 async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     """Run every enabled collector concurrently and merge results.

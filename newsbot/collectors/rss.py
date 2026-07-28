@@ -23,12 +23,9 @@ except ImportError:  # pragma: no cover
     feedparser = None
 
 from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_utc
+from newsbot.collectors._shared import get_shared_semaphore
 
 log = logging.getLogger(__name__)
-
-# Shared concurrency limiter for all outbound collector requests.
-# Bounds concurrent HTTP connections across RSS, Reddit, and GitHub.
-_COLLECTOR_SEMAPHORE = asyncio.Semaphore(10)
 
 # HTTP timeout for RSS feed fetches.
 _RSS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -49,7 +46,8 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
     # Async HTTP fetch with explicit timeout, then local parse.
     # This avoids asyncio.to_thread(feedparser.parse, URL) which leaves
     # a stuck worker thread performing network I/O on timeout.
-    async with _COLLECTOR_SEMAPHORE:
+    sem = get_shared_semaphore()
+    async with sem:
         try:
             async with httpx.AsyncClient(timeout=_RSS_TIMEOUT, follow_redirects=True) as client:
                 response = await client.get(url)

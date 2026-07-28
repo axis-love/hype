@@ -23,6 +23,8 @@ import httpx
 
 from newsbot.collectors.base import new_candidate, truncate
 
+from newsbot.collectors._shared import get_shared_semaphore
+
 log = logging.getLogger(__name__)
 
 PH_GRAPHQL_URL = "https://api.producthunt.com/v2/api/graphql"
@@ -54,19 +56,21 @@ query ($first: Int!, $topic: String!) {
 
 async def _fetch_topic(client: httpx.AsyncClient, *, topic: str, limit: int, token: str) -> list[dict[str, Any]]:
     headers = {"Authorization": f"Bearer {token}", "User-Agent": "newsbot/0.1"}
-    try:
-        r = await client.post(
-            PH_GRAPHQL_URL,
-            json={"query": POSTS_QUERY, "variables": {"first": limit, "topic": topic}},
-            headers=headers,
-        )
-        if r.status_code >= 400:
-            log.warning("PH fetch failed topic=%r status=%s", topic, r.status_code)
+    sem = get_shared_semaphore()
+    async with sem:
+        try:
+            r = await client.post(
+                PH_GRAPHQL_URL,
+                json={"query": POSTS_QUERY, "variables": {"first": limit, "topic": topic}},
+                headers=headers,
+            )
+            if r.status_code >= 400:
+                log.warning("PH fetch failed topic=%r status=%s", topic, r.status_code)
+                return []
+            data = r.json()
+        except Exception as exc:
+            log.warning("PH fetch failed topic=%r status=unavailable: %s", topic, exc)
             return []
-        data = r.json()
-    except Exception as exc:
-        log.warning("PH fetch failed topic=%r status=unavailable: %s", topic, exc)
-        return []
 
     topic_node = ((data or {}).get("data") or {}).get("topic") or {}
     edges = (topic_node.get("posts") or {}).get("edges") or []

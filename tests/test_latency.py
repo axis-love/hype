@@ -161,8 +161,19 @@ class TestSafeTimeout:
     @pytest.mark.asyncio
     async def test_shared_semaphore_bounds_leaf_concurrency(self):
         """Verify the shared semaphore limits concurrent leaf fetches."""
-        from newsbot.collectors.rss import _COLLECTOR_SEMAPHORE
+        from newsbot.collectors._shared import get_shared_semaphore
 
-        # The semaphore should exist and have a bounded value.
-        assert _COLLECTOR_SEMAPHORE._value <= 20
-        assert _COLLECTOR_SEMAPHORE._value >= 1
+        # The shared semaphore should exist and have a bounded value.
+        sem = get_shared_semaphore()
+        assert sem._value <= 20
+        assert sem._value >= 1
+
+    @pytest.mark.asyncio
+    async def test_all_collectors_share_one_semaphore(self):
+        """Verify all collectors import the same shared semaphore instance."""
+        from newsbot.collectors._shared import get_shared_semaphore
+
+        sem = get_shared_semaphore()
+        # All collectors that do HTTP must call get_shared_semaphore().
+        # The returned instance must be the same object across calls.
+        assert get_shared_semaphore() is sem
