@@ -395,6 +395,121 @@ def _run_retention(store: NewsStore) -> None:
         log.warning("retention cleanup failed: %s", exc)
 
 
+async def _scheduler_gen_iteration(
+    coordinator: JobCoordinator,
+    store: NewsStore,
+    settings: SettingsStore,
+    gen_interval_s: float,
+    *,
+    timeout: float = 0,
+) -> int:
+    """One iteration of the generation scheduler loop.
+
+    Returns:
+        0 — generation succeeded, timestamp advanced.
+        1 — generation failed, timestamp unchanged.
+        2 — generation skipped (already running), timestamp unchanged.
+        3 — generation no-progress, timestamp unchanged.
+
+    Runs retention cleanup regardless of outcome.
+    """
+    last_gen_str = settings.get("scheduler", "last_gen_utc", default="") or ""
+    now = datetime.now(timezone.utc)
+
+    if last_gen_str:
+        try:
+            last_gen = datetime.fromisoformat(last_gen_str)
+            if last_gen.tzinfo is None:
+                last_gen = last_gen.replace(tzinfo=timezone.utc)
+            elapsed = (now - last_gen).total_seconds()
+            if elapsed < gen_interval_s:
+                log.debug("next generation in %.0fs", gen_interval_s - elapsed)
+                return 0  # not time yet — treat as idle success
+        except (ValueError, TypeError):
+            log.warning("invalid last_gen_utc: %s — generating now", last_gen_str)
+
+    log.info("generation cycle starting at %s", now.isoformat())
+    gen_success = False
+    result = 1
+    try:
+        result = await coordinator.run_generation(
+            lambda: _run_generation(store, settings),
+            timeout=timeout,
+        )
+        if result == 0:
+            gen_success = True
+        elif result == 2:
+            log.info("generation skipped — already in progress")
+        elif result == 3:
+            log.info("generation no-progress — will retry on next tick")
+        else:
+            log.error("generation failed (code=%d)", result)
+    except Exception as exc:
+        log.error("generation cycle failed: %s", redact_exception(exc))
+
+    if gen_success:
+        now = datetime.now(timezone.utc)
+        settings.set("scheduler", "last_gen_utc", now.isoformat())
+        log.info("generation cycle complete")
+    else:
+        log.warning("generation did not succeed — will retry on next tick (last_gen_utc unchanged)")
+
+    _run_retention(store)
+    return 0 if gen_success else result
+
+
+async def _scheduler_post_iteration(
+    coordinator: JobCoordinator,
+    settings: SettingsStore,
+    post_interval_s: float,
+) -> int:
+    """One iteration of the posting scheduler loop.
+
+    Returns:
+        0 — posting succeeded, timestamp advanced.
+        1 — posting failed, timestamp unchanged.
+        2 — posting skipped (already running), timestamp unchanged.
+        3 — no pending posts, timestamp unchanged.
+    """
+    last_post_str = settings.get("scheduler", "last_post_utc", default="") or ""
+    now = datetime.now(timezone.utc)
+
+    if last_post_str:
+        try:
+            last_post = datetime.fromisoformat(last_post_str)
+            if last_post.tzinfo is None:
+                last_post = last_post.replace(tzinfo=timezone.utc)
+            elapsed = (now - last_post).total_seconds()
+            if elapsed < post_interval_s:
+                log.debug("next post in %.0fs", post_interval_s - elapsed)
+                return 0  # not time yet — idle success
+        except (ValueError, TypeError):
+            pass  # run now
+
+    post_success = False
+    result = 1
+    try:
+        result = await coordinator.run_posting()
+        if result == 0:
+            post_success = True
+        elif result == 2:
+            log.info("posting skipped — already in progress")
+        elif result == 3:
+            log.debug("no pending posts to deliver")
+        else:
+            log.error("posting failed (code=%d)", result)
+    except Exception as exc:
+        log.error("posting cycle failed: %s", redact_exception(exc))
+
+    if post_success:
+        now = datetime.now(timezone.utc)
+        settings.set("scheduler", "last_post_utc", now.isoformat())
+    else:
+        log.warning("posting did not succeed — will retry on next tick (last_post_utc unchanged)")
+
+    return result
+
+
 async def _scheduled_loop(settings: SettingsStore) -> None:
     """Long-running loop with concurrent generation + posting timers.
 
@@ -471,111 +586,24 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     async def generation_loop() -> None:
         """Generation timer: runs the full pipeline on schedule.
 
-        last_gen_utc advances only after successful generation (result 0).
-        Failed jobs (1), skipped (2), and no-progress (3) retain the
-        previous timestamp so the scheduler retries on the next tick
-        (bounded by the 60s sleep).
+        Delegates to _scheduler_gen_iteration() for the bookkeeping logic.
         """
         log.info("generation timer started: interval=%.1fh", gen_interval_hours)
         while True:
-            last_gen_str = settings.get("scheduler", "last_gen_utc", default="") or ""
-            now = datetime.now(timezone.utc)
-
-            if last_gen_str:
-                try:
-                    last_gen = datetime.fromisoformat(last_gen_str)
-                    if last_gen.tzinfo is None:
-                        last_gen = last_gen.replace(tzinfo=timezone.utc)
-                    elapsed = (now - last_gen).total_seconds()
-                    if elapsed < gen_interval_s:
-                        sleep_for = gen_interval_s - elapsed
-                        log.debug("next generation in %.0fs", sleep_for)
-                        await asyncio.sleep(min(sleep_for, 300))
-                        continue
-                except (ValueError, TypeError):
-                    log.warning("invalid last_gen_utc: %s — generating now", last_gen_str)
-
-            log.info("generation cycle starting at %s", now.isoformat())
-            gen_success = False
-            try:
-                result = await coordinator.run_generation(
-                    lambda: _run_generation(store, settings),
-                    timeout=GENERATION_TIMEOUT_SECONDS,
-                )
-                if result == 0:
-                    gen_success = True
-                elif result == 2:
-                    log.info("generation skipped — already in progress")
-                    # Skipped does NOT advance timestamp — next tick retries
-                elif result == 3:
-                    log.info("generation no-progress — will retry on next tick")
-                else:
-                    log.error("generation failed (code=%d)", result)
-            except Exception as exc:
-                log.error("generation cycle failed: %s", redact_exception(exc))
-
-            # Only advance last_gen_utc on actual success (result 0).
-            if gen_success:
-                now = datetime.now(timezone.utc)
-                settings.set("scheduler", "last_gen_utc", now.isoformat())
-                log.info("generation cycle complete, next in %.1fh", gen_interval_hours)
-            else:
-                log.warning("generation did not succeed — will retry on next tick (last_gen_utc unchanged)")
-
-            # Run retention cleanup on every cycle (success, no-progress, failure)
-            _run_retention(store)
-
+            await _scheduler_gen_iteration(
+                coordinator, store, settings, gen_interval_s,
+                timeout=GENERATION_TIMEOUT_SECONDS,
+            )
             await asyncio.sleep(60)
 
     async def posting_loop() -> None:
         """Posting timer: posts one pending post on schedule.
 
-        last_post_utc advances only after a post is fully delivered and
-        marked posted (result 0). Failure (1), skip (2), and empty queue
-        (3) retain the previous timestamp so the scheduler retries on the
-        next tick.
+        Delegates to _scheduler_post_iteration() for the bookkeeping logic.
         """
         log.info("posting timer started: interval=%.0fmin", post_interval_minutes)
         while True:
-            last_post_str = settings.get("scheduler", "last_post_utc", default="") or ""
-            now = datetime.now(timezone.utc)
-
-            if last_post_str:
-                try:
-                    last_post = datetime.fromisoformat(last_post_str)
-                    if last_post.tzinfo is None:
-                        last_post = last_post.replace(tzinfo=timezone.utc)
-                    elapsed = (now - last_post).total_seconds()
-                    if elapsed < post_interval_s:
-                        sleep_for = post_interval_s - elapsed
-                        await asyncio.sleep(min(sleep_for, 60))
-                        continue
-                except (ValueError, TypeError):
-                    pass  # run now
-
-            post_success = False
-            try:
-                result = await coordinator.run_posting()
-                if result == 0:
-                    post_success = True
-                elif result == 2:
-                    log.info("posting skipped — already in progress")
-                    # Skipped does NOT advance timestamp
-                elif result == 3:
-                    log.debug("no pending posts to deliver")
-                    # Empty queue does NOT advance timestamp
-                else:
-                    log.error("posting failed (code=%d)", result)
-            except Exception as exc:
-                log.error("posting cycle failed: %s", redact_exception(exc))
-
-            # Only advance last_post_utc on actual delivery success (result 0).
-            if post_success:
-                now = datetime.now(timezone.utc)
-                settings.set("scheduler", "last_post_utc", now.isoformat())
-            else:
-                log.warning("posting did not succeed — will retry on next tick (last_post_utc unchanged)")
-
+            await _scheduler_post_iteration(coordinator, settings, post_interval_s)
             await asyncio.sleep(30)
 
     tasks = [asyncio.create_task(generation_loop()), asyncio.create_task(posting_loop())]
