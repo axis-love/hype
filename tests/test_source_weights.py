@@ -215,3 +215,67 @@ class TestFeedWeightOverride:
         assert score_low < score_default, f"Feed weight 0.2 ({score_low}) should be < default 0.5 ({score_default})"
         ratio = score_low / score_default if score_default > 0 else 0
         assert ratio < 0.5, f"Score ratio {ratio:.3f} should be < 0.5 (weight 0.2 vs 0.5)"
+
+
+class TestMixedPoolDiversity:
+    """Verify mixed HN+RSS+GitHub+other pools in a single selection run."""
+
+    def test_mixed_pool_all_sources_represented(self):
+        """A single selection run with HN, RSS, GitHub, and ProductHunt
+        must give every source at least one slot when slots are available."""
+        from newsbot.main import _select_diverse_candidates
+
+        hn = [{"source": "hn", "title": f"HN-{i}", "score": 100.0 - i, "url": f"http://hn/{i}"} for i in range(5)]
+        rss = [{"source": "rss", "title": f"RSS-{i}", "score": 80.0 - i, "url": f"http://rss/{i}"} for i in range(5)]
+        github = [{"source": "github", "title": f"GH-{i}", "score": 90.0 - i, "url": f"http://gh/{i}"} for i in range(5)]
+        ph = [{"source": "producthunt", "title": f"PH-{i}", "score": 70.0 - i, "url": f"http://ph/{i}"} for i in range(3)]
+
+        scored = sorted(hn + rss + github + ph, key=lambda c: c["score"], reverse=True)
+        cfg = {"source_quota": 2}
+        top = _select_diverse_candidates(scored, 8, cfg)
+
+        sources = [c["source"] for c in top]
+        assert "hn" in sources
+        assert "rss" in sources
+        assert "github" in sources
+        assert "producthunt" in sources
+
+    def test_mixed_pool_deterministic_across_permutations(self):
+        """Reversing mixed-pool input must produce identical selection."""
+        from newsbot.main import _select_diverse_candidates
+
+        candidates = []
+        for src, score, i in [
+            ("hn", 100, 1), ("hn", 95, 2),
+            ("rss", 80, 3), ("rss", 75, 4),
+            ("github", 90, 5), ("github", 85, 6),
+            ("producthunt", 70, 7),
+        ]:
+            candidates.append({"source": src, "title": f"{src}-{i}", "score": float(score), "url": f"http://{src}/{i}"})
+
+        cfg = {"source_quota": 2}
+        top1 = _select_diverse_candidates(list(candidates), 5, cfg)
+        top2 = _select_diverse_candidates(list(reversed(candidates)), 5, cfg)
+
+        titles1 = [c["title"] for c in top1]
+        titles2 = [c["title"] for c in top2]
+        assert titles1 == titles2, f"Mixed-pool selection differs: {titles1} vs {titles2}"
+
+
+class TestURLTieBreak:
+    """Verify URL is part of the deterministic tie-break key."""
+
+    def test_equal_score_title_source_url_tiebreak(self):
+        """Two candidates with equal score, title, and source — URL breaks tie."""
+        from newsbot.main import _select_diverse_candidates
+
+        a = {"source": "hn", "title": "Same", "score": 50.0, "url": "http://a.com"}
+        b = {"source": "hn", "title": "Same", "score": 50.0, "url": "http://b.com"}
+
+        cfg = {"source_quota": 0}
+        top1 = _select_diverse_candidates([a, b], 1, cfg)
+        top2 = _select_diverse_candidates([b, a], 1, cfg)
+
+        # URL ascending: a.com < b.com, so a always wins.
+        assert top1[0]["url"] == "http://a.com"
+        assert top2[0]["url"] == "http://a.com"

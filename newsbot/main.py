@@ -198,27 +198,31 @@ def _select_diverse_candidates(
     sq = cfg.get("source_quota")
     source_quota = int(sq) if sq is not None else 8
 
+    # Deterministic sort key: score desc, title asc, source asc, URL asc.
+    # Used everywhere to ensure order-independent selection.
+    def _sort_key(c: dict[str, Any]) -> tuple:
+        return (
+            -float(c.get("score") or 0.0),
+            str(c.get("title") or ""),
+            str(c.get("source") or ""),
+            str(c.get("url") or ""),
+        )
+
     # Group by source, sorted by score within each group.
     by_source: dict[str, list[dict[str, Any]]] = {}
     for c in scored:
         src = str(c.get("source") or "unknown")
         by_source.setdefault(src, []).append(c)
     for src in by_source:
-        # Sort by score descending, then title for deterministic tie-breaking,
-        # then source for further determinism.
-        by_source[src].sort(
-            key=lambda c: (
-                -float(c.get("score") or 0.0),
-                str(c.get("title") or ""),
-                str(c.get("source") or ""),
-            ),
-        )
+        by_source[src].sort(key=_sort_key)
 
     # Order sources by their top item's score (descending), then alphabetically.
+    # Uses the same key (including title) as the pool sort for consistency.
     source_order = sorted(
         by_source,
         key=lambda s: (
             -float(by_source[s][0].get("score") or 0.0),
+            str(by_source[s][0].get("title") or ""),
             s,
         ),
     )
@@ -243,27 +247,18 @@ def _select_diverse_candidates(
             break
 
     # Phase 2: fill remaining slots by global score ranking.
-    # Use the same deterministic key: score desc, then title asc, then source asc.
+    # Use the same deterministic key: score desc, title asc, source asc, URL asc.
     if len(top) < max_candidates:
         remaining = [c for c in scored if id(c) not in used]
-        remaining.sort(key=lambda c: (
-            -float(c.get("score") or 0.0),
-            str(c.get("title") or ""),
-            str(c.get("source") or ""),
-        ))
+        remaining.sort(key=_sort_key)
         for item in remaining:
             top.append(item)
             if len(top) >= max_candidates:
                 break
 
     # Re-sort the final selection by score for the LLM filter.
-    # Deterministic tie-break: score descending, then title alphabetically,
-    # then source alphabetically.
-    top.sort(key=lambda c: (
-        -float(c.get("score") or 0.0),
-        str(c.get("title") or ""),
-        str(c.get("source") or ""),
-    ))
+    # Deterministic tie-break: score desc, title asc, source asc, URL asc.
+    top.sort(key=_sort_key)
     return top
 
 
