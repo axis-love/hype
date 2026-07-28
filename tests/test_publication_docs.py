@@ -127,3 +127,54 @@ class TestDocumentationCorrectness:
             content = f.read()
         assert "0 for one-shot" not in content, ".env.example should not say 0 for one-shot"
         assert "0 = every 60s" in content, ".env.example should say 0 = every 60s"
+
+    def test_no_run_command_in_any_source_or_docs(self):
+        """Scan ALL documentation and source files for /run command references.
+
+        /run was replaced by /digest. No source file, doc, or template
+        should reference /run as a command.
+        """
+        import os
+        import re
+
+        # Files to scan (Python source, markdown, env examples, Dockerfiles).
+        scan_patterns = ["*.py", "*.md", "*.env*", "*.txt", "Dockerfile*"]
+        # Directories to skip.
+        skip_dirs = {".venv", "__pycache__", ".git", "node_modules", ".pytest_cache"}
+
+        # Regex: /run as a command (not part of a word like "run()" or "runtime")
+        run_cmd_re = re.compile(r"(?<![a-zA-Z_])/run(?![a-zA-Z_])")
+
+        violations = []
+        for root, dirs, files in os.walk("."):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for fname in files:
+                # Check if file matches any scan pattern.
+                matched = any(
+                    fname.endswith(pat.replace("*", "")) or
+                    (pat.startswith("*") and fname.endswith(pat[1:])) or
+                    fname == pat
+                    for pat in scan_patterns
+                )
+                if not matched:
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                except Exception:
+                    continue
+                # Skip test files — they contain /run in assertions checking it's absent.
+                if "test_" in fname or "/test" in fpath:
+                    continue
+                # Find /run as a command.
+                for m in run_cmd_re.finditer(content):
+                    # Get line for context.
+                    line_start = content.rfind("\n", 0, m.start()) + 1
+                    line_end = content.find("\n", m.end())
+                    if line_end == -1:
+                        line_end = len(content)
+                    line = content[line_start:line_end].strip()
+                    violations.append(f"{fpath}: {line}")
+
+        assert not violations, f"/run command references found in non-test files:\n" + "\n".join(violations)
