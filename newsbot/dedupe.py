@@ -261,13 +261,19 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
         b = other.get("upvote_ratio") or 0.0
         keep["upvote_ratio"] = max(a, b)
 
-    # published_at: keep the most recent (max).
+    # published_at: keep the most recent (max). This is the merged value
+    # and must NOT be overwritten by the primary-source switch below,
+    # because the primary's timestamp may be older than the merged max.
     a_ts = keep.get("published_at")
     b_ts = other.get("published_at")
     if a_ts and b_ts:
         keep["published_at"] = max(str(a_ts), str(b_ts))
     elif b_ts and not a_ts:
         keep["published_at"] = b_ts
+
+    # Store the merged published_at so the primary-source switch
+    # below does not clobber it with the new primary's (possibly older) value.
+    keep["_merged_published_at"] = keep["published_at"]
 
     # snippet: keep the longer one (more info).
     if len(str(other.get("snippet") or "")) > len(str(keep.get("snippet") or "")):
@@ -298,14 +304,17 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
         other_pref == keep["_primary_preference"]
         and str(other.get("source") or "") < str(keep.get("source") or "")
     ):
-        # Switch primary: copy all representative fields from other.
+        # Switch primary: copy all representative fields from other,
+        # EXCEPT published_at — that's the merged max, already computed.
         keep["source"] = other.get("source") or keep.get("source")
         keep["url"] = other.get("url") or keep.get("url")
         keep["title"] = other.get("title") or keep.get("title")
         if other.get("snippet"):
             keep["snippet"] = other["snippet"]
-        if other.get("published_at"):
-            keep["published_at"] = other["published_at"]
+        # Restore the merged published_at — the new primary's timestamp
+        # may be older than the merged max we already computed above.
+        if "_merged_published_at" in keep:
+            keep["published_at"] = keep["_merged_published_at"]
         if other.get("score") is not None:
             keep["score"] = other["score"]
         # Update primary preference to the new primary's individual value.
@@ -392,5 +401,6 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         item.pop("_source_names_set", None)
         item.pop("_primary_preference", None)
         item.pop("_per_source_eng", None)
+        item.pop("_merged_published_at", None)
 
     return result

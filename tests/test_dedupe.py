@@ -338,3 +338,48 @@ def test_dedupe_transitive_url_match():
     out = dedupe_and_merge([a, b, c])
     assert len(out) == 1, f"Transitive duplicate split: got {len(out)} groups"
     assert out[0]["crosspost_count"] == 3
+
+def test_published_at_order_independent():
+    """published_at must be the merged max regardless of collector order."""
+    a = new_candidate(
+        title="Same Story", url="https://example.com/post",
+        source="hn", source_name="Hacker News", upvotes=100, comments=50,
+        published_at="2026-07-20T00:00:00Z",
+    )
+    b = new_candidate(
+        title="Same Story", url="https://example.com/post",
+        source="reddit", source_name="r/news", upvotes=200, comments=80,
+        published_at="2026-07-28T00:00:00Z",
+    )
+    # Forward order: [hn(old), reddit(new)]
+    out_forward = dedupe_and_merge([a, b])
+    # Reverse order: [reddit(new), hn(old)]
+    out_reverse = dedupe_and_merge([b, a])
+    assert len(out_forward) == 1
+    assert len(out_reverse) == 1
+    # Both must produce the same published_at (the max).
+    assert out_forward[0]["published_at"] == out_reverse[0]["published_at"]
+    # And the max should be the newer timestamp.
+    assert out_forward[0]["published_at"] == "2026-07-28T00:00:00Z"
+
+
+def test_published_at_preserved_when_primary_switches():
+    """When primary source switches, published_at must stay as merged max."""
+    # Reddit has higher engagement → becomes primary.
+    # HN has the newer timestamp.
+    a = new_candidate(
+        title="Big Release", url="https://example.com/post",
+        source="hn", source_name="Hacker News", upvotes=10, comments=5,
+        published_at="2026-07-28T12:00:00Z",
+    )
+    b = new_candidate(
+        title="Big Release", url="https://example.com/post",
+        source="reddit", source_name="r/news", upvotes=5000, comments=300,
+        published_at="2026-07-20T08:00:00Z",
+    )
+    out = dedupe_and_merge([a, b])
+    assert len(out) == 1
+    # Reddit should be primary (higher engagement).
+    assert out[0]["source"] == "reddit"
+    # But published_at should be the max (HN's newer timestamp).
+    assert out[0]["published_at"] == "2026-07-28T12:00:00Z"

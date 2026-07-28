@@ -40,7 +40,32 @@ def format_post_message(title: str, body: str, url: str) -> str:
 
     Format: <b>Title</b> → blank line → body → clickable source link.
     The source link shows a clean domain label instead of the raw URL.
+
+    The body is capped so the final HTML message stays under ~3000 chars,
+    keeping each post to a single Telegram message (limit 4096). This makes
+    the partial-delivery code path unreachable during normal operation.
     """
+    # Budget: 3000 chars total for the HTML message.
+    # Subtract space for <b>title</b>, source link, and HTML overhead.
+    _MAX_MESSAGE_CHARS = 3000
+    _LINK_OVERHEAD = 200  # <a href="...">Source: domain.tld</a> worst case
+
+    title_escaped = html_module.escape(title) if title else ""
+    title_block_len = len(f"<b>{title_escaped}</b>\n\n") if title_escaped else 0
+    link_budget = _LINK_OVERHEAD if url else 0
+    body_budget = max(100, _MAX_MESSAGE_CHARS - title_block_len - link_budget)
+
+    # Truncate body at a sentence boundary if it exceeds the budget.
+    if len(body) > body_budget:
+        # Try to cut at the last sentence end within the budget.
+        cut = body.rfind(". ", 0, body_budget)
+        if cut > body_budget // 2:
+            body = body[:cut + 1]
+        else:
+            body = body[:body_budget].rsplit(" ", 1)[0] + "…"
+        log.debug("truncated post body to %d chars (budget %d) to fit single Telegram message",
+                  len(body), body_budget)
+
     parts: list[str] = []
     if title:
         parts.append(f"<b>{html_module.escape(title)}</b>")
