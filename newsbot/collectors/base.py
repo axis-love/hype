@@ -99,6 +99,9 @@ class Candidate:
     contributing_sources: list[str] = field(default_factory=list, repr=False)
     _source_names_set: set[str] = field(default_factory=set, repr=False)
 
+    # Scoring breakdown (filled by scoring.score_all, used by /scores command).
+    score_breakdown: Optional[dict[str, Any]] = None
+
     def __post_init__(self) -> None:
         """Validate required fields and engagement values at construction time."""
         if not self.title:
@@ -291,6 +294,7 @@ class Candidate:
             "short_summary": self.short_summary,
             "penalty": self.penalty,
             "contributing_sources": list(self.contributing_sources),
+            "score_breakdown": dict(self.score_breakdown) if self.score_breakdown else None,
         }
 
     @classmethod
@@ -365,6 +369,7 @@ class Candidate:
             short_summary=d.get("short_summary"),
             penalty=_float_or_none(d.get("penalty"), "penalty") if d.get("penalty") is not None else 1.0,
             contributing_sources=list(d.get("contributing_sources") or []),
+            score_breakdown=d.get("score_breakdown"),
         )
 
 
@@ -374,7 +379,7 @@ _WS_RE = re.compile(r"\s+")
 
 _KNOWN_CANDIDATE_FIELDS = frozenset({
     "title", "url", "source", "source_name", "source_type",
-    "snippet", "published_at", "score", "upvotes", "comments",
+    "snippet", "published_at", "score", "score_breakdown", "upvotes", "comments",
     "stars", "forks", "reposts", "upvote_ratio", "velocity",
     "category", "raw_text", "extracted_text", "crosspost_count",
     "raw_json", "candidate_id", "importance", "reason",

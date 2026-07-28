@@ -54,7 +54,7 @@ DEFAULT_TOPIC_BOOST: dict[str, int] = {
 # triggers the boost.
 TOPIC_KEYWORDS: dict[str, list[str]] = {
     "ai": ["ai", "artificial intelligence", "machine learning", "ml", "gpt", "claude", "gemini", "llama"],
-    "llm": ["llm", "language model", "transformer", "inference", "quantiz", "fine-tune", "fine tune"],
+    "llm": ["llm", "language model", "transformer", "inference", "quantize", "quantized", "quantization", "fine-tune", "fine tune"],
     "local_llm": ["local llm", "ollama", "llama.cpp", "lm studio", "gguf", "exllama", "vllm"],
     "coding_agents": ["coding agent", "code agent", "dev agent", "copilot", "cursor", "aider", "agentic"],
     "gamedev": ["game dev", "gamedev", "game engine", "unity3d", "unreal engine", "godot"],

@@ -63,9 +63,10 @@ class TestTopicMatching:
         item_lower = {"title": "new ai model", "snippet": "", "raw_text": ""}
         item_upper = {"title": "NEW AI MODEL", "snippet": "", "raw_text": ""}
         item_mixed = {"title": "New Ai Model", "snippet": "", "raw_text": ""}
-        assert topic_bonus(item_lower, DEFAULT_TOPIC_BOOST) == \
-               topic_bonus(item_upper, DEFAULT_TOPIC_BOOST) == \
-               topic_bonus(item_mixed, DEFAULT_TOPIC_BOOST)
+        bl = topic_bonus(item_lower, DEFAULT_TOPIC_BOOST)
+        bu = topic_bonus(item_upper, DEFAULT_TOPIC_BOOST)
+        bm = topic_bonus(item_mixed, DEFAULT_TOPIC_BOOST)
+        assert bl == bu == bm
 
 
 class TestConfigValidation:
