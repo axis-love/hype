@@ -483,3 +483,28 @@ class TestRetentionConfigurable:
             "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
         ).fetchone()
         assert int(posted_count["n"]) == 1
+
+
+class TestMarkPostedFailure:
+    """Verify mark_posted failure after successful delivery doesn't leave row pending silently."""
+
+    @pytest.mark.asyncio
+    async def test_delivery_succeeds_mark_posted_fails_reports_error(self, store, settings):
+        """When Telegram delivery succeeds but mark_posted fails,
+        the coordinator must report failure (return 1) so the scheduler
+        doesn't advance the timestamp."""
+        from newsbot.jobs import JobCoordinator
+        from unittest.mock import AsyncMock, patch
+        import sqlite3
+
+        coordinator = JobCoordinator(store, settings)
+        store.add_pending_post({"title": "T", "body": "B", "url": "http://x.com"})
+
+        # Mock post_digest to succeed (dry-run path).
+        with patch.dict("os.environ", {"BOT_TOKEN": "", "NEWS_CHANNEL_ID": ""}):
+            # Mock mark_posted to fail.
+            with patch.object(store, "mark_posted", side_effect=sqlite3.OperationalError("disk full")):
+                result = await coordinator._deliver_one()
+
+        # Should return 1 (failure) because mark_posted failed.
+        assert result == 1
