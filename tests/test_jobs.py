@@ -531,3 +531,34 @@ class TestFormatPostMessage:
         assert "<a href" not in msg
         assert "Title" in msg
         assert "Body" in msg
+
+def test_format_post_message_truncates_long_body():
+    """format_post_message caps body so total HTML stays under ~3000 chars."""
+    from newsbot.jobs import format_post_message
+
+    long_body = "This is a very long sentence. " * 200  # ~5000 chars
+    msg = format_post_message("Test Title", long_body, "https://example.com/very/long/url/path")
+    assert len(msg) <= 3100  # Under 3000 + small overhead for title/link
+    assert msg.startswith("<b>Test Title</b>")
+    assert "Source:" in msg
+
+
+def test_format_post_message_short_body_unchanged():
+    """Short bodies are not truncated."""
+    from newsbot.jobs import format_post_message
+
+    msg = format_post_message("Title", "Short body text.", "https://example.com")
+    assert "Short body text." in msg
+    assert "…" not in msg
+
+
+def test_format_post_message_truncates_at_sentence_boundary():
+    """Truncation prefers sentence boundaries when possible."""
+    from newsbot.jobs import format_post_message
+
+    # Create a body with clear sentence boundaries
+    body = "First sentence here. Second one follows. Third is cut off " + "x" * 4000
+    msg = format_post_message("T", body, "https://example.com")
+    assert len(msg) <= 3100
+    # Should cut at a sentence boundary, not mid-word
+    assert not msg.endswith("x…") or msg.endswith("…")

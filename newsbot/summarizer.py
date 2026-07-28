@@ -153,15 +153,17 @@ async def llm_filter(
             continue
         cid = str(entry.get("id") or "").strip()
         if not cid or cid not in id_map:
-            # Detect unknown/malformed IDs regardless of keep/drop status
+            # Detect unknown/malformed IDs regardless of keep/drop status.
+            # Log only the length, not the raw value — the model could embed
+            # echoed prompt or article content in an ID field.
             if cid:
-                log.warning("LLM filter returned unknown id: %r — skipping", cid)
+                log.warning("LLM filter returned unknown id (len=%d) — skipping", len(cid))
             else:
                 malformed_entries += 1
             continue
         if cid in seen_ids:
             duplicate_ids.add(cid)
-            log.warning("LLM filter returned duplicate id: %r — skipping", cid)
+            log.warning("LLM filter returned duplicate id (len=%d) — skipping", len(cid))
             continue
         seen_ids.add(cid)
 
@@ -351,10 +353,10 @@ async def llm_style_posts(
             continue
         cid = str(entry.get("id") or "").strip()
         if not cid or cid not in id_map:
-            log.warning("LLM styler returned unknown or missing id: %r — skipping", cid)
+            log.warning("LLM styler returned unknown or missing id (len=%d) — skipping", len(cid))
             continue
         if cid in seen_ids:
-            log.warning("LLM styler returned duplicate id: %r — skipping", cid)
+            log.warning("LLM styler returned duplicate id (len=%d) — skipping", len(cid))
             continue
         seen_ids.add(cid)
 

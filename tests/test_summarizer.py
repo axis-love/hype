@@ -138,3 +138,32 @@ def test_select_diverse_top_items_caps_per_category():
 
 def test_select_diverse_top_items_handles_empty():
     assert select_diverse_top_items([], max_items=5) == []
+
+def test_unknown_llm_id_not_logged_raw(caplog):
+    """Unknown LLM IDs should not appear raw in logs — only their length."""
+    import logging
+    import json
+    from unittest.mock import AsyncMock
+    from newsbot.summarizer import llm_filter
+
+    items = [
+        {"title": "Test", "url": "https://example.com/1", "source": "hn",
+         "source_name": "HN", "candidate_id": "c001", "score": 1.0}
+    ]
+    # Model returns an ID containing prompt-like content
+    malicious_id = "PROMPT_INJECTION_ATTEMPT_WITH_ARTICLE_TEXT_" + "x" * 200
+    raw = json.dumps({"items": [{"id": malicious_id, "keep": True, "title": "T"}]})
+
+    lm_client = AsyncMock()
+    lm_client.generate = AsyncMock(return_value=(raw, {}))
+
+    caplog.set_level(logging.WARNING)
+    import asyncio
+    result = asyncio.run(llm_filter(items, lm_client))
+
+    # Check that the raw malicious ID is NOT in any log message
+    for record in caplog.records:
+        assert malicious_id not in record.getMessage(), \
+            f"Raw LLM ID leaked into log: {record.getMessage()}"
+    # But the length should be mentioned
+    assert any("len=" in r.getMessage() for r in caplog.records)
