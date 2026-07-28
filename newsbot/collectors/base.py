@@ -111,44 +111,70 @@ class Candidate:
             raise ValueError("Candidate requires a non-empty source_name")
         if not self.url:
             raise ValueError("Candidate requires a non-empty url")
+        # Validate URL scheme.
+        url_str = str(self.url).strip()
+        if not url_str:
+            raise ValueError("Candidate requires a non-empty url")
+        if not (url_str.startswith("http://") or url_str.startswith("https://")):
+            raise ValueError(
+                f"Candidate.url must have http:// or https:// scheme, got {url_str!r}"
+            )
         if not self.source_type:
             self.source_type = self.source
-        # Validate engagement types first (reject strings, booleans, NaN, infinity).
+        # Validate engagement types: reject strings, booleans, NaN, infinity.
         for fname in ("upvotes", "comments", "stars", "forks", "reposts",
                       "crosspost_count"):
             val = getattr(self, fname)
-            if val is not None and not isinstance(val, (int, float)):
-                raise ValueError(
-                    f"Candidate.{fname} must be numeric, got {type(val).__name__}"
-                )
-            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-                raise ValueError(f"Candidate.{fname} must be finite, got {val}")
+            if val is not None:
+                # Reject booleans (isinstance(True, int) is True in Python).
+                if isinstance(val, bool):
+                    raise ValueError(
+                        f"Candidate.{fname} must be numeric, got bool: {val}"
+                    )
+                if not isinstance(val, (int, float)):
+                    raise ValueError(
+                        f"Candidate.{fname} must be numeric, got {type(val).__name__}"
+                    )
+                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                    raise ValueError(f"Candidate.{fname} must be finite, got {val}")
         # Validate engagement values are non-negative (if provided).
         for fname in ("upvotes", "comments", "stars", "forks", "reposts"):
             val = getattr(self, fname)
             if val is not None and val < 0:
                 raise ValueError(f"Candidate.{fname} must be non-negative, got {val}")
+        # Validate score and penalty.
+        if isinstance(self.score, bool) or not isinstance(self.score, (int, float)):
+            raise ValueError(f"Candidate.score must be numeric, got {type(self.score).__name__}")
+        if isinstance(self.score, float) and (math.isnan(self.score) or math.isinf(self.score)):
+            raise ValueError(f"Candidate.score must be finite, got {self.score}")
         if self.score < 0:
             raise ValueError(f"Candidate.score must be non-negative, got {self.score}")
+        if isinstance(self.penalty, bool) or not isinstance(self.penalty, (int, float)):
+            raise ValueError(f"Candidate.penalty must be numeric, got {type(self.penalty).__name__}")
+        if isinstance(self.penalty, float) and (math.isnan(self.penalty) or math.isinf(self.penalty)):
+            raise ValueError(f"Candidate.penalty must be finite, got {self.penalty}")
         if self.penalty < 0:
             raise ValueError(f"Candidate.penalty must be non-negative, got {self.penalty}")
-        if self.upvote_ratio is not None and not (0.0 <= self.upvote_ratio <= 1.0):
-            raise ValueError(f"Candidate.upvote_ratio must be in [0,1], got {self.upvote_ratio}")
+        # Validate upvote_ratio.
+        if self.upvote_ratio is not None:
+            if isinstance(self.upvote_ratio, bool) or not isinstance(self.upvote_ratio, (int, float)):
+                raise ValueError(f"Candidate.upvote_ratio must be numeric, got {type(self.upvote_ratio).__name__}")
+            if not (0.0 <= float(self.upvote_ratio) <= 1.0):
+                raise ValueError(f"Candidate.upvote_ratio must be in [0,1], got {self.upvote_ratio}")
         # Validate timestamp format (if provided).
         if self.published_at is not None:
             ts = str(self.published_at).strip()
             if ts:
                 try:
                     parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                    # Reasonable range check: not before 2000, not after 2100.
-                    if parsed.year < 2000 or parsed.year > 2100:
-                        raise ValueError(
-                            f"Candidate.published_at year {parsed.year} out of range [2000, 2100]"
-                        )
-                except ValueError as exc:
-                    if "out of range" in str(exc):
-                        raise
-                    # Non-ISO timestamps are allowed (collectors may pass raw strings).
+                except ValueError:
+                    raise ValueError(
+                        f"Candidate.published_at must be valid ISO 8601, got {ts!r}"
+                    )
+                if parsed.year < 2000 or parsed.year > 2100:
+                    raise ValueError(
+                        f"Candidate.published_at year {parsed.year} out of range [2000, 2100]"
+                    )
 
     # --- dict-like compatibility for downstream code ---
 
@@ -192,10 +218,30 @@ class Candidate:
     def __setitem__(self, key: str, value: Any) -> None:
         """Dict-like assignment for backward compatibility with mutation code.
 
-        Sets the attribute on the dataclass instance. Allows arbitrary
-        keys (including internal tracking fields used by dedupe).
+        Sets the attribute on the dataclass instance. Rejects unknown
+        fields to catch typos — the same validation as from_dict.
+        Allows internal tracking fields used by dedupe (prefixed with _).
         """
+        if not isinstance(key, str):
+            raise TypeError(f"Candidate key must be string, got {type(key).__name__}")
+        # Allow internal dedupe tracking fields (prefixed with _).
+        if key.startswith("_"):
+            setattr(self, key, value)
+            return
+        if key not in _KNOWN_CANDIDATE_FIELDS:
+            raise ValueError(
+                f"Cannot set unknown Candidate field {key!r} — possible typo. "
+                f"Known: {', '.join(sorted(_KNOWN_CANDIDATE_FIELDS))}"
+            )
         setattr(self, key, value)
+
+    def keys(self) -> list[str]:
+        """Return keys for dict() compatibility.
+
+        This makes dict(candidate) work correctly — Python's dict() constructor
+        calls keys() then __getitem__ for each key.
+        """
+        return list(_KNOWN_CANDIDATE_FIELDS)
 
     def pop(self, key: str, default: Any = None) -> Any:
         """Dict-like pop for backward compatibility.
@@ -262,6 +308,36 @@ class Candidate:
                 f"Unknown Candidate fields: {sorted(unknown)}. "
                 f"Known: {sorted(_KNOWN_CANDIDATE_FIELDS)}"
             )
+
+        def _numeric_or_none(val: Any, field_name: str) -> Any:
+            """Extract numeric value or None, rejecting strings and booleans."""
+            if val is None:
+                return None
+            if isinstance(val, bool):
+                raise ValueError(f"Candidate.{field_name} must be numeric, got bool: {val}")
+            if isinstance(val, (int, float)):
+                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                    raise ValueError(f"Candidate.{field_name} must be finite, got {val}")
+                return val
+            # Reject strings that look numeric — require actual int/float.
+            raise ValueError(
+                f"Candidate.{field_name} must be numeric, got {type(val).__name__}: {val!r}"
+            )
+
+        def _float_or_none(val: Any, field_name: str) -> Any:
+            """Extract float or None."""
+            if val is None:
+                return None
+            if isinstance(val, bool):
+                raise ValueError(f"Candidate.{field_name} must be numeric, got bool: {val}")
+            if isinstance(val, (int, float)):
+                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                    raise ValueError(f"Candidate.{field_name} must be finite, got {val}")
+                return float(val)
+            raise ValueError(
+                f"Candidate.{field_name} must be numeric, got {type(val).__name__}: {val!r}"
+            )
+
         return cls(
             title=d.get("title", ""),
             url=d.get("url", ""),
@@ -270,24 +346,24 @@ class Candidate:
             source_type=d.get("source_type", d.get("source", "")),
             snippet=d.get("snippet"),
             published_at=d.get("published_at"),
-            score=float(d.get("score")) if d.get("score") is not None else 0.0,
-            upvotes=d.get("upvotes"),
-            comments=d.get("comments"),
-            stars=d.get("stars"),
-            forks=d.get("forks"),
-            reposts=d.get("reposts"),
-            upvote_ratio=d.get("upvote_ratio"),
-            velocity=d.get("velocity"),
+            score=_float_or_none(d.get("score"), "score") if d.get("score") is not None else 0.0,
+            upvotes=_numeric_or_none(d.get("upvotes"), "upvotes"),
+            comments=_numeric_or_none(d.get("comments"), "comments"),
+            stars=_numeric_or_none(d.get("stars"), "stars"),
+            forks=_numeric_or_none(d.get("forks"), "forks"),
+            reposts=_numeric_or_none(d.get("reposts"), "reposts"),
+            upvote_ratio=_float_or_none(d.get("upvote_ratio"), "upvote_ratio"),
+            velocity=_float_or_none(d.get("velocity"), "velocity"),
             category=d.get("category"),
             raw_text=d.get("raw_text"),
             extracted_text=d.get("extracted_text"),
-            crosspost_count=int(d.get("crosspost_count")) if d.get("crosspost_count") is not None else 1,
+            crosspost_count=int(_numeric_or_none(d.get("crosspost_count"), "crosspost_count")) if d.get("crosspost_count") is not None else 1,
             raw_json=d.get("raw_json"),
             candidate_id=d.get("candidate_id"),
-            importance=d.get("importance"),
+            importance=_numeric_or_none(d.get("importance"), "importance"),
             reason=d.get("reason"),
             short_summary=d.get("short_summary"),
-            penalty=float(d.get("penalty")) if d.get("penalty") is not None else 1.0,
+            penalty=_float_or_none(d.get("penalty"), "penalty") if d.get("penalty") is not None else 1.0,
             contributing_sources=list(d.get("contributing_sources") or []),
         )
 

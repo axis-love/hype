@@ -72,8 +72,8 @@ def test_dedupe_keeps_unrelated_items_separate():
 
 
 def test_merge_pair_takes_longer_snippet():
-    keep = new_candidate(title="t", url="u", source="hn", source_name="HN", snippet="short")
-    other = new_candidate(title="t", url="u", source="reddit", source_name="r/x", snippet="a much longer snippet than the first one")
+    keep = new_candidate(title="t", url="https://example.com", source="hn", source_name="HN", snippet="short")
+    other = new_candidate(title="t", url="https://example.com", source="reddit", source_name="r/x", snippet="a much longer snippet than the first one")
     _merge_pair(keep, other)
     assert "much longer snippet" in keep["snippet"]
 

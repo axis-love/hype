@@ -21,6 +21,7 @@ import logging
 from typing import Any
 
 from core.text_utils import strip_think
+from newsbot.collectors.base import Candidate
 
 log = logging.getLogger(__name__)
 
@@ -56,13 +57,13 @@ STYLE_SYSTEM = (
 )
 
 
-def _assign_candidate_ids(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _assign_candidate_ids(items: list[dict[str, Any] | Candidate]) -> dict[str, dict[str, Any] | Candidate]:
     """Assign opaque application-generated IDs to each candidate.
 
-    Returns a mapping from id string (e.g. 'c001') to the original item dict.
+    Returns a mapping from id string (e.g. 'c001') to the original item.
     Also mutates each item to set its 'candidate_id' field.
     """
-    id_map: dict[str, dict[str, Any]] = {}
+    id_map: dict[str, dict[str, Any] | Candidate] = {}
     for i, item in enumerate(items, start=1):
         cid = f"c{i:03d}"
         item["candidate_id"] = cid
@@ -70,9 +71,10 @@ def _assign_candidate_ids(items: list[dict[str, Any]]) -> dict[str, dict[str, An
     return id_map
 
 
-def _format_candidate(item: dict[str, Any]) -> str:
+def _format_candidate(item: dict[str, Any] | Candidate) -> str:
     """Render one candidate for the filter prompt."""
-    cid = item.get("candidate_id", "c000")
+    # Handle both dict and Candidate via dict-like access.
+    cid = item.get("candidate_id", "c000") if hasattr(item, "get") else getattr(item, "candidate_id", "c000")
     parts = [f"[{cid}] [{item.get('source_name','?')}] {item.get('title','')}"]
     if item.get("published_at"):
         parts.append(f"   Published: {item['published_at']}")
@@ -90,7 +92,7 @@ def _format_candidate(item: dict[str, Any]) -> str:
 
 
 async def llm_filter(
-    items: list[dict[str, Any]],
+    items: list[dict[str, Any] | Candidate],
     lm_client: Any,
     *,
     temperature: float = 0.4,
@@ -168,7 +170,14 @@ async def llm_filter(
             continue
 
         original = id_map[cid]
-        merged = dict(original)
+        # Convert Candidate to dict for downstream processing.
+        # Use to_dict() — dict(candidate) would fail because Candidate
+        # implements keys()/__getitem__ but dict() also passes integers
+        # before calling keys() in some Python versions.
+        if isinstance(original, Candidate):
+            merged = original.to_dict()
+        else:
+            merged = dict(original)
         # Overlay LLM annotations — but NEVER the URL.
         merged["category"] = entry.get("category") or merged.get("category")
         merged["importance"] = entry.get("importance")
@@ -197,7 +206,7 @@ async def llm_filter(
     return kept
 
 
-def select_diverse_top_items(items: list[dict[str, Any]], max_items: int) -> list[dict[str, Any]]:
+def select_diverse_top_items(items: list[dict[str, Any] | Candidate], max_items: int) -> list[dict[str, Any] | Candidate]:
     """Pick the top N kept items, balancing categories.
 
     Greedy by importance (descending), but cap each category at
@@ -206,7 +215,7 @@ def select_diverse_top_items(items: list[dict[str, Any]], max_items: int) -> lis
     if not items:
         return []
 
-    def importance_of(item: dict[str, Any]) -> int:
+    def importance_of(item: dict[str, Any] | Candidate) -> int:
         try:
             return int(item.get("importance") or 0)
         except (TypeError, ValueError):
@@ -216,7 +225,7 @@ def select_diverse_top_items(items: list[dict[str, Any]], max_items: int) -> lis
     max_items = max(1, int(max_items))
     cat_cap = max(2, max_items // 2 + 1)
 
-    selected: list[dict[str, Any]] = []
+    selected: list[dict[str, Any] | Candidate] = []
     cat_counts: dict[str, int] = {}
     for item in sorted_items:
         if len(selected) >= max_items:
@@ -242,7 +251,7 @@ def select_diverse_top_items(items: list[dict[str, Any]], max_items: int) -> lis
 
 
 async def llm_style_posts(
-    items: list[dict[str, Any]],
+    items: list[dict[str, Any] | Candidate],
     lm_client: Any,
     *,
     style_prompt: str = "",
@@ -264,7 +273,7 @@ async def llm_style_posts(
         _assign_candidate_ids(items_needing_ids)
     id_map = {item["candidate_id"]: item for item in items if "candidate_id" in item}
 
-    def signal_line(item: dict[str, Any]) -> str:
+    def signal_line(item: dict[str, Any] | Candidate) -> str:
         bits = []
         if item.get("stars"):
             bits.append(f"{item['stars']:,} GitHub stars")
@@ -276,7 +285,7 @@ async def llm_style_posts(
             bits.append(f"cross-posted on {item.get('crosspost_count')} sources")
         return ", ".join(bits) if bits else "n/a"
 
-    def item_block(item: dict[str, Any]) -> str:
+    def item_block(item: dict[str, Any] | Candidate) -> str:
         cid = item.get("candidate_id", "c000")
         title = item.get("title") or "(untitled)"
         url = item.get("url") or ""
@@ -351,12 +360,23 @@ async def llm_style_posts(
 
         original = id_map[cid]
         title = str(entry.get("title") or "").strip()
+        # Handle both Candidate and dict for original.
+        if isinstance(original, Candidate):
+            orig_title = original.title
+            orig_category = original.category or ""
+            orig_importance = original.importance
+            orig_url = original.url or ""
+        else:
+            orig_title = original.get("title", "")
+            orig_category = original.get("category", "")
+            orig_importance = original.get("importance")
+            orig_url = original.get("url", "")
         result.append({
-            "title": title or original.get("title", ""),
+            "title": title or orig_title,
             "body": body,
-            "category": original.get("category", ""),
-            "importance": original.get("importance"),
-            "url": original.get("url", ""),  # Always from trusted data
+            "category": orig_category,
+            "importance": orig_importance,
+            "url": orig_url,  # Always from trusted data
             "candidate_id": cid,  # For tracking which items were styled
         })
 
