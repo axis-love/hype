@@ -178,13 +178,18 @@ class JobCoordinator:
         if not bot_token or not chat_id:
             log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
             print(message)
-            self._store.mark_posted(post["id"])
+            try:
+                self._store.mark_posted(post["id"])
+            except Exception as db_exc:
+                log.error(
+                    "CRITICAL: post id=%d dry-run delivered but mark_posted failed: %s",
+                    post["id"], redact_exception(db_exc),
+                )
+                return 1
             return 0
 
         try:
             await post_digest(message, bot_token=bot_token, chat_id=chat_id)
-            self._store.mark_posted(post["id"])
-            log.info("posted pending post id=%d to Telegram", post["id"])
         except PartialDeliveryError as exc:
             # Some chunks were delivered, later chunks failed.
             # Mark as posted to prevent duplicate delivery of early chunks on retry.
@@ -193,10 +198,29 @@ class JobCoordinator:
                 "to prevent duplicate sends: %s",
                 post["id"], exc.delivered_chunks, redact_exception(exc),
             )
-            self._store.mark_posted(post["id"])
+            try:
+                self._store.mark_posted(post["id"])
+            except Exception as db_exc:
+                log.error("CRITICAL: post id=%d delivered but mark_posted failed: %s "
+                          "— row may be re-delivered on retry", post["id"], redact_exception(db_exc))
             return 1  # Still report failure — operator should investigate
         except Exception as exc:
             log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
             return 1
+
+        # Delivery succeeded — now mark as posted.
+        # If mark_posted fails, the row stays pending and will be re-delivered
+        # on the next posting cycle, causing duplicate channel posts.
+        # We must handle this atomically: if DB fails after Telegram success,
+        # log a CRITICAL error so the operator can manually mark it.
+        try:
+            self._store.mark_posted(post["id"])
+        except Exception as db_exc:
+            log.error(
+                "CRITICAL: post id=%d delivered to Telegram but mark_posted failed: %s "
+                "— row will be re-delivered on next cycle unless manually resolved",
+                post["id"], redact_exception(db_exc),
+            )
+            return 1  # Report failure so the scheduler doesn't advance timestamp
 
         return 0
