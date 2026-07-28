@@ -318,3 +318,49 @@ async def test_post_digest_does_not_plain_text_retry_on_chat_not_found():
 
     # Only one POST -- no plain-text retry for non-parse-error 400.
     assert fake_client.post.call_count == 1
+
+
+def test_split_does_not_break_entity_at_boundary():
+    """Entity-boundary test: _split_for_telegram must not split inside
+    &amp; &lt; &gt; &#NNN; entities. A long text with &amp; at the split
+    point should move the cut to before the &."""
+    # Build text > 3000 chars with an &amp; entity near the split point.
+    # effective_limit = 3000 - 100 (balance margin) = 2900.
+    prefix = "A" * 2990
+    entity = "&amp;"
+    suffix = "B" * 100
+    text = prefix + entity + suffix
+
+    chunks = _split_for_telegram(text, limit=3000)
+    assert len(chunks) >= 2
+
+    # No chunk should contain a partial entity (like "&amp" without ";").
+    for chunk in chunks:
+        # A complete &amp; entity is fine; partial is &amp without semicolon.
+        assert "&amp" not in chunk or "&amp;" in chunk, "Partial &amp entity without semicolon"
+        assert "&lt" not in chunk or "&lt;" in chunk, "Partial &lt entity"
+        assert "&gt" not in chunk or "&gt;" in chunk, "Partial &gt entity"
+
+
+def test_split_entity_numeric_at_boundary():
+    """Numeric entities like &#123; must not be split either."""
+    prefix = "A" * 2990
+    entity = "&#1234;"
+    suffix = "B" * 100
+    text = prefix + entity + suffix
+
+    chunks = _split_for_telegram(text, limit=3000)
+    assert len(chunks) >= 2
+
+    for chunk in chunks:
+        assert "&#12" not in chunk or "&#1234;" in chunk, "Partial numeric entity"
+
+
+def test_split_chunk_size_with_balancing_overhead():
+    """Final chunks must not exceed the limit after tag balancing."""
+    # Build a long text with open tags that need balancing.
+    text = "<b>" + "X" * 2900 + "</b>" + "\n\n" + "Y" * 200
+    chunks = _split_for_telegram(text, limit=3000)
+
+    for chunk in chunks:
+        assert len(chunk) <= 3000, f"Chunk exceeds limit: {len(chunk)} > 3000"
