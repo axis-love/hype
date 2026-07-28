@@ -14,10 +14,46 @@ The dataclass provides:
 from __future__ import annotations
 
 import html
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+
+# --- Source identifier validation ---
+
+#: Valid source identifiers accepted by the Candidate model.
+_KNOWN_SOURCES: frozenset[str] = frozenset({
+    "hn", "hackernews",
+    "reddit",
+    "github",
+    "producthunt",
+    "huggingface_papers",
+    "rss",
+})
+
+#: Alias normalization: maps alternative names to canonical source IDs.
+_SOURCE_ALIASES: dict[str, str] = {
+    "hackernews": "hn",
+}
+
+
+def _normalize_source_id(src: str) -> str:
+    """Normalize a source identifier, applying aliases.
+
+    Raises ValueError for unknown source IDs.
+    """
+    s = (src or "").strip().lower()
+    if not s:
+        raise ValueError("Candidate source must be a non-empty string")
+    canonical = _SOURCE_ALIASES.get(s, s)
+    if canonical not in _KNOWN_SOURCES:
+        raise ValueError(
+            f"Unknown Candidate source {src!r}. "
+            f"Known: {', '.join(sorted(_KNOWN_SOURCES))}"
+        )
+    return canonical
 
 
 @dataclass
@@ -69,12 +105,24 @@ class Candidate:
             raise ValueError("Candidate requires a non-empty title")
         if not self.source:
             raise ValueError("Candidate requires a non-empty source")
+        # Validate and normalize source ID.
+        self.source = _normalize_source_id(self.source)
         if not self.source_name:
             raise ValueError("Candidate requires a non-empty source_name")
         if not self.url:
             raise ValueError("Candidate requires a non-empty url")
         if not self.source_type:
             self.source_type = self.source
+        # Validate engagement types first (reject strings, booleans, NaN, infinity).
+        for fname in ("upvotes", "comments", "stars", "forks", "reposts",
+                      "crosspost_count"):
+            val = getattr(self, fname)
+            if val is not None and not isinstance(val, (int, float)):
+                raise ValueError(
+                    f"Candidate.{fname} must be numeric, got {type(val).__name__}"
+                )
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                raise ValueError(f"Candidate.{fname} must be finite, got {val}")
         # Validate engagement values are non-negative (if provided).
         for fname in ("upvotes", "comments", "stars", "forks", "reposts"):
             val = getattr(self, fname)
@@ -86,9 +134,90 @@ class Candidate:
             raise ValueError(f"Candidate.penalty must be non-negative, got {self.penalty}")
         if self.upvote_ratio is not None and not (0.0 <= self.upvote_ratio <= 1.0):
             raise ValueError(f"Candidate.upvote_ratio must be in [0,1], got {self.upvote_ratio}")
+        # Validate timestamp format (if provided).
+        if self.published_at is not None:
+            ts = str(self.published_at).strip()
+            if ts:
+                try:
+                    parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    # Reasonable range check: not before 2000, not after 2100.
+                    if parsed.year < 2000 or parsed.year > 2100:
+                        raise ValueError(
+                            f"Candidate.published_at year {parsed.year} out of range [2000, 2100]"
+                        )
+                except ValueError as exc:
+                    if "out of range" in str(exc):
+                        raise
+                    # Non-ISO timestamps are allowed (collectors may pass raw strings).
+
+    # --- dict-like compatibility for downstream code ---
+
+    def __getitem__(self, key: str) -> Any:
+        """Dict-like access for backward compatibility.
+
+        Checks instance attributes first (including internal tracking fields
+        set by dedupe), then falls back to to_dict().
+        """
+        # Check instance attributes first (covers internal fields like
+        # _source_names_set, _primary_preference, _per_source_eng).
+        if hasattr(self, key):
+            return getattr(self, key)
+        # Fall back to dict for known fields.
+        d = self.to_dict()
+        if key in d:
+            return d[key]
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dict-like .get() for backward compatibility.
+
+        Checks instance attributes first, then to_dict().
+        """
+        if hasattr(self, key):
+            return getattr(self, key)
+        d = self.to_dict()
+        return d.get(key, default)
+
+    def __contains__(self, key: str) -> bool:
+        """Dict-like 'in' check for backward compatibility.
+
+        Checks instance attributes first (covers internal tracking fields
+        set by dedupe like _per_source_eng, _primary_preference), then
+        falls back to to_dict() for known dataclass fields.
+        """
+        if hasattr(self, key):
+            return True
+        return key in self.to_dict()
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Dict-like assignment for backward compatibility with mutation code.
+
+        Sets the attribute on the dataclass instance. Allows arbitrary
+        keys (including internal tracking fields used by dedupe).
+        """
+        setattr(self, key, value)
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        """Dict-like pop for backward compatibility.
+
+        Returns the attribute value and deletes it from the instance.
+        """
+        if hasattr(self, key):
+            val = getattr(self, key)
+            try:
+                delattr(self, key)
+            except AttributeError:
+                pass
+            return val
+        return default
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to a dict compatible with existing pipeline code."""
+        """Convert to a dict compatible with existing pipeline code.
+
+        Returns fresh copies of mutable fields (raw_json, contributing_sources)
+        so callers can't mutate the Candidate's internal state via the dict.
+        """
+        import copy
         return {
             "title": self.title,
             "url": self.url,
@@ -109,7 +238,7 @@ class Candidate:
             "raw_text": self.raw_text,
             "extracted_text": self.extracted_text,
             "crosspost_count": self.crosspost_count,
-            "raw_json": self.raw_json,
+            "raw_json": copy.deepcopy(self.raw_json) if self.raw_json else None,
             "candidate_id": self.candidate_id,
             "importance": self.importance,
             "reason": self.reason,
@@ -119,8 +248,20 @@ class Candidate:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Candidate":
-        """Create a Candidate from a dict (e.g. collector output)."""
+    def from_dict(cls, d: dict[str, Any] | "Candidate") -> "Candidate":
+        """Create a Candidate from a dict or another Candidate.
+
+        Rejects unknown fields — typos and invalid keys raise ValueError.
+        Accepts both plain dicts and Candidate instances (via to_dict()).
+        """
+        if isinstance(d, Candidate):
+            d = d.to_dict()
+        unknown = set(d.keys()) - _KNOWN_CANDIDATE_FIELDS
+        if unknown:
+            raise ValueError(
+                f"Unknown Candidate fields: {sorted(unknown)}. "
+                f"Known: {sorted(_KNOWN_CANDIDATE_FIELDS)}"
+            )
         return cls(
             title=d.get("title", ""),
             url=d.get("url", ""),
@@ -129,7 +270,7 @@ class Candidate:
             source_type=d.get("source_type", d.get("source", "")),
             snippet=d.get("snippet"),
             published_at=d.get("published_at"),
-            score=float(d.get("score") or 0.0),
+            score=float(d.get("score")) if d.get("score") is not None else 0.0,
             upvotes=d.get("upvotes"),
             comments=d.get("comments"),
             stars=d.get("stars"),
@@ -140,7 +281,7 @@ class Candidate:
             category=d.get("category"),
             raw_text=d.get("raw_text"),
             extracted_text=d.get("extracted_text"),
-            crosspost_count=int(d.get("crosspost_count") or 1),
+            crosspost_count=int(d.get("crosspost_count")) if d.get("crosspost_count") is not None else 1,
             raw_json=d.get("raw_json"),
             candidate_id=d.get("candidate_id"),
             importance=d.get("importance"),
@@ -172,43 +313,32 @@ def new_candidate(
     source: str,
     source_name: str,
     **extra: Any,
-) -> dict[str, Any]:
-    """Build a candidate dict with sane null defaults for every key.
+) -> Candidate:
+    """Build a validated Candidate instance.
 
-    This is a backward-compatible factory that returns a dict.
-    Extra fields are validated against known Candidate field names —
-    typos produce a warning instead of being silently accepted.
-    The dict is constructed via the Candidate dataclass, so field
-    validation (non-empty title/source, non-negative engagement) is
-    enforced at construction time.
+    Returns a Candidate (not a dict). The Candidate supports dict-like
+    access via __getitem__ and .get() for backward compatibility.
+
+    Unknown fields raise ValueError — typos are caught at construction.
+    Invalid engagement values raise ValueError — no catch-and-continue.
     """
-    # Start with a Candidate instance for validation, then convert to dict
-    # for backward compatibility with dict-based downstream code.
-    c = Candidate(
+    # Build kwargs for Candidate constructor, filtering to known fields.
+    known_extra = {}
+    for k, v in extra.items():
+        if k not in _KNOWN_CANDIDATE_FIELDS:
+            raise ValueError(
+                f"new_candidate: unknown field {k!r} — possible typo. "
+                f"Known: {', '.join(sorted(_KNOWN_CANDIDATE_FIELDS))}"
+            )
+        known_extra[k] = v
+
+    return Candidate(
         title=title,
         url=url,
         source=source,
         source_name=source_name,
+        **known_extra,
     )
-    d = c.to_dict()
-    # Apply extra fields with validation.
-    for k, v in extra.items():
-        if k not in _KNOWN_CANDIDATE_FIELDS:
-            import logging
-            logging.getLogger(__name__).warning(
-                "new_candidate: unknown field %r — possible typo. Known: %s",
-                k, ", ".join(sorted(_KNOWN_CANDIDATE_FIELDS)),
-            )
-        d[k] = v
-    # Re-validate through from_dict to catch invalid engagement values.
-    try:
-        Candidate.from_dict(d)
-    except (ValueError, TypeError) as exc:
-        import logging
-        logging.getLogger(__name__).warning(
-            "new_candidate: validation failed for %r: %s", title, exc,
-        )
-    return d
 
 
 def strip_html(text: str) -> str:

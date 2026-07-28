@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from newsbot.collectors.base import new_candidate, truncate
+from newsbot.collectors.base import Candidate, new_candidate, truncate
 
 from newsbot.collectors._shared import get_shared_semaphore
 
@@ -54,7 +54,7 @@ query ($first: Int!, $topic: String!) {
 """
 
 
-async def _fetch_topic(client: httpx.AsyncClient, *, topic: str, limit: int, token: str) -> list[dict[str, Any]]:
+async def _fetch_topic(client: httpx.AsyncClient, *, topic: str, limit: int, token: str) -> list[Candidate]:
     headers = {"Authorization": f"Bearer {token}", "User-Agent": "newsbot/0.1"}
     sem = get_shared_semaphore()
     async with sem:
@@ -74,7 +74,7 @@ async def _fetch_topic(client: httpx.AsyncClient, *, topic: str, limit: int, tok
 
     topic_node = ((data or {}).get("data") or {}).get("topic") or {}
     edges = (topic_node.get("posts") or {}).get("edges") or []
-    items: list[dict[str, Any]] = []
+    items: list[Candidate] = []
     for edge in edges:
         post = (edge or {}).get("node") or {}
         name = str(post.get("name") or "").strip()
@@ -102,18 +102,16 @@ async def _fetch_topic(client: httpx.AsyncClient, *, topic: str, limit: int, tok
                 upvotes=int(post.get("votesCount") or 0) or None,
                 comments=int(post.get("commentsCount") or 0) or None,
                 raw_text=tagline or None,
-                raw_json=post,
+                raw_json={**post, "_topics": [t for t in post_topics if t]},
             )
         )
-        # Stash topics for topic-bonus matching in scoring.
-        items[-1]["post_topics"] = [t for t in post_topics if t]
 
     if not items:
         log.warning("PH topic %r returned zero usable items", topic)
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
+async def collect(config: dict[str, Any]) -> list[Candidate]:
     """Fetch PH candidates. *config* is the news.sources.producthunt block."""
     topics = config.get("topics") or []
     if not topics:

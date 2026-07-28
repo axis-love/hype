@@ -81,17 +81,13 @@ class TestNewCandidateCompat:
         with pytest.raises(ValueError):
             new_candidate(title="", url="", source="hn", source_name="HN")
 
-    def test_new_candidate_warns_unknown_field(self, caplog):
-        """Unknown extra fields (typos) should produce a warning."""
-        import logging
-        with caplog.at_level(logging.WARNING, logger="newsbot.collectors.base"):
-            d = new_candidate(
+    def test_new_candidate_warns_unknown_field(self):
+        """Unknown extra fields (typos) should raise ValueError."""
+        with pytest.raises(ValueError, match="upvoets"):
+            new_candidate(
                 title="T", url="http://x.com", source="hn", source_name="HN",
                 upvoets=100,  # typo: "upvoets" instead of "upvotes"
             )
-        # The typo field is still set (backward compat) but a warning was emitted.
-        assert d["upvoets"] == 100
-        assert any("upvoets" in r.message for r in caplog.records)
 
 
 class TestCollectorCompat:
@@ -162,15 +158,12 @@ class TestCandidateValidation:
         Candidate(title="T", url="U", source="hn", source_name="HN", upvote_ratio=0.85)
 
     def test_new_candidate_validates_extra_fields(self):
-        """new_candidate should validate extra fields through Candidate.from_dict."""
-        import logging
-        # Verify that invalid engagement values produce a warning
-        d = new_candidate(
-            title="T", url="U", source="hn", source_name="HN",
-            upvotes=-5,  # negative engagement should warn
-        )
-        # The dict is still returned (backward compat), but validation ran
-        assert d["upvotes"] == -5  # value is set in dict
+        """new_candidate should raise on invalid engagement values (no catch-and-continue)."""
+        with pytest.raises(ValueError, match="upvotes"):
+            new_candidate(
+                title="T", url="U", source="hn", source_name="HN",
+                upvotes=-5,  # negative engagement should raise
+            )
 
     def test_penalty_zero_roundtrip(self):
         """penalty=0 should round-trip through to_dict/from_dict correctly."""
@@ -293,3 +286,146 @@ class TestCollectorCandidateCompat:
         d2 = c.to_dict()
         assert d2["candidate_id"] == "flow_001036_001"
         assert d2["importance"] == 8
+
+
+class TestSourceIdValidation:
+    """Verify source identifier validation and alias normalization."""
+
+    def test_known_sources_accepted(self):
+        """All known source IDs should be accepted without error."""
+        for src in ("hn", "reddit", "github", "producthunt", "rss", "huggingface_papers"):
+            c = Candidate(title="T", url="U", source=src, source_name="N")
+            assert c.source == src
+
+    def test_hackernews_alias_normalized_to_hn(self):
+        """'hackernews' should be normalized to 'hn'."""
+        c = Candidate(title="T", url="U", source="hackernews", source_name="HN")
+        assert c.source == "hn"
+
+    def test_unknown_source_rejected(self):
+        """Unknown source IDs should raise ValueError."""
+        with pytest.raises(ValueError, match="Unknown.*source"):
+            Candidate(title="T", url="U", source="twitter", source_name="Twitter")
+
+    def test_empty_source_rejected(self):
+        """Empty source should raise ValueError."""
+        with pytest.raises(ValueError, match="source"):
+            Candidate(title="T", url="U", source="", source_name="N")
+
+    def test_new_candidate_rejects_unknown_source(self):
+        """new_candidate should reject unknown source IDs."""
+        with pytest.raises(ValueError, match="Unknown.*source"):
+            new_candidate(title="T", url="U", source="myspace", source_name="MySpace")
+
+    def test_from_dict_normalizes_source(self):
+        """from_dict should normalize source aliases."""
+        d = {"title": "T", "url": "U", "source": "hackernews", "source_name": "HN"}
+        c = Candidate.from_dict(d)
+        assert c.source == "hn"
+
+
+class TestNumericTypeValidation:
+    """Verify numeric field type validation."""
+
+    def test_string_engagement_rejected(self):
+        """String engagement values should raise ValueError."""
+        with pytest.raises(ValueError, match="must be numeric"):
+            Candidate(title="T", url="U", source="hn", source_name="HN", upvotes="100")
+
+    def test_nan_engagement_rejected(self):
+        """NaN engagement values should raise ValueError."""
+        with pytest.raises(ValueError, match="must be finite"):
+            Candidate(title="T", url="U", source="hn", source_name="HN",
+                      upvotes=float("nan"))
+
+    def test_inf_engagement_rejected(self):
+        """Infinity engagement values should raise ValueError."""
+        with pytest.raises(ValueError, match="must be finite"):
+            Candidate(title="T", url="U", source="hn", source_name="HN",
+                      upvotes=float("inf"))
+
+
+class TestZeroValuePreservation:
+    """Verify that valid zero values are preserved through round-trips."""
+
+    def test_score_zero_roundtrip(self):
+        """score=0 should round-trip without becoming default."""
+        c = Candidate(title="T", url="U", source="hn", source_name="HN", score=0.0)
+        d = c.to_dict()
+        assert d["score"] == 0.0
+        restored = Candidate.from_dict(d)
+        assert restored.score == 0.0
+
+    def test_crosspost_count_zero_roundtrip(self):
+        """crosspost_count=0 should round-trip without becoming 1."""
+        c = Candidate(title="T", url="U", source="hn", source_name="HN", crosspost_count=0)
+        d = c.to_dict()
+        assert d["crosspost_count"] == 0
+        restored = Candidate.from_dict(d)
+        assert restored.crosspost_count == 0
+
+    def test_engagement_zero_accepted(self):
+        """Zero engagement values should be accepted (not None)."""
+        c = Candidate(title="T", url="U", source="hn", source_name="HN",
+                      upvotes=0, comments=0, stars=0)
+        assert c.upvotes == 0
+        assert c.comments == 0
+        assert c.stars == 0
+
+
+class TestToDictFromDictRoundTrip:
+    """Verify to_dict/from_dict round-trips every declared field."""
+
+    def test_full_roundtrip_all_fields(self):
+        """Every declared field should survive a to_dict/from_dict round-trip."""
+        original = Candidate(
+            title="Test", url="https://example.com", source="hn",
+            source_name="HN", source_type="hn",
+            snippet="A snippet", published_at="2026-07-15T10:00:00+00:00",
+            score=42.5, upvotes=100, comments=50, stars=200, forks=30,
+            reposts=5, upvote_ratio=0.85, velocity=1.5,
+            category="AI", raw_text="raw", extracted_text="extracted",
+            crosspost_count=3, raw_json={"key": "value"},
+            candidate_id="c001", importance=8, reason="Important",
+            short_summary="Short", penalty=0.5,
+            contributing_sources=["hn", "reddit"],
+        )
+        d = original.to_dict()
+        restored = Candidate.from_dict(d)
+        assert restored.title == "Test"
+        assert restored.url == "https://example.com"
+        assert restored.source == "hn"
+        assert restored.source_name == "HN"
+        assert restored.source_type == "hn"
+        assert restored.snippet == "A snippet"
+        assert restored.published_at == "2026-07-15T10:00:00+00:00"
+        assert restored.score == 42.5
+        assert restored.upvotes == 100
+        assert restored.comments == 50
+        assert restored.stars == 200
+        assert restored.forks == 30
+        assert restored.reposts == 5
+        assert restored.upvote_ratio == 0.85
+        assert restored.velocity == 1.5
+        assert restored.category == "AI"
+        assert restored.raw_text == "raw"
+        assert restored.extracted_text == "extracted"
+        assert restored.crosspost_count == 3
+        assert restored.raw_json == {"key": "value"}
+        assert restored.candidate_id == "c001"
+        assert restored.importance == 8
+        assert restored.reason == "Important"
+        assert restored.short_summary == "Short"
+        assert restored.penalty == 0.5
+        assert restored.contributing_sources == ["hn", "reddit"]
+
+    def test_to_dict_does_not_share_mutable_state(self):
+        """to_dict should return a fresh dict, not share mutable references."""
+        c = Candidate(title="T", url="U", source="hn", source_name="HN",
+                      raw_json={"k": "v"}, contributing_sources=["hn"])
+        d1 = c.to_dict()
+        d1["raw_json"]["k"] = "modified"
+        d1["contributing_sources"].append("reddit")
+        d2 = c.to_dict()
+        assert d2["raw_json"] == {"k": "v"}, "raw_json should not be shared"
+        assert d2["contributing_sources"] == ["hn"], "contributing_sources should not be shared"

@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     feedparser = None
 
-from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_utc
+from newsbot.collectors.base import Candidate, new_candidate, strip_html, truncate, to_iso_utc
 
 from newsbot.collectors._shared import get_shared_semaphore
 
@@ -81,7 +81,7 @@ def _extract_engagement(entry: Any) -> tuple[int | None, int | None]:
     return upvotes, comments
 
 
-async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
+async def _fetch_one(subreddit: str, limit: int) -> list[Candidate]:
     source_name = f"r/{subreddit}"
     url = f"https://www.reddit.com/r/{subreddit}/hot.rss"
 
@@ -121,7 +121,7 @@ async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
         log.warning("Reddit parse failed for %s url=%s: %s", source_name, url, exc)
         return []
 
-    items: list[dict[str, Any]] = []
+    items: list[Candidate] = []
     for entry in list(getattr(parsed, "entries", []) or [])[:limit]:
         title = str(entry.get("title") or "").strip()
         if not title:
@@ -159,7 +159,7 @@ async def _fetch_one(subreddit: str, limit: int) -> list[dict[str, Any]]:
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
+async def collect(config: dict[str, Any]) -> list[Candidate]:
     """Fetch Reddit candidates via RSS. *config* is the news.sources.reddit block."""
     subreddits = config.get("subreddits") or []
     if not subreddits:
@@ -167,9 +167,9 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
 
     limit = max(1, min(int(config.get("limit") or 10), 25))
 
-    async def fetch_all() -> list[dict[str, Any]]:
+    async def fetch_all() -> list[Candidate]:
         # Fetch subreddits concurrently with bounded parallelism.
-        results: list[dict[str, Any]] = []
+        results: list[Candidate] = []
         tasks = [_fetch_one(str(sub).strip().strip("/"), limit)
                  for sub in subreddits if str(sub).strip().strip("/")]
         batches = await asyncio.gather(*tasks, return_exceptions=True)

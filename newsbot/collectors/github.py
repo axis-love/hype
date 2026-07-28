@@ -24,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from newsbot.collectors.base import new_candidate, truncate, to_iso_utc
+from newsbot.collectors.base import Candidate, new_candidate, truncate, to_iso_utc
 
 from newsbot.collectors._shared import get_shared_semaphore
 
@@ -66,7 +66,7 @@ def _is_suspicious(repo: dict[str, Any]) -> bool:
     return age_days <= SUSPICIOUS_AGE_DAYS
 
 
-async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort: str) -> list[dict[str, Any]]:
+async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort: str) -> list[Candidate]:
     params = {"q": query, "sort": sort, "order": "desc", "per_page": limit}
     sem = get_shared_semaphore()
     async with sem:
@@ -80,7 +80,7 @@ async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort:
             log.warning("GitHub search failed query=%r status=unavailable: %s", query, exc)
             return []
 
-    items: list[dict[str, Any]] = []
+    items: list[Candidate] = []
     for repo in data.get("items", []):
         full_name = str(repo.get("full_name") or "").strip()
         if not full_name:
@@ -118,17 +118,16 @@ async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort:
                 category=None,
                 raw_text=description or None,
                 raw_json={**repo, "_last_activity": pushed},
+                penalty=penalty,
             )
         )
-        # Stash the penalty multiplier on the candidate so scoring can apply it.
-        items[-1]["penalty"] = penalty
 
     if not items:
         log.warning("GitHub search returned zero usable items query=%r", query)
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
+async def collect(config: dict[str, Any]) -> list[Candidate]:
     """Fetch GitHub candidates. *config* is the news.sources.github block."""
     queries = config.get("queries") or []
     if not queries:
