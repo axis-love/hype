@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import math
 from typing import Any
-from urllib.parse import urlsplit, parse_qsl, urlencode
+from urllib.parse import urlsplit, parse_qsl
 
 try:
     from rapidfuzz import fuzz
@@ -129,8 +129,10 @@ def _canonical_url(url: Any) -> str:
         if kept:
             # Sort for determinism (order-independent canonicalization).
             kept.sort()
-            # Use urlencode for proper URL encoding of values.
-            query = urlencode(kept)
+            # Preserve original encoding: reconstruct from raw key=value pairs
+            # without re-encoding via urlencode. This preserves signed URLs
+            # where byte order and encoding matter.
+            query = "&".join(f"{k}={v}" for k, v in kept)
         else:
             query = ""
     else:
@@ -191,31 +193,46 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     # Track contributing sources in a persistent list.
     if not keep.get("contributing_sources"):
         keep["contributing_sources"] = [keep.get("source") or "unknown"]
+    # Track per-source engagement values so same-source duplicates
+    # can take MAX per source without inflating other sources' totals.
+    if "_per_source_eng" not in keep:
+        keep["_per_source_eng"] = {}
+    my_source = keep.get("source") or "unknown"
+    if my_source not in keep["_per_source_eng"]:
+        keep["_per_source_eng"][my_source] = {
+            f: keep.get(f) or 0 for f in ("upvotes", "comments", "stars", "forks", "reposts")
+        }
     other_source = other.get("source") or "unknown"
+    other_eng = {
+        f: other.get(f) or 0 for f in ("upvotes", "comments", "stars", "forks", "reposts")
+    }
 
     # Track the individual preference of the current primary candidate.
-    # This is set on first merge and updated when primary switches.
-    # It represents the pre-merge preference of the candidate that is
-    # currently the primary — NOT the inflated merged value.
     if "_primary_preference" not in keep:
         keep["_primary_preference"] = _pre_merge_preference(keep)
     other_pref = _pre_merge_preference(other)
 
-    # Only sum engagement if this is from a new source (prevents inflation).
     if other_source not in keep["contributing_sources"]:
+        # New distinct source: add to contributing sources, record its engagement.
         keep["contributing_sources"].append(other_source)
-        for field in ("upvotes", "comments", "stars", "forks", "reposts"):
-            a = keep.get(field) or 0
-            b = other.get(field) or 0
-            if a or b:
-                keep[field] = (a or 0) + (b or 0)
+        keep["_per_source_eng"][other_source] = other_eng
     else:
-        # Same-source duplicate: take max engagement (not first-seen).
+        # Same-source duplicate: take MAX engagement per field for this source.
+        if other_source not in keep["_per_source_eng"]:
+            keep["_per_source_eng"][other_source] = {
+                f: 0 for f in ("upvotes", "comments", "stars", "forks", "reposts")
+            }
         for field in ("upvotes", "comments", "stars", "forks", "reposts"):
-            a = keep.get(field) or 0
-            b = other.get(field) or 0
-            if b > a:
-                keep[field] = b
+            keep["_per_source_eng"][other_source][field] = max(
+                keep["_per_source_eng"][other_source][field],
+                other_eng[field]
+            )
+
+    # Recompute total engagement from per-source tracking.
+    for field in ("upvotes", "comments", "stars", "forks", "reposts"):
+        keep[field] = sum(
+            src_eng[field] for src_eng in keep["_per_source_eng"].values()
+        )
 
     # upvote_ratio: take the max (Reddit-only field; non-Reddit items have None).
     if other.get("upvote_ratio") is not None:
@@ -342,5 +359,6 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in result:
         item.pop("_source_names_set", None)
         item.pop("_primary_preference", None)
+        item.pop("_per_source_eng", None)
 
     return result
