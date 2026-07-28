@@ -207,8 +207,15 @@ class TestLLMEnvValidation:
     def test_both_set_passes(self):
         from newsbot.main import _validate_llm_env
         from unittest.mock import patch
-        with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test"}, clear=True):
+        with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test"}, clear=True):
             _validate_llm_env()  # should not raise
+
+    def test_missing_lm_api_key_raises(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test"}, clear=True):
+            with pytest.raises(RuntimeError, match="LM_API_KEY is not set"):
+                _validate_llm_env()
 
 
 class TestMalformedConfigRaises:
