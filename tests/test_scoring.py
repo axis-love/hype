@@ -208,7 +208,10 @@ def test_score_breakdown_returns_all_keys():
     bd = score_breakdown(item, CFG)
     expected_keys = {
         "score", "engagement", "recency", "source_weight",
-        "topic_bonus", "crosspost_bonus", "penalty", "matched_topics", "scored_at"
+        "topic_bonus", "crosspost_bonus", "penalty", "matched_topics",
+        "scored_at", "lookback_hours",
+        "source", "published_at", "upvotes", "comments",
+        "stars", "reposts", "crosspost_count",
     }
     assert set(bd.keys()) == expected_keys
     assert isinstance(bd["score"], float)

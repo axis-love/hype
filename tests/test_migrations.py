@@ -1,4 +1,5 @@
 """Tests for database migrations and retention policies (flow_001032)."""
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,8 +34,8 @@ class TestMigrations:
 
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
-        # Should have exactly 1 migration applied, not duplicated.
-        assert rows["n"] == 2  # 2 migrations applied
+        # Should have exactly 3 migrations applied, not duplicated.
+        assert rows["n"] == 3  # 3 migrations applied
         store2.close()
 
     def test_tables_exist_after_migration(self, store):
@@ -154,3 +155,178 @@ class TestRetentionPruning:
         deleted = store.prune_posted_posts(max_age_days=30, batch_size=10)
         assert deleted == 100
         assert store.count_pending() == 0
+
+# --- flow_001040: persist score components in pending_posts ---
+
+
+class TestScoreColumnsMigration:
+    """Verify migration 3 adds score columns to pending_posts."""
+
+    def test_score_columns_exist(self, store):
+        """All score columns should exist after migration 3."""
+        cols = store._conn.execute("PRAGMA table_info(pending_posts)").fetchall()
+        col_names = {c["name"] for c in cols}
+        expected = {
+            "source", "published_at", "upvotes", "comments", "stars",
+            "reposts", "crosspost_count", "penalty", "lookback_hours",
+            "score_at_queue", "engagement_score", "recency_at_queue",
+            "source_weight", "topic_bonus", "crosspost_bonus",
+            "matched_topics", "scored_at",
+        }
+        missing = expected - col_names
+        assert not missing, f"Missing columns: {missing}"
+
+    def test_legacy_rows_have_null_scores(self, store):
+        """Rows inserted before migration 3 should have NULL score columns."""
+        # Insert a post the old way (no score data).
+        store.add_pending_post({"title": "Legacy", "body": "B", "url": ""})
+        row = store._conn.execute(
+            "SELECT score_at_queue, engagement_score, scored_at FROM pending_posts WHERE title='Legacy'"
+        ).fetchone()
+        assert row["score_at_queue"] is None
+        assert row["engagement_score"] is None
+        assert row["scored_at"] is None
+
+    def test_upgrade_preserves_existing_rows(self, tmp_path):
+        """Upgrading a v2 DB with pending rows should preserve them with NULL score columns."""
+        db_path = tmp_path / "test.sqlite"
+        # Manually create a v2 database (only migrations 1-2 applied).
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version(version INTEGER PRIMARY KEY, description TEXT, applied_at TEXT);
+            INSERT INTO schema_version VALUES(1, 'Initial schema', '2026-01-01T00:00:00+00:00');
+            INSERT INTO schema_version VALUES(2, 'Drop unused tables', '2026-01-01T00:00:00+00:00');
+            CREATE TABLE pending_posts(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL, body TEXT NOT NULL,
+                category TEXT, importance INTEGER, url TEXT,
+                created_at TEXT NOT NULL, posted_at TEXT
+            );
+            INSERT INTO pending_posts(title, body, url, created_at) VALUES('Pre-existing', 'B', 'https://example.com', '2026-01-01T00:00:00+00:00');
+            CREATE TABLE seen(url TEXT PRIMARY KEY, title TEXT, first_seen_at TEXT NOT NULL);
+        """)
+        conn.commit()
+        conn.close()
+
+        # Reopen with NewsStore — migration 3 should apply and preserve the row.
+        store2 = NewsStore(db_path)
+        rows = store2._conn.execute("SELECT * FROM pending_posts WHERE title='Pre-existing'").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["score_at_queue"] is None
+        assert rows[0]["scored_at"] is None
+        # Verify migration 3 was applied.
+        version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+        assert version_row["v"] == 3
+        store2.close()
+
+
+class TestReplaceUnpostedBatchWithScores:
+    """Verify replace_unposted_batch stores score components."""
+
+    def test_replace_stores_score_components(self, store):
+        """replace_unposted_batch should store score_breakdown data in columns."""
+        from datetime import datetime, timezone
+        bd = {
+            "score": 123.4,
+            "engagement": 100.0,
+            "recency": 0.88,
+            "source_weight": 1.2,
+            "topic_bonus": 20,
+            "crosspost_bonus": 30.0,
+            "penalty": 1.0,
+            "matched_topics": ["ai", "llm"],
+            "scored_at": "2026-07-28T12:00:00+00:00",
+            "lookback_hours": 48,
+            "source": "hn",
+            "published_at": "2026-07-28T06:00:00+00:00",
+            "upvotes": 420,
+            "comments": 88,
+            "stars": 0,
+            "reposts": 0,
+            "crosspost_count": 2,
+        }
+        post = {
+            "title": "Test Post",
+            "body": "Body text",
+            "url": "https://example.com",
+            "candidate_id": "c001",
+            "score_breakdown": bd,
+        }
+        inserted, seen = store.replace_unposted_batch([post], [])
+        assert inserted == 1
+
+        row = store._conn.execute(
+            "SELECT * FROM pending_posts WHERE title='Test Post'"
+        ).fetchone()
+        assert row["score_at_queue"] == 123.4
+        assert row["engagement_score"] == 100.0
+        assert row["recency_at_queue"] == 0.88
+        assert row["source_weight"] == 1.2
+        assert row["topic_bonus"] == 20
+        assert row["crosspost_bonus"] == 30.0
+        assert row["penalty"] == 1.0
+        assert row["source"] == "hn"
+        assert row["upvotes"] == 420
+        assert row["comments"] == 88
+        assert row["crosspost_count"] == 2
+        assert row["lookback_hours"] == 48
+        assert row["scored_at"] == "2026-07-28T12:00:00+00:00"
+        # matched_topics stored as JSON
+        import json
+        matched = json.loads(row["matched_topics"])
+        assert matched == ["ai", "llm"]
+
+    def test_replace_without_score_breakdown(self, store):
+        """Posts without score_breakdown should still insert (NULL score columns)."""
+        post = {"title": "No Scores", "body": "B", "url": "https://example.com"}
+        inserted, _ = store.replace_unposted_batch([post], [])
+        assert inserted == 1
+        row = store._conn.execute(
+            "SELECT score_at_queue, scored_at FROM pending_posts WHERE title='No Scores'"
+        ).fetchone()
+        assert row["score_at_queue"] is None
+        assert row["scored_at"] is None
+
+    def test_matched_topics_json_roundtrip(self, store):
+        """matched_topics should round-trip through JSON correctly."""
+        bd = {
+            "matched_topics": ["ai", "llm", "local_llm"],
+            "score": 50.0,
+        }
+        post = {"title": "JSON Test", "body": "B", "url": "", "score_breakdown": bd}
+        store.replace_unposted_batch([post], [])
+        row = store._conn.execute(
+            "SELECT matched_topics FROM pending_posts WHERE title='JSON Test'"
+        ).fetchone()
+        import json
+        matched = json.loads(row["matched_topics"])
+        assert matched == ["ai", "llm", "local_llm"]
+
+
+class TestListUnpostedPosts:
+    """Verify list_unposted_posts returns correct ordering."""
+
+    def test_empty_queue(self, store):
+        """Empty queue should return empty list."""
+        assert store.list_unposted_posts() == []
+
+    def test_ordering_oldest_first(self, store):
+        """Posts should be ordered by created_at, id (oldest first)."""
+        store.add_pending_post({"title": "First", "body": "B", "url": ""})
+        store.add_pending_post({"title": "Second", "body": "B", "url": ""})
+        store.add_pending_post({"title": "Third", "body": "B", "url": ""})
+        posts = store.list_unposted_posts()
+        assert len(posts) == 3
+        assert posts[0]["title"] == "First"
+        assert posts[1]["title"] == "Second"
+        assert posts[2]["title"] == "Third"
+
+    def test_excludes_posted(self, store):
+        """Posted posts should not appear in list_unposted_posts."""
+        store.add_pending_post({"title": "Unposted", "body": "B", "url": ""})
+        store.add_pending_post({"title": "AlsoUnposted", "body": "B", "url": ""})
+        post = store.get_next_pending_post()
+        store.mark_posted(post["id"])
+        unposted = store.list_unposted_posts()
+        assert len(unposted) == 1
+        assert unposted[0]["title"] == "AlsoUnposted"

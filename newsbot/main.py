@@ -386,6 +386,23 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     if omitted:
         log.warning("LLM styler omitted %d items — not marking them seen", omitted)
 
+    # 9b. Enrich posts with score_breakdown by joining on candidate_id.
+    #     The styler returns narrow dicts (title, body, url, candidate_id).
+    #     We join back to the final items (which carry score_breakdown from
+    #     score_all()) so the DB can persist score components.
+    #     Never zip — the styler can reorder or omit items.
+    final_by_id = {}
+    for item in final:
+        cid = item.get("candidate_id")
+        if cid:
+            bd = item.get("score_breakdown")
+            if bd:
+                final_by_id[cid] = bd
+    for post in posts:
+        cid = post.get("candidate_id")
+        if cid and cid in final_by_id:
+            post["score_breakdown"] = final_by_id[cid]
+
     # 10. Atomically replace unposted queue with new posts and mark items as seen.
     #     If insertion fails, the old queue remains intact (rollback).
     try:
