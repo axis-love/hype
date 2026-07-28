@@ -562,3 +562,152 @@ def test_format_post_message_truncates_at_sentence_boundary():
     assert len(msg) <= 3100
     # Should cut at a sentence boundary, not mid-word
     assert not msg.endswith("x…") or msg.endswith("…")
+
+
+# --- flow_001041: /scores command ---
+
+
+def test_format_scores_empty_queue(tmp_path):
+    """_format_scores with empty queue returns 'No queued posts.'"""
+    from newsbot.db import NewsStore
+    from newsbot.main import _format_scores
+    store = NewsStore(tmp_path / "test.sqlite")
+    result = _format_scores(store)
+    assert result == "No queued posts."
+    store.close()
+
+
+def test_format_scores_with_scored_posts(tmp_path):
+    """_format_scores shows both current and queue-time scores with breakdown."""
+    from newsbot.db import NewsStore
+    from newsbot.main import _format_scores
+    import json
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    bd = {
+        "score": 150.0,
+        "engagement": 100.0,
+        "recency": 0.88,
+        "source_weight": 1.2,
+        "topic_bonus": 20,
+        "crosspost_bonus": 30.0,
+        "penalty": 1.0,
+        "matched_topics": ["ai", "llm"],
+        "scored_at": "2026-07-28T12:00:00+00:00",
+        "lookback_hours": 48,
+        "source": "hn",
+        "published_at": "2026-07-28T06:00:00+00:00",
+        "upvotes": 420,
+        "comments": 88,
+        "stars": 0,
+        "reposts": 0,
+        "crosspost_count": 2,
+    }
+    post = {
+        "title": "Test Post About LLMs",
+        "body": "Body",
+        "url": "https://example.com",
+        "score_breakdown": bd,
+    }
+    store.replace_unposted_batch([post], [])
+
+    result = _format_scores(store)
+    assert "Test Post About LLMs" in result
+    assert "queued" in result
+    assert "now" in result
+    assert "eng=" in result
+    assert "weight=1.20" in result
+    assert "topic=20" in result
+    assert "crosspost=30" in result
+    assert "penalty=1.00" in result
+    assert "topics=ai, llm" in result
+    assert "source=hn" in result
+    store.close()
+
+
+def test_format_scores_with_legacy_rows(tmp_path):
+    """_format_scores shows 'score unavailable' for legacy rows."""
+    from newsbot.db import NewsStore
+    from newsbot.main import _format_scores
+    store = NewsStore(tmp_path / "test.sqlite")
+    # Insert a legacy post (no score data).
+    store.add_pending_post({"title": "Legacy Post", "body": "B", "url": ""})
+
+    result = _format_scores(store)
+    assert "score unavailable" in result
+    assert "Legacy Post" in result
+    store.close()
+
+
+def test_format_scores_mixed_queue(tmp_path):
+    """_format_scores handles mixed legacy + scored rows in the same queue."""
+    from newsbot.db import NewsStore
+    from newsbot.main import _format_scores
+    import json
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    # Insert a legacy post directly via SQL (no score columns).
+    store._conn.execute(
+        "INSERT INTO pending_posts(title, body, url, created_at) VALUES(?, ?, ?, ?)",
+        ("Legacy Post", "B", "https://legacy.com", "2026-07-28T10:00:00+00:00"),
+    )
+
+    # Insert a scored post directly via SQL.
+    bd = {
+        "score": 80.0, "engagement": 50.0, "recency": 0.9,
+        "source_weight": 1.0, "topic_bonus": 10, "crosspost_bonus": 0.0,
+        "penalty": 1.0, "matched_topics": ["robotics"],
+        "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48,
+        "source": "hn", "published_at": "2026-07-28T10:00:00+00:00",
+        "upvotes": 100, "comments": 5, "stars": 0, "reposts": 0,
+        "crosspost_count": 1,
+    }
+    store._conn.execute(
+        """INSERT INTO pending_posts(
+            title, body, url, created_at,
+            score_at_queue, engagement_score, recency_at_queue,
+            source_weight, topic_bonus, crosspost_bonus, penalty,
+            matched_topics, scored_at, source, published_at,
+            upvotes, comments, stars, reposts, crosspost_count, lookback_hours
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "Scored Post", "B", "https://scored.com", "2026-07-28T11:00:00+00:00",
+            bd["score"], bd["engagement"], bd["recency"],
+            bd["source_weight"], bd["topic_bonus"], bd["crosspost_bonus"], bd["penalty"],
+            json.dumps(bd["matched_topics"]), bd["scored_at"], bd["source"], bd["published_at"],
+            bd["upvotes"], bd["comments"], bd["stars"], bd["reposts"], bd["crosspost_count"], bd["lookback_hours"],
+        ),
+    )
+
+    result = _format_scores(store)
+    # Both posts should appear.
+    assert "Legacy Post" in result
+    assert "Scored Post" in result
+    assert "score unavailable" in result
+    assert "80.0 queued" in result
+    assert "topics=robotics" in result
+    store.close()
+
+
+def test_format_scores_queue_order(tmp_path):
+    """_format_scores shows posts in queue order (oldest first)."""
+    from newsbot.db import NewsStore
+    from newsbot.main import _format_scores
+    store = NewsStore(tmp_path / "test.sqlite")
+
+    bd1 = {"score": 100.0, "source": "hn", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 50.0, "recency": 0.9, "source_weight": 1.2, "topic_bonus": 0, "crosspost_bonus": 0.0, "penalty": 1.0, "published_at": "2026-07-28T10:00:00+00:00", "upvotes": 100, "comments": 10, "stars": 0, "reposts": 0, "crosspost_count": 1}
+    bd2 = {"score": 200.0, "source": "reddit", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 150.0, "recency": 0.9, "source_weight": 1.0, "topic_bonus": 0, "crosspost_bonus": 30.0, "penalty": 1.0, "published_at": "2026-07-28T10:00:00+00:00", "upvotes": 200, "comments": 50, "stars": 0, "reposts": 0, "crosspost_count": 2}
+
+    store.replace_unposted_batch([
+        {"title": "First Post", "body": "B", "url": "https://a.com", "score_breakdown": bd1},
+        {"title": "Second Post", "body": "B", "url": "https://b.com", "score_breakdown": bd2},
+    ], [])
+
+    result = _format_scores(store)
+    # First Post should appear before Second Post.
+    idx_first = result.find("First Post")
+    idx_second = result.find("Second Post")
+    assert idx_first < idx_second
+    assert "100.0 queued" in result
+    assert "200.0 queued" in result
+    store.close()

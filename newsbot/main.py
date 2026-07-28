@@ -436,6 +436,84 @@ def _run_retention(store: NewsStore) -> None:
         log.warning("retention cleanup failed: %s", exc)
 
 
+def _format_scores(store: NewsStore) -> str:
+    """Format hype scores for all queued posts (for /scores command).
+
+    Shows both current score (recency recalculated with now) and queue-time
+    score, with full component breakdown. Legacy rows (NULL score columns)
+    show 'score unavailable'.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    import math
+
+    posts = store.list_unposted_posts()
+    if not posts:
+        return "No queued posts."
+
+    now = datetime.now(timezone.utc)
+    lines = [f"Queued hype scores ({len(posts)} posts)", f"As of: {now.isoformat(timespec='seconds')}", ""]
+
+    for i, post in enumerate(posts, start=1):
+        title = (post.get("title") or "")[:60]
+        score_at_queue = post.get("score_at_queue")
+
+        if score_at_queue is None:
+            lines.append(f"{i}. score unavailable — queued before scoring update")
+            lines.append(title)
+            lines.append("")
+            continue
+
+        # Queue-time score and components.
+        eng = post.get("engagement_score")
+        eng = eng if eng is not None else 0.0
+        rec_queue = post.get("recency_at_queue")
+        rec_queue = rec_queue if rec_queue is not None else 0.0
+        weight = post.get("source_weight")
+        weight = weight if weight is not None else 1.0
+        topic = post.get("topic_bonus")
+        topic = topic if topic is not None else 0
+        crosspost = post.get("crosspost_bonus")
+        crosspost = crosspost if crosspost is not None else 0.0
+        penalty = post.get("penalty")
+        penalty = penalty if penalty is not None else 1.0
+        source = post.get("source") or "?"
+        published_at = post.get("published_at") or ""
+        lookback = post.get("lookback_hours")
+        lookback = lookback if lookback is not None else 48
+
+        # Current score: only recency changes.
+        current_recency = 0.5
+        if published_at:
+            try:
+                dt = datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_hours = max(0.0, (now - dt).total_seconds() / 3600.0)
+                current_recency = math.exp(-age_hours / float(lookback))
+            except Exception:
+                pass
+
+        current_score = (eng * current_recency * weight + topic + crosspost) * penalty
+
+        # Matched topics.
+        matched_topics_raw = post.get("matched_topics") or "[]"
+        try:
+            matched = _json.loads(matched_topics_raw) if isinstance(matched_topics_raw, str) else matched_topics_raw
+        except Exception:
+            matched = []
+        topics_str = ", ".join(matched) if matched else "none"
+
+        lines.append(f"{i}. {current_score:.1f} now (rec={current_recency:.2f}) | {score_at_queue:.1f} queued (rec={rec_queue:.2f})")
+        lines.append(title)
+        lines.append(f"[(eng={eng:.1f} × weight={weight:.2f} × recency) + topic={topic} + crosspost={crosspost:.0f}] × penalty={penalty:.2f}")
+        lines.append(f"topics={topics_str}")
+        lines.append(f"source={source} | published={published_at[:10] if published_at else 'unknown'}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
 async def _scheduler_gen_iteration(
     coordinator: JobCoordinator,
     store: NewsStore,
@@ -623,6 +701,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 f"Posting: {post_status} (interval: {post_interval_minutes:.0f}min)"
             )
 
+        async def on_scores() -> str:
+            return _format_scores(store)
+
         bot_handler = BotCommandHandler(
             bot_token=bot_token,
             admin_user_id=admin_user_id,
@@ -630,6 +711,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             on_digest=on_digest,
             on_post=on_post,
             on_status=on_status,
+            on_scores=on_scores,
         )
 
     async def generation_loop() -> None:
