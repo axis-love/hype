@@ -22,6 +22,24 @@ jobs:
       - name: Run tests
         run: pytest tests/ -q
 
+      - name: Verify lock file is not stale
+        run: |
+          pip freeze --constraint constraints.txt > /tmp/installed.txt
+          # Check that all direct deps in pyproject.toml are in constraints.txt
+          python -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              deps = tomllib.load(f).get('project', {}).get('dependencies', [])
+          with open('constraints.txt') as f:
+              lock = f.read()
+          missing = [d.split('>=')[0].split('==')[0].split('~=')[0].strip().lower()
+                     for d in deps if d.split('>=')[0].split('==')[0].split('~=')[0].strip().lower() not in lock.lower()]
+          if missing:
+              print(f'STALE LOCK: dependencies missing from constraints.txt: {missing}')
+              exit(1)
+          print('Lock file OK')
+          "
+
   docker-build:
     runs-on: ubuntu-latest
     steps:

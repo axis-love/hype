@@ -141,6 +141,8 @@ class TestDocumentationCorrectness:
         scan_patterns = ["*.py", "*.md", "*.env*", "*.txt", "Dockerfile*"]
         # Directories to skip.
         skip_dirs = {".venv", "__pycache__", ".git", "node_modules", ".pytest_cache"}
+        # Skip files starting with . (untracked review artifacts, .codex-task-*, etc.)
+        skip_prefixes = (".codex", ".review")
 
         # Regex: /run as a command (not part of a word like "run()" or "runtime")
         run_cmd_re = re.compile(r"(?<![a-zA-Z_])/run(?![a-zA-Z_])")
@@ -149,6 +151,9 @@ class TestDocumentationCorrectness:
         for root, dirs, files in os.walk("."):
             dirs[:] = [d for d in dirs if d not in skip_dirs]
             for fname in files:
+                # Skip untracked review/control artifacts.
+                if any(fname.startswith(p) for p in skip_prefixes):
+                    continue
                 # Check if file matches any scan pattern.
                 matched = any(
                     fname.endswith(pat.replace("*", "")) or

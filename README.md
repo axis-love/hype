@@ -90,7 +90,7 @@ If you need one-shot execution (e.g. from a cron job or CI):
 | `LM_BASE` | OpenAI-compatible endpoint base including `/v1` (e.g. `https://host/v1`) |
 | `LM_MODEL` | LLM model name (digest writer) |
 | `LM_FILTER_MODEL` | LLM model name (filter pass; defaults to `LM_MODEL`) |
-| `LM_API_KEY` | Bearer token (optional) |
+| `LM_API_KEY` | Bearer token (required) |
 | `LM_TIMEOUT` | Request timeout, seconds (default 300) |
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
@@ -120,7 +120,7 @@ Recognized keys: `sources`, `source_weights`, `topic_boost`,
 ## Database Migrations & Backup
 
 The bot uses a lightweight SQLite migration system (`db.py`) that tracks
-applied migrations in a `schema_migrations` table. Migrations run
+applied migrations in a `schema_version` table. Migrations run
 automatically on startup.
 
 ### Backup
@@ -146,7 +146,7 @@ docker compose down
 # Restore from backup
 cp data/newsbot.sqlite.bak.YYYYMMDD data/newsbot.sqlite
 
-# Start the bot — it will detect the older schema and skip already-applied migrations
+# Start the bot — it will detect the older schema and apply any missing migrations
 docker compose up -d
 ```
 
