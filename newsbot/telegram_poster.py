@@ -31,6 +31,18 @@ MAX_RETRY_AFTER = 60.0
 # Max retries for transient server errors (5xx, timeout).
 MAX_TRANSIENT_RETRIES = 2
 
+class PartialDeliveryError(Exception):
+    """Raised when some chunks were delivered but a later chunk failed.
+
+    Carries the count of successfully delivered chunks so the caller
+    can mark the post as partially delivered and avoid re-sending
+    the already-delivered chunks on retry.
+    """
+    def __init__(self, message: str, delivered_chunks: int = 0) -> None:
+        super().__init__(message)
+        self.delivered_chunks = delivered_chunks
+
+
 # HTML tags that need closing — used for chunk balance checking.
 _OPEN_TAG_RE = re.compile(r"<(b|i|u|s|a|code|pre)(\s[^>]*)?>", re.IGNORECASE)
 _CLOSE_TAG_RE = re.compile(r"</(b|i|u|s|a|code|pre)>", re.IGNORECASE)
@@ -75,6 +87,8 @@ def _find_safe_cut(text: str, limit: int) -> int:
     """Find a safe position to cut text at or before limit.
 
     Avoids splitting inside HTML tags and HTML entities.
+    Never returns 0 — if the first opening tag is larger than the limit,
+    skips past it to prevent infinite loops in _split_for_telegram().
     """
     # Prefer to split on the last blank line before the limit.
     cut = text.rfind("\n\n", 0, limit)
@@ -87,22 +101,31 @@ def _find_safe_cut(text: str, limit: int) -> int:
     # Don't split inside an HTML tag (e.g. <a href="...">).
     tag_start = text.rfind("<", 0, cut)
     if tag_start >= 0:
-        tag_end = text.find(">", tag_start, cut + 100)
+        tag_end = text.find(">", tag_start, cut + 200)
         if tag_end == -1 or tag_end >= cut:
             # We're inside a tag — split before it.
             cut = tag_start
 
     # Don't split inside an HTML entity (e.g. &amp;, &#123;).
-    # Look backwards from cut for an & that doesn't have a matching ; before cut.
     amp_pos = text.rfind("&", max(0, cut - 20), cut)
     if amp_pos >= 0:
         semi_pos = text.find(";", amp_pos, cut + 20)
         if semi_pos == -1 or semi_pos >= cut:
-            # The entity starting at amp_pos is not complete before cut.
-            # Move cut to before the &.
             cut = amp_pos
 
-    return cut
+    # CRITICAL: if cut is 0, we'd loop forever. This happens when the
+    # first thing in the text is an HTML tag longer than the limit.
+    # Skip past the oversized tag to make progress.
+    if cut <= 0:
+        # Find the end of the first tag (if any) and cut after it.
+        first_tag_end = text.find(">", 0, limit + 500)
+        if first_tag_end >= 0:
+            cut = first_tag_end + 1
+        else:
+            # No tag end found — hard cut at limit (better than infinite loop).
+            cut = limit
+
+    return max(1, cut)
 
 
 def _balance_tags(chunk: str, remaining: str) -> tuple[str, str]:
@@ -314,16 +337,22 @@ async def post_digest(
                 result = await _send_with_retry(client, url, payload, idx)
             except httpx.HTTPError as exc:
                 log.error("chunk %d: transport error after retries: %s", idx, redact_exception(exc))
+                if results:
+                    raise PartialDeliveryError(
+                        f"chunk {idx}: transport error after {len(results)} chunks delivered",
+                        delivered_chunks=len(results),
+                    ) from exc
                 raise
 
             if result is not None:
                 results.append(result)
             else:
                 # Transient retries exhausted — stop sending further chunks.
-                # Earlier chunks are already delivered; caller must not retry.
-                raise RuntimeError(
-                    f"chunk {idx}: Telegram delivery failed after transient retries "
-                    f"(earlier chunks {len(results)} already sent)"
+                # Earlier chunks are already delivered; raise with count
+                # so the caller knows how many were sent.
+                raise PartialDeliveryError(
+                    f"chunk {idx}: Telegram delivery failed after transient retries",
+                    delivered_chunks=len(results),
                 )
 
     log.info("Posted digest (%d chunk(s)) to %s", len(results), chat_id)
