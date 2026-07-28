@@ -346,3 +346,140 @@ class TestSchedulerPostIteration:
         result = await _scheduler_post_iteration(coordinator, settings, post_interval_s=3600)
 
         assert result == 0  # idle
+
+
+class TestRetentionRunsThroughRuntimePaths:
+    """Verify retention runs through actual runtime paths (not direct calls)."""
+
+    @pytest.mark.asyncio
+    async def test_retention_runs_through_gen_iteration_success(self, store, settings):
+        """Retention runs after successful generation iteration."""
+        from newsbot.main import _scheduler_gen_iteration, _run_retention
+
+        coordinator = JobCoordinator(store, settings)
+        settings.set("scheduler", "last_gen_utc", "2026-01-01T00:00:00+00:00")
+
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=0):
+            with patch("newsbot.main._run_retention") as mock_ret:
+                await _scheduler_gen_iteration(coordinator, store, settings, gen_interval_s=0)
+
+        assert mock_ret.called
+
+    @pytest.mark.asyncio
+    async def test_retention_runs_through_gen_iteration_failure(self, store, settings):
+        """Retention runs after failed generation iteration."""
+        from newsbot.main import _scheduler_gen_iteration
+
+        coordinator = JobCoordinator(store, settings)
+        settings.set("scheduler", "last_gen_utc", "2026-01-01T00:00:00+00:00")
+
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=1):
+            with patch("newsbot.main._run_retention") as mock_ret:
+                await _scheduler_gen_iteration(coordinator, store, settings, gen_interval_s=0)
+
+        assert mock_ret.called
+
+    @pytest.mark.asyncio
+    async def test_retention_runs_through_gen_iteration_no_progress(self, store, settings):
+        """Retention runs after no-progress generation iteration."""
+        from newsbot.main import _scheduler_gen_iteration
+
+        coordinator = JobCoordinator(store, settings)
+        settings.set("scheduler", "last_gen_utc", "2026-01-01T00:00:00+00:00")
+
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=3):
+            with patch("newsbot.main._run_retention") as mock_ret:
+                await _scheduler_gen_iteration(coordinator, store, settings, gen_interval_s=0)
+
+        assert mock_ret.called
+
+    @pytest.mark.asyncio
+    async def test_retention_runs_through_gen_iteration_exception(self, store, settings):
+        """Retention runs even when generation raises an exception."""
+        from newsbot.main import _scheduler_gen_iteration
+
+        coordinator = JobCoordinator(store, settings)
+        settings.set("scheduler", "last_gen_utc", "2026-01-01T00:00:00+00:00")
+
+        async def exploding_gen():
+            raise RuntimeError("LLM down")
+
+        with patch("newsbot.main._run_generation", side_effect=exploding_gen):
+            with patch("newsbot.main._run_retention") as mock_ret:
+                await _scheduler_gen_iteration(coordinator, store, settings, gen_interval_s=0)
+
+        assert mock_ret.called
+
+
+class TestSettingsStoreLifecycle:
+    """Verify SettingsStore has close()/context manager support."""
+
+    def test_settings_store_close(self, tmp_path):
+        from core.settings_store import SettingsStore, SettingsStoreConfig
+
+        store = SettingsStore(SettingsStoreConfig(db_path=tmp_path / "test.sqlite"))
+        store.set("test", "key", "value")
+        store.close()
+        # Should not raise on double-close
+        store.close()
+
+    def test_settings_store_context_manager(self, tmp_path):
+        from core.settings_store import SettingsStore, SettingsStoreConfig
+
+        with SettingsStore(SettingsStoreConfig(db_path=tmp_path / "test.sqlite")) as store:
+            store.set("test", "key", "value")
+            assert store.get("test", "key") == "value"
+        # Connection closed after context exit
+
+
+class TestRetentionConfigurable:
+    """Verify retention ages are configurable via env vars."""
+
+    def test_retention_uses_env_vars(self, tmp_path):
+        """_run_retention should read ages from env vars."""
+        from newsbot.main import _run_retention
+        from newsbot.db import NewsStore
+        from datetime import datetime, timezone, timedelta
+
+        store = NewsStore(tmp_path / "test.sqlite")
+        # Add a posted post with an old timestamp so it's eligible for pruning.
+        store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
+        post = store.get_next_pending_post()
+        store.mark_posted(post["id"])
+        # Set posted_at to 5 days ago.
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
+        store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
+
+        with patch.dict("os.environ", {
+            "NEWS_RETENTION_POSTED_DAYS": "1",  # prune posts older than 1 day
+            "NEWS_RETENTION_SEEN_DAYS": "1",
+            "NEWS_RETENTION_DIGEST_DAYS": "1",
+        }):
+            _run_retention(store)
+
+        # The 5-day-old posted post should be pruned.
+        posted_count = store._conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
+        ).fetchone()
+        assert int(posted_count["n"]) == 0
+
+    def test_retention_defaults_to_30_14_90(self, tmp_path):
+        """_run_retention should use default ages when env vars are not set."""
+        from newsbot.main import _run_retention
+        from newsbot.db import NewsStore
+        from unittest.mock import patch
+
+        store = NewsStore(tmp_path / "test.sqlite")
+        store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
+        post = store.get_next_pending_post()
+        store.mark_posted(post["id"])
+
+        # Clear retention env vars to test defaults.
+        with patch.dict("os.environ", {}, clear=True):
+            _run_retention(store)
+
+        # With defaults (30 days), a just-posted post should NOT be pruned.
+        posted_count = store._conn.execute(
+            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
+        ).fetchone()
+        assert int(posted_count["n"]) == 1

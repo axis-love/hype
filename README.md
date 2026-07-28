@@ -117,6 +117,51 @@ Recognized keys: `sources`, `source_weights`, `topic_boost`,
 `source_quota`, `item_prune_hours`, `llm_temperature`,
 `llm_max_tokens_filter`, `llm_max_tokens_digest`, `style_prompt`.
 
+## Database Migrations & Backup
+
+The bot uses a lightweight SQLite migration system (`db.py`) that tracks
+applied migrations in a `schema_migrations` table. Migrations run
+automatically on startup.
+
+### Backup
+
+Before upgrading or running manual migrations:
+
+```bash
+# Stop the bot
+docker compose down
+
+# Back up the database
+cp data/newsbot.sqlite data/newsbot.sqlite.bak.$(date +%Y%m%d)
+```
+
+### Rollback
+
+If a migration fails or causes issues:
+
+```bash
+# Stop the bot
+docker compose down
+
+# Restore from backup
+cp data/newsbot.sqlite.bak.YYYYMMDD data/newsbot.sqlite
+
+# Start the bot — it will detect the older schema and skip already-applied migrations
+docker compose up -d
+```
+
+### Retention
+
+Retention cleanup runs after every generation cycle (scheduled, manual
+`/digest`, `--once`, and dry-run). Posted posts, seen entries, and digests
+older than configurable thresholds are pruned:
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `NEWS_RETENTION_POSTED_DAYS` | 30 | Days to keep posted posts |
+| `NEWS_RETENTION_SEEN_DAYS` | 14 | Days to keep seen entries |
+| `NEWS_RETENTION_DIGEST_DAYS` | 90 | Days to keep old digests |
+
 ## Layout
 
 ```text
