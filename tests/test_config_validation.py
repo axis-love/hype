@@ -293,3 +293,105 @@ class TestTopicMatchingBoundary:
         item = {"title": "New language model architecture", "snippet": "", "raw_text": ""}
         bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
         assert bonus >= DEFAULT_TOPIC_BOOST["llm"]
+
+
+class TestNestedListValidation:
+    """Verify nested list member types are validated."""
+
+    def _make_config(self, **overrides) -> dict[str, Any]:
+        base = {
+            "sources": {}, "source_weights": {"hn": 1.2, "reddit": 1.0},
+            "topic_boost": {}, "lookback_hours": 48, "max_candidates": 20,
+            "max_final_news": 8, "min_score": 35.0, "source_quota": 4,
+            "item_prune_hours": 48, "llm_temperature": 0.4,
+            "llm_max_tokens_filter": 8000, "llm_max_tokens_digest": 8000,
+            "style_prompt": "",
+        }
+        base.update(overrides)
+        return base
+
+    def test_rss_feed_entry_not_dict(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"rss": {"feeds": ["not-a-dict"]}})
+        with pytest.raises(ValueError, match="rss.feeds.*must be a dict"):
+            _validate_config(cfg)
+
+    def test_reddit_subreddit_not_string(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"reddit": {"subreddits": [123, "valid"]}})
+        with pytest.raises(ValueError, match="subreddits.*must be a string"):
+            _validate_config(cfg)
+
+    def test_github_query_not_string(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"github": {"queries": [42]}})
+        with pytest.raises(ValueError, match="queries.*must be a string"):
+            _validate_config(cfg)
+
+    def test_hn_query_not_string(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"hackernews": {"queries": [42]}})
+        with pytest.raises(ValueError, match="queries.*must be a string"):
+            _validate_config(cfg)
+
+    def test_ph_topic_not_string(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"producthunt": {"topics": [123]}})
+        with pytest.raises(ValueError, match="topics.*must be a string"):
+            _validate_config(cfg)
+
+    def test_unknown_source_rejected(self):
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"twitter": {"limit": 10}})
+        with pytest.raises(ValueError, match="unknown source"):
+            _validate_config(cfg)
+
+    def test_nan_source_weight_rejected(self):
+        import math
+        from newsbot.config import _validate_config
+        cfg = self._make_config(source_weights={"hn": float("nan")})
+        with pytest.raises(ValueError, match="must be finite"):
+            _validate_config(cfg)
+
+    def test_nan_rss_feed_weight_rejected(self):
+        import math
+        from newsbot.config import _validate_config
+        cfg = self._make_config(sources={"rss": {"feeds": [
+            {"url": "http://x.com/rss", "name": "test", "weight": float("nan")}
+        ]}})
+        with pytest.raises(ValueError, match="must be finite"):
+            _validate_config(cfg)
+
+
+class TestRuntimeEnvValidation:
+    """Verify numeric env vars are validated at startup."""
+
+    def test_invalid_lm_timeout_rejected(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {
+            "LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test",
+            "LM_TIMEOUT": "not-a-number",
+        }, clear=True):
+            with pytest.raises(RuntimeError, match="LM_TIMEOUT must be numeric"):
+                _validate_llm_env()
+
+    def test_negative_lm_timeout_rejected(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {
+            "LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test",
+            "LM_TIMEOUT": "-5",
+        }, clear=True):
+            with pytest.raises(RuntimeError, match="LM_TIMEOUT must be positive"):
+                _validate_llm_env()
+
+    def test_non_numeric_admin_user_id_rejected(self):
+        from newsbot.main import _validate_llm_env
+        from unittest.mock import patch
+        with patch.dict("os.environ", {
+            "LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test",
+            "ADMIN_USER_ID": "not-numeric",
+        }, clear=True):
+            with pytest.raises(RuntimeError, match="ADMIN_USER_ID must be numeric"):
+                _validate_llm_env()
