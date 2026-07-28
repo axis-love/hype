@@ -9,6 +9,7 @@ any key via SQLite or the (future) admin path.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from core.settings_store import SettingsStore
@@ -234,6 +235,12 @@ def _validate_config(config: dict[str, Any]) -> None:
         errors.append("sources must be a dict")
     else:
         _VALID_SORT_VALUES = {"stars", "forks", "updated", "best-match", "help-wanted-issues"}
+        _VALID_SOURCE_KEYS = {"hackernews", "reddit", "github", "rss", "producthunt", "huggingface_papers"}
+
+        # Reject unknown source blocks.
+        for src_key in sources:
+            if src_key not in _VALID_SOURCE_KEYS:
+                errors.append(f"unknown source {src_key!r} — valid: {', '.join(sorted(_VALID_SOURCE_KEYS))}")
 
         # RSS feeds validation (expanded).
         rss_config = sources.get("rss")
@@ -248,7 +255,7 @@ def _validate_config(config: dict[str, Any]) -> None:
                     else:
                         for i, feed in enumerate(feeds):
                             if not isinstance(feed, dict):
-                                errors.append(f"rss.feeds[{i}] must be a dict")
+                                errors.append(f"rss.feeds[{i}] must be a dict, got {type(feed).__name__}")
                             elif not feed.get("url"):
                                 errors.append(f"rss.feeds[{i}] missing 'url'")
                             elif not feed.get("name"):
@@ -260,6 +267,8 @@ def _validate_config(config: dict[str, Any]) -> None:
                                         errors.append(f"rss.feeds[{i}].weight must be numeric, got {type(fw).__name__}")
                                     elif fw < 0:
                                         errors.append(f"rss.feeds[{i}].weight must be non-negative")
+                                    elif isinstance(fw, float) and (math.isnan(fw) or math.isinf(fw)):
+                                        errors.append(f"rss.feeds[{i}].weight must be finite, got {fw}")
 
         # HN config validation.
         hn_config = sources.get("hackernews")
@@ -277,8 +286,13 @@ def _validate_config(config: dict[str, Any]) -> None:
                 if hn_tags is not None and not isinstance(hn_tags, str):
                     errors.append("sources.hackernews.tags must be a string")
                 hn_queries = hn_config.get("queries")
-                if hn_queries is not None and not isinstance(hn_queries, list):
-                    errors.append("sources.hackernews.queries must be a list")
+                if hn_queries is not None:
+                    if not isinstance(hn_queries, list):
+                        errors.append("sources.hackernews.queries must be a list")
+                    else:
+                        for i, q in enumerate(hn_queries):
+                            if not isinstance(q, str):
+                                errors.append(f"sources.hackernews.queries[{i}] must be a string")
 
         # Reddit config validation.
         reddit_config = sources.get("reddit")
@@ -287,8 +301,13 @@ def _validate_config(config: dict[str, Any]) -> None:
                 errors.append("sources.reddit must be a dict")
             else:
                 subs = reddit_config.get("subreddits")
-                if subs is not None and not isinstance(subs, list):
-                    errors.append("sources.reddit.subreddits must be a list")
+                if subs is not None:
+                    if not isinstance(subs, list):
+                        errors.append("sources.reddit.subreddits must be a list")
+                    else:
+                        for i, sub in enumerate(subs):
+                            if not isinstance(sub, str):
+                                errors.append(f"sources.reddit.subreddits[{i}] must be a string, got {type(sub).__name__}")
                 rl = reddit_config.get("limit")
                 if rl is not None:
                     if not isinstance(rl, int):
@@ -303,8 +322,13 @@ def _validate_config(config: dict[str, Any]) -> None:
                 errors.append("sources.github must be a dict")
             else:
                 queries = gh_config.get("queries")
-                if queries is not None and not isinstance(queries, list):
-                    errors.append("sources.github.queries must be a list")
+                if queries is not None:
+                    if not isinstance(queries, list):
+                        errors.append("sources.github.queries must be a list")
+                    else:
+                        for i, q in enumerate(queries):
+                            if not isinstance(q, str):
+                                errors.append(f"sources.github.queries[{i}] must be a string, got {type(q).__name__}")
                 gl = gh_config.get("limit")
                 if gl is not None:
                     if not isinstance(gl, int):
@@ -328,8 +352,13 @@ def _validate_config(config: dict[str, Any]) -> None:
                     elif ph_limit <= 0 or ph_limit > 100:
                         errors.append("sources.producthunt.limit must be in [1, 100]")
                 ph_topics = ph_config.get("topics")
-                if ph_topics is not None and not isinstance(ph_topics, list):
-                    errors.append("sources.producthunt.topics must be a list")
+                if ph_topics is not None:
+                    if not isinstance(ph_topics, list):
+                        errors.append("sources.producthunt.topics must be a list")
+                    else:
+                        for i, topic in enumerate(ph_topics):
+                            if not isinstance(topic, str):
+                                errors.append(f"sources.producthunt.topics[{i}] must be a string")
 
         # HuggingFace Papers config validation.
         hf_config = sources.get("huggingface_papers")
@@ -343,6 +372,15 @@ def _validate_config(config: dict[str, Any]) -> None:
                         errors.append("sources.huggingface_papers.limit must be int")
                     elif hf_limit <= 0 or hf_limit > 100:
                         errors.append("sources.huggingface_papers.limit must be in [1, 100]")
+
+    # Source weights: reject NaN/Infinity.
+    for src, w in config["source_weights"].items():
+        if not isinstance(w, (int, float)):
+            errors.append(f"source_weights['{src}'] must be numeric, got {type(w).__name__}")
+        elif w <= 0:
+            errors.append(f"source_weights['{src}'] must be > 0")
+        elif isinstance(w, float) and (math.isnan(w) or math.isinf(w)):
+            errors.append(f"source_weights['{src}'] must be finite, got {w}")
 
     if errors:
         raise ValueError("Configuration validation failed:\n  " + "\n  ".join(errors))

@@ -81,6 +81,8 @@ def _validate_llm_env() -> None:
     This function catches missing env vars early instead of failing mid-generation.
     LM_API_KEY is required alongside LM_BASE and LM_MODEL — the LLM
     cannot authenticate without it.
+
+    Also validates numeric env vars for early failure detection.
     """
     errors: list[str] = []
     if not os.getenv("LM_BASE", "").strip():
@@ -89,6 +91,19 @@ def _validate_llm_env() -> None:
         errors.append("LM_MODEL is not set")
     if not os.getenv("LM_API_KEY", "").strip():
         errors.append("LM_API_KEY is not set")
+    # Validate numeric env vars.
+    lm_timeout = os.getenv("LM_TIMEOUT", "300")
+    try:
+        t = float(lm_timeout)
+        if t <= 0:
+            errors.append(f"LM_TIMEOUT must be positive, got {t}")
+    except ValueError:
+        errors.append(f"LM_TIMEOUT must be numeric, got {lm_timeout!r}")
+    # Validate ADMIN_USER_ID if set.
+    admin_id = os.getenv("ADMIN_USER_ID", "").strip()
+    if admin_id:
+        if not admin_id.lstrip("-").isdigit():
+            errors.append(f"ADMIN_USER_ID must be numeric, got {admin_id!r}")
     if errors:
         raise RuntimeError("LLM configuration error: " + "; ".join(errors))
 
