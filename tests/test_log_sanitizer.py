@@ -132,6 +132,71 @@ class TestSafeLogDict:
         assert "AAExxxxxxxxxxxxxxxxxxxx" not in safe["errors"][0]
         assert "***" in safe["errors"][0]
 
+    def test_short_configured_secret_redacted(self):
+        """Short configured secrets (<8 chars) must still be redacted."""
+        short_token = "Ab3:Z"  # 5 chars — below old MIN_SECRET_LENGTH=8
+        with patch.dict("os.environ", {"BOT_TOKEN": short_token}):
+            text = f"Auth failed for {short_token}"
+            redacted = redact_text(text)
+            assert short_token not in redacted
+            assert "***" in redacted
+
+    def test_short_secret_in_safe_log_dict(self):
+        """Short configured secrets must be redacted in safe_log_dict too."""
+        short_key = "K7"  # 2 chars
+        with patch.dict("os.environ", {"LM_API_KEY": short_key}):
+            data = {"error": f"Connection refused with key={short_key}"}
+            safe = safe_log_dict(data)
+            assert short_key not in safe["error"]
+
+    def test_nested_list_of_lists_with_dicts(self):
+        """safe_log_dict must recurse into nested lists (lists inside lists)."""
+        data = {
+            "exceptions": [
+                [{"api_key": "sk-secret123"}],
+                [{"token": "tok456"}],
+            ]
+        }
+        safe = safe_log_dict(data)
+        assert safe["exceptions"][0][0]["api_key"] == "***"
+        assert safe["exceptions"][1][0]["token"] == "***"
+
+    def test_deeply_nested_list_string_redacted(self):
+        """safe_log_dict must redact strings in deeply nested lists."""
+        data = {"layers": [[["https://api.telegram.org/bot123:AAExxxxxxxxxxxxxxxxxxxx/getMe"]]]}
+        safe = safe_log_dict(data)
+        assert "AAExxxxxxxxxxxxxxxxxxxx" not in safe["layers"][0][0][0]
+        assert "***" in safe["layers"][0][0][0]
+
+
+class TestProductHuntNoResponseBody:
+    """Verify Product Hunt collector does not log raw response bodies."""
+
+    def test_ph_http_error_no_body_in_log(self, caplog):
+        """PH collector must not include response body in error logs."""
+        import httpx
+        import asyncio
+        from newsbot.collectors.producthunt import _fetch_topic
+
+        sentinel = "SENTINEL_PH_RESPONSE_BODY_UNIQUE_XYZ"
+
+        class FakeResponse:
+            status_code = 400
+            text = f'{{"error":"{sentinel}"}}'
+
+        class FakeClient:
+            async def post(self, *a, **kw):
+                return FakeResponse()
+
+        client = FakeClient()
+        with caplog.at_level(logging.WARNING):
+            result = asyncio.run(_fetch_topic(client, topic="tech", limit=5, token="fake"))
+
+        assert result == []
+        for record in caplog.records:
+            assert sentinel not in record.getMessage(), \
+                f"PH response body leaked in log: {record.getMessage()}"
+
 
 class TestTelegramLoggerOutput:
     """Verify that captured log output does not contain bot tokens."""
