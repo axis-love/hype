@@ -42,33 +42,23 @@ def _split_for_telegram(text: str, *, limit: int = MAX_CHUNK_CHARS) -> list[str]
     Tag-aware: won't split inside HTML tags (<b>...</b>) or HTML entities
     (&amp;). Each chunk is independently valid HTML — all opened tags are
     closed at the chunk boundary and re-opened in the next chunk.
+
+    Tag-balancing overhead (closing + reopening tags) is accounted for
+    so the final chunk never exceeds the limit.
     """
     if len(text) <= limit:
         return [text]
 
+    # Reserve margin for tag-balancing overhead (closing + reopening tags).
+    # Each tag pair adds at most ~40 chars (e.g. </a><a href="...">).
+    _BALANCE_MARGIN = 100
+    effective_limit = limit - _BALANCE_MARGIN
+
     chunks: list[str] = []
     remaining = text
     while len(remaining) > limit:
-        # Prefer to split on the last blank line before the limit.
-        cut = remaining.rfind("\n\n", 0, limit)
-        if cut <= 0:
-            # Fall back to the last newline, else hard cut.
-            cut = remaining.rfind("\n", 0, limit)
-            if cut <= 0:
-                # Hard cut, but check if we're inside an HTML tag or entity.
-                cut = limit
-                # Don't split inside an HTML tag (e.g. <a href="...">).
-                tag_start = remaining.rfind("<", 0, cut)
-                tag_end = remaining.find(">", tag_start, cut + 50) if tag_start >= 0 else -1
-                if tag_start >= 0 and tag_end == -1:
-                    # We're inside a tag — split before it.
-                    cut = tag_start
-                # Don't split inside an HTML entity (e.g. &amp;).
-                elif "&" in remaining[cut - 10:cut]:
-                    amp_pos = remaining.rfind("&", cut - 10, cut)
-                    semi_pos = remaining.find(";", amp_pos, cut + 10) if amp_pos >= 0 else -1
-                    if amp_pos >= 0 and semi_pos == -1:
-                        cut = amp_pos
+        # Use the effective limit to leave room for tag balancing.
+        cut = _find_safe_cut(remaining, effective_limit)
         chunk_text = remaining[:cut].rstrip()
         remaining = remaining[cut:].lstrip("\n")
 
@@ -81,6 +71,40 @@ def _split_for_telegram(text: str, *, limit: int = MAX_CHUNK_CHARS) -> list[str]
     return chunks
 
 
+def _find_safe_cut(text: str, limit: int) -> int:
+    """Find a safe position to cut text at or before limit.
+
+    Avoids splitting inside HTML tags and HTML entities.
+    """
+    # Prefer to split on the last blank line before the limit.
+    cut = text.rfind("\n\n", 0, limit)
+    if cut <= 0:
+        # Fall back to the last newline, else hard cut.
+        cut = text.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+
+    # Don't split inside an HTML tag (e.g. <a href="...">).
+    tag_start = text.rfind("<", 0, cut)
+    if tag_start >= 0:
+        tag_end = text.find(">", tag_start, cut + 100)
+        if tag_end == -1 or tag_end >= cut:
+            # We're inside a tag — split before it.
+            cut = tag_start
+
+    # Don't split inside an HTML entity (e.g. &amp;, &#123;).
+    # Look backwards from cut for an & that doesn't have a matching ; before cut.
+    amp_pos = text.rfind("&", max(0, cut - 20), cut)
+    if amp_pos >= 0:
+        semi_pos = text.find(";", amp_pos, cut + 20)
+        if semi_pos == -1 or semi_pos >= cut:
+            # The entity starting at amp_pos is not complete before cut.
+            # Move cut to before the &.
+            cut = amp_pos
+
+    return cut
+
+
 def _balance_tags(chunk: str, remaining: str) -> tuple[str, str]:
     """Ensure chunk has balanced HTML tags by closing open tags and
     re-opening them in the remaining text.
@@ -89,40 +113,38 @@ def _balance_tags(chunk: str, remaining: str) -> tuple[str, str]:
 
     For <a> tags, the original opening tag (with attributes) is preserved
     so the continuation chunk has a matching <a ...> before </a>.
-    """
-    # Count open vs close tags in the chunk.
-    open_tags: list[str] = []
-    open_tag_strs: list[str] = []  # Full tag strings for re-opening (e.g. '<a href="...">')
-    for m in _OPEN_TAG_RE.finditer(chunk):
-        tag = m.group(1).lower()
-        open_tags.append(tag)
-        open_tag_strs.append(m.group(0))  # Full tag match including attributes
-    close_tags: list[str] = []
-    for m in _CLOSE_TAG_RE.finditer(chunk):
-        tag = m.group(1).lower()
-        close_tags.append(tag)
 
-    # Stack-based matching to find unclosed tags.
-    # Track both the tag name and the full opening tag string.
+    Tags are processed in token order (interleaved opens and closes),
+    not in separate passes — this ensures correct nesting and prevents
+    entity fragments from being emitted.
+    """
+    # Find all open and close tags in token order.
+    _ANY_TAG_RE = re.compile(
+        r"(?P<open><(b|i|u|s|a|code|pre)(?:\s[^>]*)?>)|(?P<close></(b|i|u|s|a|code|pre)>)",
+        re.IGNORECASE,
+    )
+
     stack: list[tuple[str, str]] = []  # (tag_name, full_open_tag)
-    si = 0
-    for tag in open_tags:
-        stack.append((tag, open_tag_strs[si]))
-        si += 1
-    for tag in close_tags:
-        if stack and stack[-1][0] == tag:
-            stack.pop()
-        elif tag in [s[0] for s in stack]:
-            # Close out of order — remove from stack
-            for i in range(len(stack) - 1, -1, -1):
-                if stack[i][0] == tag:
-                    stack.pop(i)
-                    break
+    for m in _ANY_TAG_RE.finditer(chunk):
+        if m.group("open"):
+            tag = m.group(2).lower()
+            stack.append((tag, m.group(0)))
+        elif m.group("close"):
+            tag = m.group(4).lower()
+            # Pop the matching open tag from the stack.
+            if stack and stack[-1][0] == tag:
+                stack.pop()
+            elif tag in [s[0] for s in stack]:
+                # Close out of order — remove from stack
+                for i in range(len(stack) - 1, -1, -1):
+                    if stack[i][0] == tag:
+                        stack.pop(i)
+                        break
 
     if not stack:
         return chunk, ""
 
-    # Close unclosed tags at the end of the chunk.
+    # Close unclosed tags at the end of the chunk (in reverse order).
     closing = "".join(f"</{tag}>" for tag, _ in reversed(stack))
     balanced_chunk = chunk + closing
 
@@ -132,7 +154,6 @@ def _balance_tags(chunk: str, remaining: str) -> tuple[str, str]:
     reopening_parts: list[str] = []
     for tag, full_tag in stack:
         if tag == "a":
-            # Re-open <a> with original attributes
             reopening_parts.append(full_tag)
         else:
             reopening_parts.append(f"<{tag}>")

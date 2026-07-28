@@ -185,6 +185,18 @@ class JobCoordinator:
             self._store.mark_posted(post["id"])
             log.info("posted pending post id=%d to Telegram", post["id"])
         except Exception as exc:
+            # Check if this was a partial delivery (some chunks sent).
+            # If so, mark as posted to prevent duplicate sends on retry.
+            # A partial delivery is better than duplicating early chunks.
+            exc_msg = str(exc)
+            if "already sent" in exc_msg or "partially delivered" in exc_msg:
+                log.warning(
+                    "post id=%d was partially delivered — marking as posted "
+                    "to prevent duplicate sends: %s",
+                    post["id"], redact_exception(exc),
+                )
+                self._store.mark_posted(post["id"])
+                return 1  # Still report failure — operator should investigate
             log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
             return 1
 
