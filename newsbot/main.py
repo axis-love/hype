@@ -16,7 +16,7 @@ In scheduled mode, two timers run concurrently:
       Telegram → mark as posted.
 
 A bot command handler (long polling) runs concurrently to accept
-admin commands (/setstyle, /style, /run, /status, /help).
+admin commands (/setstyle, /style, /digest, /post, /status, /help).
 """
 from __future__ import annotations
 
