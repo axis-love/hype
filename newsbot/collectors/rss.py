@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover
     feedparser = None
 
-from newsbot.collectors.base import new_candidate, strip_html, truncate, to_iso_utc
+from newsbot.collectors.base import Candidate, new_candidate, strip_html, truncate, to_iso_utc
 from newsbot.collectors._shared import get_shared_semaphore
 
 log = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 _RSS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
-async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
+async def _fetch_one(feed: dict[str, Any]) -> list[Candidate]:
     url = str(feed.get("url") or "").strip()
     if not url:
         return []
@@ -66,7 +66,7 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
         log.warning("RSS parse failed for %s url=%s: %s", source_name, url, exc)
         return []
 
-    items: list[dict[str, Any]] = []
+    items: list[Candidate] = []
     for entry in list(getattr(parsed, "entries", []) or [])[:10]:
         title = str(entry.get("title") or "").strip()
         if not title:
@@ -98,7 +98,7 @@ async def _fetch_one(feed: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
+async def collect(config: dict[str, Any]) -> list[Candidate]:
     """Fetch RSS candidates. *config* is the news.sources.rss block."""
     feeds = config.get("feeds") or []
     if not feeds:

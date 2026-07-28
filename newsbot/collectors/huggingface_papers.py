@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from newsbot.collectors.base import new_candidate, truncate
+from newsbot.collectors.base import Candidate, new_candidate, truncate
 from newsbot.collectors._shared import get_shared_semaphore
 
 log = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 HF_DAILY_PAPERS_URL = "https://huggingface.co/api/daily_papers"
 
 
-async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
+async def collect(config: dict[str, Any]) -> list[Candidate]:
     """Fetch HF Papers candidates. *config* is the news.sources.huggingface_papers block."""
     if not config:
         # enabled but empty config — still fetch defaults
@@ -49,7 +49,7 @@ async def collect(config: dict[str, Any]) -> list[dict[str, Any]]:
     # The endpoint returns a list of paper objects.
     papers = data if isinstance(data, list) else []
 
-    items: list[dict[str, Any]] = []
+    items: list[Candidate] = []
     for paper in papers[:limit]:
         if not isinstance(paper, dict):
             continue
