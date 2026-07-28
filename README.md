@@ -192,13 +192,14 @@ pytest
 
 - **Base image**: Pinned to `python:3.11.15-slim` in `Dockerfile`.
   Update by changing the version and verifying CI passes.
-- **Dependencies**: Declared in `pyproject.toml` with lower bounds.
-  The Docker build runs `pip freeze --all > constraints.txt` to capture
-  exact resolved versions. For fully reproducible builds, install from
-  `constraints.txt` instead of resolving fresh.
+- **Dependencies**: Exact pins in `pyproject.toml` (no lower-bound
+  ranges). `constraints.txt` captures all transitive dependencies with
+  exact versions. The Dockerfile installs with
+  `pip install . --constraint constraints.txt` to ensure the same
+  resolved versions every build — no fresh resolution.
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`) runs the test suite
   and verifies the Docker image builds and all modules import on every PR
-  and push to main.
+  and push to main. Actions are pinned to immutable commit SHAs.
 
 ## Docker
 
