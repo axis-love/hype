@@ -45,7 +45,7 @@ class TestCandidate:
 
     def test_to_dict_has_all_keys(self):
         """to_dict should include all keys that downstream code expects."""
-        c = Candidate(title="T", url="U", source="hn", source_name="HN")
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN")
         d = c.to_dict()
         expected_keys = {
             "title", "url", "source", "source_name", "source_type",
@@ -120,7 +120,7 @@ class TestCollectorCompat:
 
     def test_candidate_from_dict_handles_missing_fields(self):
         """from_dict should handle dicts with missing optional fields."""
-        d = {"title": "T", "url": "U", "source": "hn", "source_name": "HN"}
+        d = {"title": "T", "url": "https://example.com", "source": "hn", "source_name": "HN"}
         c = Candidate.from_dict(d)
         assert c.title == "T"
         assert c.upvotes is None
@@ -138,36 +138,36 @@ class TestCandidateValidation:
     def test_negative_engagement_rejected(self):
         """Negative engagement values should raise."""
         with pytest.raises(ValueError, match="upvotes"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", upvotes=-1)
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", upvotes=-1)
         with pytest.raises(ValueError, match="comments"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", comments=-5)
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", comments=-5)
         with pytest.raises(ValueError, match="stars"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", stars=-10)
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", stars=-10)
 
     def test_negative_score_rejected(self):
         with pytest.raises(ValueError, match="score"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", score=-1.0)
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", score=-1.0)
 
     def test_upvote_ratio_range(self):
         """upvote_ratio must be in [0, 1]."""
         with pytest.raises(ValueError, match="upvote_ratio"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", upvote_ratio=1.5)
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", upvote_ratio=1.5)
         with pytest.raises(ValueError, match="upvote_ratio"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", upvote_ratio=-0.1)
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", upvote_ratio=-0.1)
         # Valid values should work
-        Candidate(title="T", url="U", source="hn", source_name="HN", upvote_ratio=0.85)
+        Candidate(title="T", url="https://example.com", source="hn", source_name="HN", upvote_ratio=0.85)
 
     def test_new_candidate_validates_extra_fields(self):
         """new_candidate should raise on invalid engagement values (no catch-and-continue)."""
         with pytest.raises(ValueError, match="upvotes"):
             new_candidate(
-                title="T", url="U", source="hn", source_name="HN",
+                title="T", url="https://example.com", source="hn", source_name="HN",
                 upvotes=-5,  # negative engagement should raise
             )
 
     def test_penalty_zero_roundtrip(self):
         """penalty=0 should round-trip through to_dict/from_dict correctly."""
-        c = Candidate(title="T", url="U", source="hn", source_name="HN", penalty=0.0)
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN", penalty=0.0)
         d = c.to_dict()
         assert d["penalty"] == 0.0
         restored = Candidate.from_dict(d)
@@ -294,32 +294,32 @@ class TestSourceIdValidation:
     def test_known_sources_accepted(self):
         """All known source IDs should be accepted without error."""
         for src in ("hn", "reddit", "github", "producthunt", "rss", "huggingface_papers"):
-            c = Candidate(title="T", url="U", source=src, source_name="N")
+            c = Candidate(title="T", url="https://example.com", source=src, source_name="N")
             assert c.source == src
 
     def test_hackernews_alias_normalized_to_hn(self):
         """'hackernews' should be normalized to 'hn'."""
-        c = Candidate(title="T", url="U", source="hackernews", source_name="HN")
+        c = Candidate(title="T", url="https://example.com", source="hackernews", source_name="HN")
         assert c.source == "hn"
 
     def test_unknown_source_rejected(self):
         """Unknown source IDs should raise ValueError."""
         with pytest.raises(ValueError, match="Unknown.*source"):
-            Candidate(title="T", url="U", source="twitter", source_name="Twitter")
+            Candidate(title="T", url="https://example.com", source="twitter", source_name="Twitter")
 
     def test_empty_source_rejected(self):
         """Empty source should raise ValueError."""
         with pytest.raises(ValueError, match="source"):
-            Candidate(title="T", url="U", source="", source_name="N")
+            Candidate(title="T", url="https://example.com", source="", source_name="N")
 
     def test_new_candidate_rejects_unknown_source(self):
         """new_candidate should reject unknown source IDs."""
         with pytest.raises(ValueError, match="Unknown.*source"):
-            new_candidate(title="T", url="U", source="myspace", source_name="MySpace")
+            new_candidate(title="T", url="https://example.com", source="myspace", source_name="MySpace")
 
     def test_from_dict_normalizes_source(self):
         """from_dict should normalize source aliases."""
-        d = {"title": "T", "url": "U", "source": "hackernews", "source_name": "HN"}
+        d = {"title": "T", "url": "https://example.com", "source": "hackernews", "source_name": "HN"}
         c = Candidate.from_dict(d)
         assert c.source == "hn"
 
@@ -330,18 +330,18 @@ class TestNumericTypeValidation:
     def test_string_engagement_rejected(self):
         """String engagement values should raise ValueError."""
         with pytest.raises(ValueError, match="must be numeric"):
-            Candidate(title="T", url="U", source="hn", source_name="HN", upvotes="100")
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", upvotes="100")
 
     def test_nan_engagement_rejected(self):
         """NaN engagement values should raise ValueError."""
         with pytest.raises(ValueError, match="must be finite"):
-            Candidate(title="T", url="U", source="hn", source_name="HN",
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN",
                       upvotes=float("nan"))
 
     def test_inf_engagement_rejected(self):
         """Infinity engagement values should raise ValueError."""
         with pytest.raises(ValueError, match="must be finite"):
-            Candidate(title="T", url="U", source="hn", source_name="HN",
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN",
                       upvotes=float("inf"))
 
 
@@ -350,7 +350,7 @@ class TestZeroValuePreservation:
 
     def test_score_zero_roundtrip(self):
         """score=0 should round-trip without becoming default."""
-        c = Candidate(title="T", url="U", source="hn", source_name="HN", score=0.0)
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN", score=0.0)
         d = c.to_dict()
         assert d["score"] == 0.0
         restored = Candidate.from_dict(d)
@@ -358,7 +358,7 @@ class TestZeroValuePreservation:
 
     def test_crosspost_count_zero_roundtrip(self):
         """crosspost_count=0 should round-trip without becoming 1."""
-        c = Candidate(title="T", url="U", source="hn", source_name="HN", crosspost_count=0)
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN", crosspost_count=0)
         d = c.to_dict()
         assert d["crosspost_count"] == 0
         restored = Candidate.from_dict(d)
@@ -366,7 +366,7 @@ class TestZeroValuePreservation:
 
     def test_engagement_zero_accepted(self):
         """Zero engagement values should be accepted (not None)."""
-        c = Candidate(title="T", url="U", source="hn", source_name="HN",
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN",
                       upvotes=0, comments=0, stars=0)
         assert c.upvotes == 0
         assert c.comments == 0
@@ -421,7 +421,7 @@ class TestToDictFromDictRoundTrip:
 
     def test_to_dict_does_not_share_mutable_state(self):
         """to_dict should return a fresh dict, not share mutable references."""
-        c = Candidate(title="T", url="U", source="hn", source_name="HN",
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN",
                       raw_json={"k": "v"}, contributing_sources=["hn"])
         d1 = c.to_dict()
         d1["raw_json"]["k"] = "modified"
@@ -429,3 +429,218 @@ class TestToDictFromDictRoundTrip:
         d2 = c.to_dict()
         assert d2["raw_json"] == {"k": "v"}, "raw_json should not be shared"
         assert d2["contributing_sources"] == ["hn"], "contributing_sources should not be shared"
+
+
+class TestCandidatePipelineIntegration:
+    """End-to-end integration: real Candidate objects through the full pipeline."""
+
+    def test_candidate_through_llm_filter(self):
+        """Real Candidate objects must pass through llm_filter without TypeError."""
+        import json
+        from newsbot.summarizer import llm_filter
+
+        candidates = [
+            new_candidate(
+                title="AI Breakthrough",
+                url="https://example.com/ai",
+                source="hn", source_name="Hacker News",
+                upvotes=500, comments=100,
+                score=75.0,
+            ),
+            new_candidate(
+                title="GPU Released",
+                url="https://example.com/gpu",
+                source="github", source_name="GitHub",
+                stars=5000, forks=200,
+                score=60.0,
+            ),
+        ]
+
+        # Fake LLM client that returns valid JSON keeping both items.
+        class FakeLM:
+            async def generate(self, messages, **kwargs):
+                response = json.dumps({
+                    "items": [
+                        {"id": "c001", "keep": True, "title": "AI Breakthrough",
+                         "category": "AI", "importance": 9, "reason": "big", "short_summary": "s"},
+                        {"id": "c002", "keep": True, "title": "GPU Released",
+                         "category": "Hardware", "importance": 7, "reason": "good", "short_summary": "s"},
+                    ]
+                })
+                return response, "stop"
+
+        import asyncio
+        kept = asyncio.run(llm_filter(candidates, FakeLM()))
+        assert len(kept) == 2
+        assert kept[0]["title"] == "AI Breakthrough"
+        assert kept[0]["url"] == "https://example.com/ai"
+        assert kept[0]["importance"] == 9
+        assert kept[1]["url"] == "https://example.com/gpu"
+
+    def test_candidate_through_llm_style_posts(self):
+        """Real Candidate objects must pass through llm_style_posts without TypeError."""
+        import json
+        from newsbot.summarizer import llm_style_posts
+
+        candidates = [
+            new_candidate(
+                title="AI Breakthrough",
+                url="https://example.com/ai",
+                source="hn", source_name="Hacker News",
+                upvotes=500, comments=100,
+                candidate_id="c001",
+            ),
+        ]
+
+        class FakeLM:
+            async def generate(self, messages, **kwargs):
+                response = json.dumps({
+                    "posts": [
+                        {"id": "c001", "title": "AI Post", "body": "AI body text"},
+                    ]
+                })
+                return response, "stop"
+
+        import asyncio
+        posts = asyncio.run(llm_style_posts(candidates, FakeLM()))
+        assert len(posts) == 1
+        assert posts[0]["url"] == "https://example.com/ai"
+        assert posts[0]["title"] == "AI Post"
+        assert posts[0]["body"] == "AI body text"
+
+    def test_full_pipeline_candidate_through_dedupe_scoring_summarizer(self):
+        """Full pipeline: Candidate → dedupe → scoring → llm_filter → llm_style_posts."""
+        import json
+        from newsbot.dedupe import dedupe_and_merge
+        from newsbot.scoring import score_all
+        from newsbot.config import DEFAULT_SOURCE_WEIGHTS
+        from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
+        import asyncio
+
+        # Two candidates from different sources with same URL (should merge).
+        candidates = [
+            new_candidate(
+                title="AI Breakthrough", url="https://example.com/ai",
+                source="hn", source_name="Hacker News", upvotes=500, comments=100,
+            ),
+            new_candidate(
+                title="AI Breakthrough", url="https://example.com/ai",
+                source="reddit", source_name="r/MachineLearning", upvotes=300, comments=50,
+            ),
+        ]
+
+        # 1. Dedupe
+        deduped = dedupe_and_merge(candidates)
+        assert len(deduped) == 1
+        assert deduped[0]["crosspost_count"] == 2
+
+        # 2. Score
+        cfg = {"source_weights": DEFAULT_SOURCE_WEIGHTS, "topic_boost": {}, "lookback_hours": 48}
+        scored = score_all(deduped, cfg)
+        assert scored[0]["score"] > 0
+
+        # 3. LLM filter
+        class FakeLM:
+            async def generate(self, messages, **kwargs):
+                response = json.dumps({
+                    "items": [
+                        {"id": "c001", "keep": True, "title": "AI Breakthrough",
+                         "category": "AI", "importance": 9, "reason": "big", "short_summary": "s"},
+                    ]
+                })
+                return response, "stop"
+
+        kept = asyncio.run(llm_filter(scored, FakeLM()))
+        assert len(kept) == 1
+
+        # 4. Select diverse
+        final = select_diverse_top_items(kept, 8)
+        assert len(final) == 1
+
+        # 5. LLM style
+        class FakeStyleLM:
+            async def generate(self, messages, **kwargs):
+                response = json.dumps({
+                    "posts": [
+                        {"id": "c001", "title": "AI Post", "body": "Body text"},
+                    ]
+                })
+                return response, "stop"
+
+        posts = asyncio.run(llm_style_posts(final, FakeStyleLM()))
+        assert len(posts) == 1
+        assert posts[0]["url"] == "https://example.com/ai"
+
+
+class TestCandidateBoolRejection:
+    """Verify booleans are rejected for numeric fields."""
+
+    def test_bool_upvotes_rejected(self):
+        with pytest.raises(ValueError, match="bool"):
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", upvotes=True)
+
+    def test_bool_score_rejected(self):
+        with pytest.raises(ValueError, match="score"):
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN", score=True)
+
+    def test_bool_from_dict_rejected(self):
+        d = {"title": "T", "url": "https://example.com", "source": "hn", "source_name": "HN", "upvotes": True}
+        with pytest.raises(ValueError, match="bool"):
+            Candidate.from_dict(d)
+
+
+class TestCandidateStringNumericRejection:
+    """Verify string numeric values are rejected in from_dict."""
+
+    def test_string_upvotes_from_dict_rejected(self):
+        d = {"title": "T", "url": "https://example.com", "source": "hn", "source_name": "HN", "upvotes": "100"}
+        with pytest.raises(ValueError, match="must be numeric"):
+            Candidate.from_dict(d)
+
+    def test_string_score_from_dict_rejected(self):
+        d = {"title": "T", "url": "https://example.com", "source": "hn", "source_name": "HN", "score": "42.5"}
+        with pytest.raises(ValueError, match="must be numeric"):
+            Candidate.from_dict(d)
+
+
+class TestCandidateTimestampValidation:
+    """Verify invalid timestamps are rejected, not silently swallowed."""
+
+    def test_invalid_timestamp_rejected(self):
+        with pytest.raises(ValueError, match="must be valid ISO 8601"):
+            Candidate(title="T", url="https://example.com", source="hn", source_name="HN",
+                      published_at="not-a-date")
+
+    def test_empty_timestamp_allowed(self):
+        """Empty/None timestamps should be allowed (optional field)."""
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN", published_at=None)
+        assert c.published_at is None
+
+    def test_valid_timestamp_accepted(self):
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN",
+                      published_at="2026-07-15T10:00:00+00:00")
+        assert c.published_at == "2026-07-15T10:00:00+00:00"
+
+
+class TestCandidateSetitemValidation:
+    """Verify __setitem__ rejects unknown fields but allows known and internal."""
+
+    def test_setitem_rejects_unknown_field(self):
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN")
+        with pytest.raises(ValueError, match="typo"):
+            c["typo_field"] = 1
+
+    def test_setitem_allows_known_field(self):
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN")
+        c["importance"] = 8
+        assert c.importance == 8
+
+    def test_setitem_allows_internal_field(self):
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN")
+        c["_per_source_eng"] = {"hn": {"upvotes": 100}}
+        assert c._per_source_eng == {"hn": {"upvotes": 100}}
+
+    def test_setitem_rejects_non_string_key(self):
+        c = Candidate(title="T", url="https://example.com", source="hn", source_name="HN")
+        with pytest.raises(TypeError, match="must be string"):
+            c[0] = "value"
