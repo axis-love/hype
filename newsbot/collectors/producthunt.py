@@ -61,7 +61,7 @@ async def _fetch_topic(client: httpx.AsyncClient, *, topic: str, limit: int, tok
             headers=headers,
         )
         if r.status_code >= 400:
-            log.warning("PH fetch failed topic=%r status=%s body=%s", topic, r.status_code, r.text[:200])
+            log.warning("PH fetch failed topic=%r status=%s", topic, r.status_code)
             return []
         data = r.json()
     except Exception as exc:

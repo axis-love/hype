@@ -32,11 +32,12 @@ def _get_configured_secrets() -> list[str]:
 
     These are redacted by exact string replacement so arbitrary
     high-entropy keys without recognised prefixes are still caught.
+    No minimum length threshold — even short secrets are redacted.
     """
     secrets: list[str] = []
     for var in _SECRET_ENV_VARS:
         val = os.environ.get(var, "").strip()
-        if val and len(val) >= 8:
+        if val:
             secrets.append(val)
     return secrets
 
@@ -102,11 +103,23 @@ def redact_exception(exc: BaseException) -> str:
     return redact_text(msg, max_length=500)
 
 
+def _safe_log_value(v: Any, sensitive_keys: set[str]) -> Any:
+    """Recursively redact a value: dicts, lists, and strings."""
+    if isinstance(v, dict):
+        return safe_log_dict(v, sensitive_keys=sensitive_keys)
+    elif isinstance(v, list):
+        return [_safe_log_value(item, sensitive_keys) for item in v]
+    elif isinstance(v, str):
+        return redact_text(v, max_length=200)
+    else:
+        return v
+
+
 def safe_log_dict(data: dict[str, Any], *, sensitive_keys: set[str] | None = None) -> dict[str, Any]:
     """Return a copy of a dict with sensitive values redacted.
 
     Default sensitive keys: token, api_key, secret, password, authorization.
-    Recursively redacts nested dicts and lists.
+    Recursively redacts nested dicts and lists (including nested lists).
     """
     if sensitive_keys is None:
         sensitive_keys = {"token", "api_key", "secret", "password", "authorization",
@@ -116,19 +129,6 @@ def safe_log_dict(data: dict[str, Any], *, sensitive_keys: set[str] | None = Non
     for k, v in data.items():
         if k.lower() in sensitive_keys:
             safe[k] = "***"
-        elif isinstance(v, dict):
-            safe[k] = safe_log_dict(v, sensitive_keys=sensitive_keys)
-        elif isinstance(v, list):
-            safe[k] = [
-                safe_log_dict(item, sensitive_keys=sensitive_keys)
-                if isinstance(item, dict)
-                else redact_text(item, max_length=200)
-                if isinstance(item, str)
-                else item
-                for item in v
-            ]
-        elif isinstance(v, str):
-            safe[k] = redact_text(v, max_length=200)
         else:
-            safe[k] = v
+            safe[k] = _safe_log_value(v, sensitive_keys)
     return safe
