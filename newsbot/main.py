@@ -79,12 +79,16 @@ def _validate_llm_env() -> None:
 
     In scheduled mode, collectors run before the LLM client is built.
     This function catches missing env vars early instead of failing mid-generation.
+    LM_API_KEY is required alongside LM_BASE and LM_MODEL — the LLM
+    cannot authenticate without it.
     """
     errors: list[str] = []
     if not os.getenv("LM_BASE", "").strip():
         errors.append("LM_BASE is not set")
     if not os.getenv("LM_MODEL", "").strip():
         errors.append("LM_MODEL is not set")
+    if not os.getenv("LM_API_KEY", "").strip():
+        errors.append("LM_API_KEY is not set")
     if errors:
         raise RuntimeError("LLM configuration error: " + "; ".join(errors))
 

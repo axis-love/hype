@@ -205,6 +205,13 @@ def _validate_config(config: dict[str, Any]) -> None:
     elif config["llm_max_tokens_digest"] <= 0:
         errors.append("llm_max_tokens_digest must be > 0")
 
+    # min_score range check (0.0-100.0).
+    min_score = config.get("min_score", 0.0)
+    if not isinstance(min_score, (int, float)):
+        errors.append(f"min_score must be numeric, got {type(min_score).__name__}")
+    elif not (0.0 <= float(min_score) <= 100.0):
+        errors.append(f"min_score must be in [0.0, 100.0], got {min_score}")
+
     # Source weights validation.
     for src, w in config["source_weights"].items():
         if not isinstance(w, (int, float)):
@@ -212,11 +219,22 @@ def _validate_config(config: dict[str, Any]) -> None:
         elif w <= 0:
             errors.append(f"source_weights['{src}'] must be > 0")
 
+    # topic_boost validation: keys should be known source names or topic keys,
+    # values must be numeric and non-negative.
+    valid_topic_keys = set(DEFAULT_TOPIC_BOOST.keys()) | set(config.get("source_weights", {}).keys())
+    for key, val in (config.get("topic_boost") or {}).items():
+        if not isinstance(val, (int, float)):
+            errors.append(f"topic_boost['{key}'] must be numeric, got {type(val).__name__}")
+        elif val < 0:
+            errors.append(f"topic_boost['{key}'] must be >= 0")
+
     # Nested source config validation.
     sources = config.get("sources") or {}
     if not isinstance(sources, dict):
         errors.append("sources must be a dict")
     else:
+        _VALID_SORT_VALUES = {"stars", "forks", "updated", "best-match", "help-wanted-issues"}
+
         # RSS feeds validation (expanded).
         rss_config = sources.get("rss")
         if rss_config is not None:
@@ -237,13 +255,30 @@ def _validate_config(config: dict[str, Any]) -> None:
                                 errors.append(f"rss.feeds[{i}] missing 'name'")
                             else:
                                 fw = feed.get("weight")
-                                if fw is not None and not isinstance(fw, (int, float)):
-                                    errors.append(f"rss.feeds[{i}].weight must be numeric, got {type(fw).__name__}")
+                                if fw is not None:
+                                    if not isinstance(fw, (int, float)):
+                                        errors.append(f"rss.feeds[{i}].weight must be numeric, got {type(fw).__name__}")
+                                    elif fw < 0:
+                                        errors.append(f"rss.feeds[{i}].weight must be non-negative")
 
         # HN config validation.
         hn_config = sources.get("hackernews")
-        if hn_config is not None and not isinstance(hn_config, dict):
-            errors.append("sources.hackernews must be a dict")
+        if hn_config is not None:
+            if not isinstance(hn_config, dict):
+                errors.append("sources.hackernews must be a dict")
+            else:
+                hn_limit = hn_config.get("limit")
+                if hn_limit is not None:
+                    if not isinstance(hn_limit, int):
+                        errors.append("sources.hackernews.limit must be int")
+                    elif hn_limit <= 0 or hn_limit > 100:
+                        errors.append("sources.hackernews.limit must be in [1, 100]")
+                hn_tags = hn_config.get("tags")
+                if hn_tags is not None and not isinstance(hn_tags, str):
+                    errors.append("sources.hackernews.tags must be a string")
+                hn_queries = hn_config.get("queries")
+                if hn_queries is not None and not isinstance(hn_queries, list):
+                    errors.append("sources.hackernews.queries must be a list")
 
         # Reddit config validation.
         reddit_config = sources.get("reddit")
@@ -255,8 +290,11 @@ def _validate_config(config: dict[str, Any]) -> None:
                 if subs is not None and not isinstance(subs, list):
                     errors.append("sources.reddit.subreddits must be a list")
                 rl = reddit_config.get("limit")
-                if rl is not None and not isinstance(rl, int):
-                    errors.append("sources.reddit.limit must be int")
+                if rl is not None:
+                    if not isinstance(rl, int):
+                        errors.append("sources.reddit.limit must be int")
+                    elif rl <= 0 or rl > 100:
+                        errors.append("sources.reddit.limit must be in [1, 100]")
 
         # GitHub config validation.
         gh_config = sources.get("github")
@@ -268,8 +306,43 @@ def _validate_config(config: dict[str, Any]) -> None:
                 if queries is not None and not isinstance(queries, list):
                     errors.append("sources.github.queries must be a list")
                 gl = gh_config.get("limit")
-                if gl is not None and not isinstance(gl, int):
-                    errors.append("sources.github.limit must be int")
+                if gl is not None:
+                    if not isinstance(gl, int):
+                        errors.append("sources.github.limit must be int")
+                    elif gl <= 0 or gl > 100:
+                        errors.append("sources.github.limit must be in [1, 100]")
+                sort_val = gh_config.get("sort")
+                if sort_val is not None and sort_val not in _VALID_SORT_VALUES:
+                    errors.append(f"sources.github.sort must be one of {_VALID_SORT_VALUES}, got {sort_val!r}")
+
+        # Product Hunt config validation.
+        ph_config = sources.get("producthunt")
+        if ph_config is not None:
+            if not isinstance(ph_config, dict):
+                errors.append("sources.producthunt must be a dict")
+            else:
+                ph_limit = ph_config.get("limit")
+                if ph_limit is not None:
+                    if not isinstance(ph_limit, int):
+                        errors.append("sources.producthunt.limit must be int")
+                    elif ph_limit <= 0 or ph_limit > 100:
+                        errors.append("sources.producthunt.limit must be in [1, 100]")
+                ph_topics = ph_config.get("topics")
+                if ph_topics is not None and not isinstance(ph_topics, list):
+                    errors.append("sources.producthunt.topics must be a list")
+
+        # HuggingFace Papers config validation.
+        hf_config = sources.get("huggingface_papers")
+        if hf_config is not None:
+            if not isinstance(hf_config, dict):
+                errors.append("sources.huggingface_papers must be a dict")
+            else:
+                hf_limit = hf_config.get("limit")
+                if hf_limit is not None:
+                    if not isinstance(hf_limit, int):
+                        errors.append("sources.huggingface_papers.limit must be int")
+                    elif hf_limit <= 0 or hf_limit > 100:
+                        errors.append("sources.huggingface_papers.limit must be in [1, 100]")
 
     if errors:
         raise ValueError("Configuration validation failed:\n  " + "\n  ".join(errors))
