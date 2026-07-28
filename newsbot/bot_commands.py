@@ -54,20 +54,35 @@ class BotCommandHandler:
         self._offset = 0  # getUpdates offset for ack
         self._client = httpx.AsyncClient(timeout=POLL_TIMEOUT + 10)
 
-    async def _send(self, chat_id: int, text: str) -> None:
-        """Send a message to a chat."""
+    async def _send(self, chat_id: int, text: str) -> bool:
+        """Send a message to a chat. Returns True on success, False on failure."""
         url = f"{BOT_API_BASE}/bot{self.bot_token}/sendMessage"
         # Split long messages at 4000 chars (Bot API limit is 4096).
         for i in range(0, len(text), 4000):
             chunk = text[i : i + 4000]
             try:
-                await self._client.post(url, json={
+                r = await self._client.post(url, json={
                     "chat_id": chat_id,
                     "text": chunk,
                     "parse_mode": "",
                 })
             except Exception as exc:
                 log.warning("bot command reply failed: %s", redact_exception(exc))
+                return False
+            # Validate HTTP status.
+            if r.status_code >= 400:
+                log.warning("bot command reply failed: status=%d", r.status_code)
+                return False
+            # Validate Telegram ok field.
+            try:
+                data = r.json()
+                if not data.get("ok"):
+                    log.warning("bot command reply: Telegram returned ok=false")
+                    return False
+            except Exception:
+                log.warning("bot command reply: invalid JSON response")
+                return False
+        return True
 
     def _is_admin(self, user_id: int) -> bool:
         return str(user_id) == self.admin_user_id
