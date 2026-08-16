@@ -79,11 +79,16 @@ class TestDocumentationCorrectness:
         required_vars = [
             "BOT_TOKEN", "NEWS_CHANNEL_ID", "LM_BASE", "LM_MODEL",
             "LM_API_KEY", "LM_TIMEOUT", "PH_API_KEY", "GITHUB_TOKEN",
-            "NEWS_INTERVAL_HOURS", "NEWS_POST_INTERVAL_MINUTES",
+            "NEWS_TZ", "NEWS_GEN_HOURS", "NEWS_STORE_CAP",
+            "NEWS_TEMP_FLOOR", "NEWS_THRESHOLD_RATIO",
+            "NEWS_MERGE_BONUS", "NEWS_MERGE_CAP",
             "ADMIN_USER_ID", "NEWS_DB",
         ]
         for var in required_vars:
             assert var in content, f".env.example missing {var}"
+        # v1 interval vars were replaced by wall-clock slots.
+        assert "NEWS_INTERVAL_HOURS" not in content
+        assert "NEWS_POST_INTERVAL_MINUTES" not in content
 
     def test_docker_env_example_has_all_required_vars(self):
         """deploy/docker/env.example should include all required vars."""
@@ -91,11 +96,15 @@ class TestDocumentationCorrectness:
             content = f.read()
         required_vars = [
             "BOT_TOKEN", "NEWS_CHANNEL_ID", "LM_BASE", "LM_MODEL",
-            "NEWS_INTERVAL_HOURS", "NEWS_POST_INTERVAL_MINUTES",
+            "NEWS_TZ", "NEWS_GEN_HOURS", "NEWS_STORE_CAP",
+            "NEWS_TEMP_FLOOR", "NEWS_THRESHOLD_RATIO",
+            "NEWS_MERGE_BONUS", "NEWS_MERGE_CAP",
             "ADMIN_USER_ID",
         ]
         for var in required_vars:
             assert var in content, f"deploy/docker/env.example missing {var}"
+        assert "NEWS_INTERVAL_HOURS" not in content
+        assert "NEWS_POST_INTERVAL_MINUTES" not in content
 
     def test_readme_documents_digest_not_run(self):
         """README should document /digest and /post, not obsolete /run."""
@@ -112,21 +121,23 @@ class TestDocumentationCorrectness:
             content = f.read()
         assert "/v1" in content, "README should mention LM_BASE includes /v1"
 
-    def test_readme_no_one_shot_zero(self):
-        """README should not say 0 = one-shot for NEWS_INTERVAL_HOURS."""
+    def test_readme_no_interval_vars(self):
+        """README should document the slot-based schedule, not v1 intervals."""
         with open("README.md") as f:
             content = f.read()
+        assert "NEWS_GEN_HOURS" in content, "README should document NEWS_GEN_HOURS"
+        assert "NEWS_TZ" in content, "README should document NEWS_TZ"
+        assert "NEWS_INTERVAL_HOURS" not in content, "README should not document removed NEWS_INTERVAL_HOURS"
+        assert "NEWS_POST_INTERVAL_MINUTES" not in content, "README should not document removed NEWS_POST_INTERVAL_MINUTES"
         # The old documentation said "0 = one-shot" which is wrong.
-        # 0 causes 60s polling, not one-shot. --once is the one-shot flag.
         assert "0 = one-shot" not in content, "README should not say 0 = one-shot"
-        assert "0 = every 60s" in content, "README should say 0 = every 60s"
 
     def test_env_example_no_one_shot_zero(self):
-        """.env.example should not say 0 = one-shot for NEWS_INTERVAL_HOURS."""
+        """.env.example should not say 0 = one-shot."""
         with open(".env.example") as f:
             content = f.read()
         assert "0 for one-shot" not in content, ".env.example should not say 0 for one-shot"
-        assert "0 = every 60s" in content, ".env.example should say 0 = every 60s"
+        assert "0 = one-shot" not in content, ".env.example should not say 0 = one-shot"
 
     def test_no_run_command_in_any_source_or_docs(self):
         """Scan ALL documentation and source files for /run command references.
