@@ -21,6 +21,7 @@ source.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from typing import Any
@@ -179,6 +180,57 @@ def _github_repo_key(item: dict[str, Any]) -> str:
             return full_name
     # Fall back to title (we set title=full_name in the collector).
     return str(item.get("title") or "").strip().lower()
+
+
+def _row_github_repo_key(url: Any) -> str:
+    """GitHub repo identity for a STORE ROW, derived from its URL.
+
+    Store rows are medium-neutral and carry no `source` field, so
+    `_github_repo_key` (candidate-side) cannot apply. Instead the row's URL
+    is parsed: any github.com host (www./api./raw. etc.) with an
+    owner/repo path yields the lowercased "owner/repo" key. Mirrors the
+    candidate key: full_name is lowercased, so "Owner/Repo" == "owner/repo".
+    Non-GitHub URLs and paths without a full owner/repo return "".
+    """
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    try:
+        parts = urlsplit(s)
+    except ValueError:
+        return ""
+    host = (parts.netloc or "").lower()
+    host = host.removeprefix("www.")
+    if host != "github.com" and not host.endswith(".github.com"):
+        return ""
+    segments = [seg for seg in parts.path.split("/") if seg]
+    if len(segments) < 2:
+        return ""
+    owner, repo = segments[0], segments[1]
+    repo = repo.removesuffix(".git")
+    if not owner or not repo:
+        return ""
+    return f"{owner}/{repo}".lower()
+
+
+def _merged_urls_list(row: dict[str, Any]) -> list[str]:
+    """Parse a store row's merged_urls JSON string into a list of URLs.
+
+    merged_urls is stored as a JSON list string (see db.merge_into_store_row).
+    Malformed JSON, missing values, non-list payloads, and non-string entries
+    are all tolerated — they yield an empty list so matching falls through
+    to the other identity checks instead of crashing.
+    """
+    raw = row.get("merged_urls")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [entry for entry in parsed if isinstance(entry, str)]
 
 
 def _fuzzy_ratio(a: str, b: str) -> float:
@@ -404,3 +456,67 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         item.pop("_merged_published_at", None)
 
     return result
+
+
+def match_candidate_to_store(candidate: dict, store_rows: list[dict]) -> dict | None:
+    """Return the store row matching this candidate, or None.
+
+    Identity checks run in the same order and with the same priority as
+    `dedupe_and_merge` — at check level across ALL rows (a URL match on any
+    row beats a title match on any row), first match wins:
+
+      1. GitHub repo key — candidate via `_github_repo_key` (requires
+         source="github"), store rows via `_row_github_repo_key` (derived
+         from the row URL, since store rows carry no source field).
+      2. Canonical URL (`_canonical_url`) against row['url'] AND each entry
+         of the row's merged_urls JSON string.
+      3. Normalized title (`_normalize_title`) exact match on row['title'].
+      4. Fuzzy title similarity >= FUZZY_THRESHOLD against row titles —
+         same scan semantics as dedupe_and_merge: best ratio tracked across
+         rows, early exit once the threshold is met.
+
+    All helpers are shared with `dedupe_and_merge`; no identity logic is
+    duplicated here. Malformed merged_urls JSON degrades to an empty list
+    and never raises.
+    """
+    if not store_rows:
+        return None
+
+    gh_key = _github_repo_key(candidate)
+    if gh_key:
+        for row in store_rows:
+            if gh_key == _row_github_repo_key(row.get("url")):
+                return row
+
+    canon = _canonical_url(candidate.get("url"))
+    if canon:
+        for row in store_rows:
+            if canon == _canonical_url(row.get("url")):
+                return row
+            for merged_url in _merged_urls_list(row):
+                if canon == _canonical_url(merged_url):
+                    return row
+
+    norm_title = _normalize_title(candidate.get("title"))
+    if norm_title:
+        for row in store_rows:
+            if norm_title == _normalize_title(row.get("title")):
+                return row
+
+        # Fuzzy fallback (>0.90). Linear scan — the store is small (cap ~36).
+        best_row: dict | None = None
+        best_ratio = 0.0
+        for row in store_rows:
+            row_title = _normalize_title(row.get("title"))
+            if not row_title:
+                continue
+            ratio = _fuzzy_ratio(norm_title, row_title)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_row = row
+            if best_ratio >= FUZZY_THRESHOLD:
+                break
+        if best_row is not None and best_ratio >= FUZZY_THRESHOLD:
+            return best_row
+
+    return None

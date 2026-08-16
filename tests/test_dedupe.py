@@ -1,11 +1,15 @@
 """Tests for newsbot/dedupe.py — canonical URL, title fuzzy, GitHub repo, merge."""
 
+import json
+
 from newsbot.collectors.base import new_candidate
 from newsbot.dedupe import (
+    FUZZY_THRESHOLD,
     _canonical_url,
+    _merge_pair,
     _normalize_title,
     dedupe_and_merge,
-    _merge_pair,
+    match_candidate_to_store,
 )
 
 
@@ -383,3 +387,152 @@ def test_published_at_preserved_when_primary_switches():
     assert out[0]["source"] == "reddit"
     # But published_at should be the max (HN's newer timestamp).
     assert out[0]["published_at"] == "2026-07-28T12:00:00Z"
+
+
+# --- match_candidate_to_store (flow_001094, store matching, Task 4) ------
+
+
+def _store_row(row_id: int, title: str, url: str, *, merged_urls: str | None = None) -> dict:
+    """Minimal store row shape as returned by db.list_store_rows()."""
+    return {
+        "id": row_id,
+        "title": title,
+        "url": url,
+        "merge_count": 1,
+        "merged_urls": merged_urls,
+    }
+
+
+def test_match_store_same_url_with_tracking_params():
+    """Canonicalization strips utm_* / ref / fbclid etc — candidate with
+    tracking params matches a row stored with the bare URL."""
+    row = _store_row(1, "Tool X released", "https://example.com/post")
+    candidate = new_candidate(
+        title="Tool X released",
+        url="https://www.example.com/post?utm_source=x&utm_medium=y&ref=hn",
+        source="hn", source_name="HN",
+    )
+    assert match_candidate_to_store(candidate, [row]) is row
+
+
+def test_match_store_github_repo_key_with_different_urls():
+    """GitHub repo key matches when candidate URL AND title differ from the
+    row — only the repo identity (full_name vs row URL repo) can match."""
+    row = _store_row(1, "owner/repo", "https://github.com/owner/repo")
+    candidate = new_candidate(
+        title="Owner Repo (trending today)",
+        url="https://api.github.com/repos/owner/repo",
+        source="github", source_name="GitHub Trending",
+        raw_json={"full_name": "Owner/Repo"},
+    )
+    assert match_candidate_to_store(candidate, [row]) is row
+
+
+def test_match_store_fuzzy_title_above_threshold():
+    """Normalized titles differ (exact check fails) but fuzzy ratio > 90."""
+    row = _store_row(
+        1, "Researchers unveil new method for scaling language model training",
+        "https://a.com/story",
+    )
+    candidate = new_candidate(
+        title="Researchers unveil a new method for scaling language model training",
+        url="https://b.com/other", source="reddit", source_name="r/x",
+    )
+    # Sanity: ratio is above threshold but titles are not exactly equal.
+    from newsbot.dedupe import _fuzzy_ratio
+    ratio = _fuzzy_ratio(
+        _normalize_title(candidate["title"]), _normalize_title(row["title"])
+    )
+    assert _normalize_title(candidate["title"]) != _normalize_title(row["title"])
+    assert ratio > FUZZY_THRESHOLD
+    assert match_candidate_to_store(candidate, [row]) is row
+
+
+def test_match_store_no_false_positive_below_threshold():
+    """Distinct stories: URLs and titles differ, fuzzy ratio well below 90."""
+    row = _store_row(
+        1, "New GPU benchmark released for data centers", "https://a.com/gpu",
+    )
+    candidate = new_candidate(
+        title="New CPU cooler reviewed for quiet builds",
+        url="https://b.com/cpu", source="hn", source_name="HN",
+    )
+    assert match_candidate_to_store(candidate, [row]) is None
+
+
+def test_match_store_merged_urls_entry():
+    """Candidate matches a URL stored only in the merged_urls JSON string,
+    not in row['url'] — with a title that fails all other checks."""
+    row = _store_row(
+        1, "Breaking News", "https://example.com/original",
+        merged_urls=json.dumps(["https://example.com/alternate"]),
+    )
+    candidate = new_candidate(
+        title="Completely Different Title",
+        url="https://example.com/alternate?utm_source=x",
+        source="reddit", source_name="Reddit",
+    )
+    assert match_candidate_to_store(candidate, [row]) is row
+
+
+def test_match_store_no_match_returns_none():
+    rows = [
+        _store_row(1, "Story A", "https://a.com"),
+        _store_row(2, "Story B", "https://b.com"),
+    ]
+    candidate = new_candidate(
+        title="Something else entirely", url="https://c.com/other",
+        source="hn", source_name="HN",
+    )
+    assert match_candidate_to_store(candidate, rows) is None
+    # Empty store also yields None.
+    assert match_candidate_to_store(candidate, []) is None
+
+
+def test_match_store_malformed_merged_urls_falls_through():
+    """Bad merged_urls JSON must not crash; other identity checks still run."""
+    candidate_title = new_candidate(
+        title="Broken JSON Row Story", url="https://z.com/none",
+        source="hn", source_name="HN",
+    )
+    # Exact-title match still works despite malformed merged_urls.
+    row = _store_row(1, "Broken JSON Row Story", "https://a.com/story",
+                     merged_urls="{not valid json")
+    assert match_candidate_to_store(candidate_title, [row]) is row
+    # No identity match at all with malformed merged_urls -> None, no exception.
+    candidate_none = new_candidate(
+        title="Unrelated story", url="https://z.com/other",
+        source="hn", source_name="HN",
+    )
+    assert match_candidate_to_store(candidate_none, [row]) is None
+    # JSON that parses but is not a list of strings is tolerated too.
+    row2 = _store_row(2, "Some Story", "https://a.com/s",
+                      merged_urls=json.dumps({"not": "a list"}))
+    candidate_other = new_candidate(
+        title="Some Story", url="https://z.com/x", source="hn", source_name="HN",
+    )
+    assert match_candidate_to_store(candidate_other, [row2]) is row2
+
+
+def test_match_store_exact_title_match():
+    """Check 3: normalized-title exact match with distinct URLs."""
+    row = _store_row(1, "Exact Title Story", "https://a.com/x")
+    candidate = new_candidate(
+        title="  Exact   Title Story ", url="https://b.com/y",
+        source="reddit", source_name="Reddit",
+    )
+    assert match_candidate_to_store(candidate, [row]) is row
+
+
+def test_match_store_first_match_wins_by_check_order():
+    """Mirrors dedupe_and_merge: checks run at check level across all rows,
+    not row-by-row. Row 1 matches on exact title, but row 2 owns the
+    candidate's URL — the URL check (2) runs before the title check (3),
+    so row 2 wins."""
+    row1 = _store_row(1, "Unrelated title for row one", "https://a.com/x")
+    row2 = _store_row(2, "Unrelated title for row two", "https://b.com/y")
+    candidate = new_candidate(
+        title="Unrelated title for row one", url="https://b.com/y",
+        source="hn", source_name="HN",
+    )
+    assert match_candidate_to_store(candidate, [row1, row2]) is row2
