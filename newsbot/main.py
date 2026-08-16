@@ -5,15 +5,16 @@ Runs as a long-lived process inside Docker:
     python -m newsbot.main              # scheduled mode (default)
     python -m newsbot.main --once       # one-shot mode (dry runs, testing)
 
-In scheduled mode, two timers run concurrently:
+In scheduled mode, two wall-clock slot loops run concurrently
+(local time from NEWS_TZ, default Asia/Bangkok):
 
-  - Generation (every NEWS_INTERVAL_HOURS, default 8h):
-      collect → filter-seen → dedupe → score → LLM filter → LLM style
-      → store 8 individual posts in pending_posts table.
+  - Generation slots (NEWS_GEN_HOURS, default "5,17"):
+      collect → filter-seen → dedupe → score → LLM filter → store raw
+      candidates. Catch-up: a missed slot still fires once after downtime.
 
-  - Posting (every NEWS_POST_INTERVAL_MINUTES, default 60min):
-      pull the oldest unposted post from pending_posts → post to
-      Telegram → mark as posted.
+  - Post slots (every even hour, never backfilled):
+      pick the hottest candidate above the temperature threshold → LLM
+      style → post to Telegram → mark posted.
 
 A bot command handler (long polling) runs concurrently to accept
 admin commands (/setstyle, /style, /digest, /post, /status, /help).
@@ -39,6 +40,7 @@ from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
 from newsbot.bot_commands import BotCommandHandler
+from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot
 from newsbot.collectors import (
     hackernews as hn_collector,
     reddit as reddit_collector,
@@ -55,10 +57,6 @@ from newsbot.scoring import current_temperature, score_all
 from newsbot.summarizer import _assign_candidate_ids, llm_filter, llm_style_posts, select_diverse_top_items
 
 log = logging.getLogger(__name__)
-
-# Default intervals.
-DEFAULT_INTERVAL_HOURS = 8
-DEFAULT_POST_INTERVAL_MINUTES = 60
 
 
 def _build_lm_client() -> LMClient:
@@ -550,36 +548,39 @@ async def _scheduler_gen_iteration(
     coordinator: JobCoordinator,
     store: NewsStore,
     settings: SettingsStore,
-    gen_interval_s: float,
+    gen_hours: list[int],
     *,
+    now: datetime | None = None,
     timeout: float = 0,
 ) -> int:
-    """One iteration of the generation scheduler loop.
+    """One iteration of the wall-clock generation scheduler.
+
+    Slot-based: ``NEWS_GEN_HOURS`` names the hours (local wall clock) when a
+    digest must run. Slot key format ``YYYY-MM-DDTHH`` (local). A slot fires
+    once — the key is written to ``scheduler.last_gen_slot`` on success.
+
+    Catch-up: if the process was down (or crashed) past a scheduled hour,
+    the most recent due slot (``latest_due_gen_slot``) still fires exactly
+    once when the loop comes back. Failure / no-progress leaves the key
+    unset so the next tick retries the same slot.
 
     Returns:
-        0 — generation succeeded, timestamp advanced.
-        1 — generation failed, timestamp unchanged.
-        2 — generation skipped (already running), timestamp unchanged.
-        3 — generation no-progress, timestamp unchanged.
+        0 — idle (slot already consumed) or success.
+        1 — generation failed, slot NOT consumed.
+        2 — generation skipped (already running), slot NOT consumed.
+        3 — generation no-progress, slot NOT consumed.
 
     Runs retention cleanup regardless of outcome.
     """
-    last_gen_str = settings.get("scheduler", "last_gen_utc", default="") or ""
-    now = datetime.now(timezone.utc)
+    if now is None:
+        now = local_now()
+    due_slot = latest_due_gen_slot(now, gen_hours)
+    last_gen_slot = settings.get("scheduler", "last_gen_slot", default="") or ""
 
-    if last_gen_str:
-        try:
-            last_gen = datetime.fromisoformat(last_gen_str)
-            if last_gen.tzinfo is None:
-                last_gen = last_gen.replace(tzinfo=timezone.utc)
-            elapsed = (now - last_gen).total_seconds()
-            if elapsed < gen_interval_s:
-                log.debug("next generation in %.0fs", gen_interval_s - elapsed)
-                return 0  # not time yet — treat as idle success
-        except (ValueError, TypeError):
-            log.warning("invalid last_gen_utc: %s — generating now", last_gen_str)
+    if last_gen_slot == due_slot:
+        return 0  # this slot already ran — idle
 
-    log.info("generation cycle starting at %s", now.isoformat())
+    log.info("generation cycle starting (slot=%s, now=%s)", due_slot, now.isoformat())
     gen_success = False
     result = 1
     try:
@@ -602,11 +603,10 @@ async def _scheduler_gen_iteration(
         _run_retention(store)
 
     if gen_success:
-        now = datetime.now(timezone.utc)
-        settings.set("scheduler", "last_gen_utc", now.isoformat())
-        log.info("generation cycle complete")
+        settings.set("scheduler", "last_gen_slot", due_slot)
+        log.info("generation cycle complete (slot=%s)", due_slot)
     else:
-        log.warning("generation did not succeed — will retry on next tick (last_gen_utc unchanged)")
+        log.warning("generation did not succeed — will retry slot %s on next tick", due_slot)
 
     return 0 if gen_success else result
 
@@ -614,30 +614,29 @@ async def _scheduler_gen_iteration(
 async def _scheduler_post_iteration(
     coordinator: JobCoordinator,
     settings: SettingsStore,
-    post_interval_s: float,
+    *,
+    now: datetime | None = None,
 ) -> int:
-    """One iteration of the posting scheduler loop.
+    """One iteration of the wall-clock posting scheduler.
 
-    Returns:
-        0 — posting succeeded, timestamp advanced.
-        1 — posting failed, timestamp unchanged.
-        2 — posting skipped (already running), timestamp unchanged.
-        3 — no pending posts, timestamp unchanged.
+    Slot-based: post slots fall on even hours (local wall clock), key
+    ``YYYY-MM-DDTHH``. Never backfills: a slot missed during downtime is
+    gone once the hour ends. Consuming the slot:
+
+        success (0), empty store (3), threshold skip (4) → key written.
+        failure (1) or busy (2) → key NOT written → retry within the hour.
+
+    Returns the coordinator result code unchanged.
     """
-    last_post_str = settings.get("scheduler", "last_post_utc", default="") or ""
-    now = datetime.now(timezone.utc)
+    if now is None:
+        now = local_now()
+    slot = post_slot(now)
+    if slot is None:
+        return 0  # odd hour — no post slot
 
-    if last_post_str:
-        try:
-            last_post = datetime.fromisoformat(last_post_str)
-            if last_post.tzinfo is None:
-                last_post = last_post.replace(tzinfo=timezone.utc)
-            elapsed = (now - last_post).total_seconds()
-            if elapsed < post_interval_s:
-                log.debug("next post in %.0fs", post_interval_s - elapsed)
-                return 0  # not time yet — idle success
-        except (ValueError, TypeError):
-            pass  # run now
+    last_post_slot = settings.get("scheduler", "last_post_slot", default="") or ""
+    if last_post_slot == slot:
+        return 0  # this slot already ran — idle
 
     post_success = False
     result = 1
@@ -647,32 +646,31 @@ async def _scheduler_post_iteration(
             post_success = True
         elif result == 2:
             log.info("posting skipped — already in progress")
-        elif result == 3:
-            log.debug("no pending posts to deliver")
-        elif result == 4:
-            # Nothing hot enough — a healthy slot skip. The slot IS consumed
-            # (threshold skip), so advance last_post_utc to keep cadence.
+        elif result in (3, 4):
+            # Empty store / nothing hot enough — a healthy slot skip. The
+            # slot IS consumed (no retry storm; cadence preserved).
             post_success = True
+            log.debug("posting slot %s consumed by skip (code=%d)", slot, result)
         else:
             log.error("posting failed (code=%d)", result)
     except Exception as exc:
         log.error("posting cycle failed: %s", redact_exception(exc))
 
     if post_success:
-        now = datetime.now(timezone.utc)
-        settings.set("scheduler", "last_post_utc", now.isoformat())
+        settings.set("scheduler", "last_post_slot", slot)
     else:
-        log.warning("posting did not succeed — will retry on next tick (last_post_utc unchanged)")
+        log.warning("posting did not succeed — will retry slot %s within the hour", slot)
 
     return result
 
 
 async def _scheduled_loop(settings: SettingsStore) -> None:
-    """Long-running loop with concurrent generation + posting timers.
+    """Long-running loop with wall-clock slot-based scheduling.
 
-    Generation runs every NEWS_INTERVAL_HOURS (default 8).
-    Posting runs every NEWS_POST_INTERVAL_MINUTES (default 60).
-    Bot command handler polls Telegram getUpdates concurrently.
+    Generation fires at the hours named by ``NEWS_GEN_HOURS`` (default
+    ``"5,17"`` local time) with catch-up after downtime. Posting fires on
+    even hours, never backfilling. Bot command handler polls Telegram
+    getUpdates concurrently.
 
     All jobs go through a JobCoordinator that serializes generation and
     posting, preventing overlap between scheduled and manual commands.
@@ -681,18 +679,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     store = NewsStore(Path(db_path))
     coordinator = JobCoordinator(store, settings)
 
-    gen_interval_hours = float(
-        os.getenv("NEWS_INTERVAL_HOURS", "")
-        or settings.get("news", "schedule_interval_hours", default=DEFAULT_INTERVAL_HOURS)
-        or DEFAULT_INTERVAL_HOURS
-    )
-    post_interval_minutes = float(
-        os.getenv("NEWS_POST_INTERVAL_MINUTES", "")
-        or settings.get("news", "post_interval_minutes", default=DEFAULT_POST_INTERVAL_MINUTES)
-        or DEFAULT_POST_INTERVAL_MINUTES
-    )
-    gen_interval_s = gen_interval_hours * 3600
-    post_interval_s = post_interval_minutes * 60
+    gen_hours = gen_slots(os.getenv("NEWS_GEN_HOURS", "5,17"))
 
     # --- Bot command handler (optional) ---
     bot_token = os.getenv("BOT_TOKEN", "").strip()
@@ -727,16 +714,16 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 
         async def on_status() -> str:
             pending = store.count_pending()
-            last_gen = settings.get("scheduler", "last_gen_utc", default="") or ""
-            last_post = settings.get("scheduler", "last_post_utc", default="") or ""
+            last_gen_slot = settings.get("scheduler", "last_gen_slot", default="") or ""
+            last_post_slot = settings.get("scheduler", "last_post_slot", default="") or ""
             gen_status = "running" if coordinator.generation_running else "idle"
             post_status = "running" if coordinator.posting_running else "idle"
             return (
                 f"Pending posts: {pending}\n"
-                f"Last generation: {last_gen or 'never'}\n"
-                f"Last post: {last_post or 'never'}\n"
-                f"Generation: {gen_status} (interval: {gen_interval_hours:.1f}h)\n"
-                f"Posting: {post_status} (interval: {post_interval_minutes:.0f}min)"
+                f"Last generation slot: {last_gen_slot or 'never'}\n"
+                f"Last post slot: {last_post_slot or 'never'}\n"
+                f"Generation: {gen_status} (slots: {gen_hours})\n"
+                f"Posting: {post_status} (even hours)"
             )
 
         async def on_scores() -> str:
@@ -753,26 +740,20 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
         )
 
     async def generation_loop() -> None:
-        """Generation timer: runs the full pipeline on schedule.
-
-        Delegates to _scheduler_gen_iteration() for the bookkeeping logic.
-        """
-        log.info("generation timer started: interval=%.1fh", gen_interval_hours)
+        """Wall-clock generation scheduler (see _scheduler_gen_iteration)."""
+        log.info("generation scheduler started: slots=%s (%s)", gen_hours, local_now().tzinfo)
         while True:
             await _scheduler_gen_iteration(
-                coordinator, store, settings, gen_interval_s,
+                coordinator, store, settings, gen_hours,
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
     async def posting_loop() -> None:
-        """Posting timer: posts one pending post on schedule.
-
-        Delegates to _scheduler_post_iteration() for the bookkeeping logic.
-        """
-        log.info("posting timer started: interval=%.0fmin", post_interval_minutes)
+        """Wall-clock posting scheduler (see _scheduler_post_iteration)."""
+        log.info("posting scheduler started: even hours (%s)", local_now().tzinfo)
         while True:
-            await _scheduler_post_iteration(coordinator, settings, post_interval_s)
+            await _scheduler_post_iteration(coordinator, settings)
             await asyncio.sleep(30)
 
     tasks = [asyncio.create_task(generation_loop()), asyncio.create_task(posting_loop())]
@@ -831,8 +812,8 @@ def main() -> None:
         sys.exit(code)
 
     # Scheduled mode: needs BOT_TOKEN for posting. Without it, run once for testing.
-    if not os.getenv("BOT_TOKEN", "").strip() and not os.getenv("NEWS_INTERVAL_HOURS", "").strip():
-        log.info("no BOT_TOKEN and no NEWS_INTERVAL_HOURS — running once (dry-run mode)")
+    if not os.getenv("BOT_TOKEN", "").strip():
+        log.info("no BOT_TOKEN — running once (dry-run mode)")
         store = NewsStore(Path(db_path))
 
         async def _dry() -> int:
