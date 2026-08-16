@@ -413,3 +413,79 @@ async def llm_style_posts(
 
     log.info("LLM styler: %d items in, %d posts out", len(items), len(result))
     return result
+
+
+SUMMARY_SYSTEM = (
+    "You write the daily recap for a Telegram tech-news channel. "
+    "You receive the news items posted in the last 24 hours. Write ONE post: "
+    "a short headline and a body of 4-8 sentences that groups related items, "
+    "highlights the biggest story first, and ends with one lesser-known gem. "
+    "Same style rules as regular posts: no hype words, no emojis, plain text. "
+    "Return STRICT JSON: {\"title\": \"...\", \"body\": \"...\"}."
+)
+
+
+async def llm_daily_summary(
+    items: list[dict[str, Any]],
+    lm_client: Any,
+    *,
+    temperature: float = 0.5,
+    max_tokens: int = 4000,
+) -> dict[str, Any] | None:
+    """Write one recap post from the items posted in the last 24 hours.
+
+    Each item carries: title, category, url, snippet, score_at_queue, source.
+    Returns {"title": str, "body": str} or None on any LLM failure.
+    """
+    if not items:
+        return None
+
+    def item_block(item: dict[str, Any]) -> str:
+        lines = [f"Title: {item.get('title') or '(untitled)'}"]
+        if item.get("category"):
+            lines.append(f"   Category: {item['category']}")
+        if item.get("snippet"):
+            lines.append(f"   Summary: {item['snippet']}")
+        if item.get("source"):
+            lines.append(f"   Source: {item['source']}")
+        score = item.get("score_at_queue")
+        if score is not None:
+            lines.append(f"   Score at queue: {score}")
+        if item.get("url"):
+            lines.append(f"   URL: {item['url']}")
+        return "\n".join(lines)
+
+    user_body = "\n\n".join(item_block(item) for item in items)
+    messages = [
+        {"role": "system", "content": SUMMARY_SYSTEM},
+        {
+            "role": "user",
+            "content": f"Items posted in the last 24 hours ({len(items)}):\n\n{user_body}",
+        },
+    ]
+
+    raw_text, _ = await lm_client.generate(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    cleaned = strip_think(raw_text)
+    if not cleaned:
+        log.warning("LLM summarizer returned empty visible output")
+        return None
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        log.warning("LLM summarizer returned invalid JSON: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        log.warning("LLM summarizer JSON is not an object")
+        return None
+    title = str(data.get("title") or "").strip()
+    body = str(data.get("body") or "").strip()
+    if not title or not body:
+        log.warning("LLM summarizer returned empty title or body")
+        return None
+    return {"title": title, "body": body}

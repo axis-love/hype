@@ -28,7 +28,7 @@ import logging
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,7 @@ from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
 from newsbot.bot_commands import BotCommandHandler
-from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot
+from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot, summary_day
 from newsbot.collectors import (
     hackernews as hn_collector,
     reddit as reddit_collector,
@@ -52,9 +52,16 @@ from newsbot.collectors import (
 from newsbot.config import load_config
 from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
-from newsbot.jobs import JobCoordinator
+from newsbot.jobs import JobCoordinator, format_post_message
+from newsbot.telegram_poster import post_digest
+from newsbot.summarizer import (
+    _assign_candidate_ids,
+    llm_daily_summary,
+    llm_filter,
+    llm_style_posts,
+    select_diverse_top_items,
+)
 from newsbot.scoring import current_temperature, score_all
-from newsbot.summarizer import _assign_candidate_ids, llm_filter, llm_style_posts, select_diverse_top_items
 
 log = logging.getLogger(__name__)
 
@@ -475,6 +482,97 @@ def _run_retention(store: NewsStore) -> None:
         log.warning("retention cleanup failed: %s", exc)
 
 
+async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime) -> int:
+    """Build and deliver the daily recap of the last 24h of posted news.
+
+    Returns:
+        0 — summary generated, delivered, and recorded.
+        1 — failure (LLM or delivery) — day NOT consumed, retry next tick.
+        3 — skipped: nothing posted in the window. Day IS consumed —
+            there is nothing to recap and retrying would be pointless.
+    """
+    day = summary_day(now)
+    since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+    rows = store.list_posted_since(since_utc)
+    if not rows:
+        log.info("daily summary: no posts in the last 24h — skipping day %s", day)
+        return 3
+
+    items = [
+        {
+            "title": row.get("title") or "",
+            "category": row.get("category") or "",
+            "url": row.get("url") or "",
+            "snippet": row.get("snippet") or "",
+            "score_at_queue": row.get("score_at_queue"),
+            "source": row.get("source") or "",
+        }
+        for row in rows
+    ]
+
+    try:
+        result = await llm_daily_summary(items, _build_lm_client())
+    except Exception as exc:
+        log.error("daily summary LLM call failed: %s", redact_exception(exc))
+        return 1
+    if not result:
+        log.error("daily summary LLM returned nothing — will retry")
+        return 1
+
+    message = format_post_message(result["title"], result["body"], "")
+
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+    if not bot_token or not chat_id:
+        log.info("dry-run: daily summary to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
+        print(message)
+    else:
+        try:
+            await post_digest(message, bot_token=bot_token, chat_id=chat_id)
+        except Exception as exc:
+            log.error("daily summary delivery failed — will retry: %s", redact_exception(exc))
+            return 1
+
+    try:
+        store.add_summary(day, message, os.getenv("LM_MODEL", ""), len(items))
+    except Exception as db_exc:
+        # day UNIQUE constraint fires on a re-delivery — not an error for us.
+        log.warning("daily summary already recorded for %s: %s", day, redact_exception(db_exc))
+    return 0
+
+
+async def _scheduler_summary_iteration(
+    coordinator: JobCoordinator,
+    store: NewsStore,
+    settings: SettingsStore,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """One iteration of the daily summary scheduler.
+
+    Fires once per local day, the first tick at or after 13:00.
+    Key ``scheduler.last_summary_day`` (= ``YYYY-MM-DD``): written on
+    success AND on skip (nothing posted); left unset on failure so the
+    next tick retries.
+    """
+    if now is None:
+        now = local_now()
+    if now.hour < 13:
+        return 0  # not yet
+
+    day = summary_day(now)
+    last_summary_day = settings.get("scheduler", "last_summary_day", default="") or ""
+    if last_summary_day == day:
+        return 0  # already ran today
+
+    result = await coordinator.run_summary(lambda: _run_summary(store, settings, now))
+    if result in (0, 3):
+        settings.set("scheduler", "last_summary_day", day)
+    else:
+        log.warning("daily summary did not succeed (code=%d) — will retry for day %s", result, day)
+    return result
+
+
 def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
     """Format hype scores for all queued posts (for /scores command).
 
@@ -756,7 +854,18 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             await _scheduler_post_iteration(coordinator, settings)
             await asyncio.sleep(30)
 
-    tasks = [asyncio.create_task(generation_loop()), asyncio.create_task(posting_loop())]
+    async def summary_loop() -> None:
+        """Daily 13:00 recap scheduler (see _scheduler_summary_iteration)."""
+        log.info("daily summary scheduler started: 13:00 (%s)", local_now().tzinfo)
+        while True:
+            await _scheduler_summary_iteration(coordinator, store, settings)
+            await asyncio.sleep(60)
+
+    tasks = [
+        asyncio.create_task(generation_loop()),
+        asyncio.create_task(posting_loop()),
+        asyncio.create_task(summary_loop()),
+    ]
     if bot_handler:
         tasks.append(asyncio.create_task(bot_handler.poll_loop()))
 
