@@ -51,15 +51,34 @@ The bot accepts commands via Telegram DM (long polling). Set
 `ADMIN_USER_ID` to your Telegram user ID to enable. Only the admin
 user can issue commands.
 
+**Preview** — sent to your DM only; nothing is posted, no DB writes:
+
+| Command | Action |
+|---|---|
+| `/preview` | Style the hottest store story and show it here |
+| `/recap` | Preview the daily recap here |
+
+**Inspect:**
+
+| Command | Action |
+|---|---|
+| `/status` | Show store counts, threshold, slots and schedule info |
+| `/scores` | Show hype scores for all store rows (hottest first, with live threshold) |
+| `/style` | Show the current style prompt |
+
+**Run** — posts to the channel:
+
+| Command | Action |
+|---|---|
+| `/digest` | Trigger a generation cycle immediately (collect → filter → store raw; styling happens at pick) |
+| `/post` | Pick the hottest store story, style and post it now |
+| `/summary` | Run the daily recap job now |
+
+**Configure:**
+
 | Command | Action |
 |---|---|
 | `/setstyle <text>` | Update the style prompt for post writing |
-| `/style` | Show the current style prompt |
-| `/digest` | Trigger a generation cycle immediately (collect → filter → store raw; styling happens at pick) |
-| `/post` | Pick the hottest store story, style and post it now |
-| `/scores` | Show hype scores for all store rows (hottest first, with live threshold) |
-| `/status` | Show store counts, threshold, slots and schedule info |
-| `/summary` | Run the daily recap job now |
 | `/help` | List commands |
 
 ## Scheduling
@@ -229,7 +248,7 @@ newsbot/
   dedupe.py            # canonical URL + fuzzy title + GitHub repo + merge
   summarizer.py        # llm_filter + llm_style_posts + llm_daily_summary
   telegram_poster.py   # httpx Bot API sendMessage, 429 retry, tag-safe 4096 split
-  bot_commands.py      # long-polling command handler (/digest, /post, /scores, /status, /summary, …)
+  bot_commands.py      # long-polling command handler (/preview, /recap, /digest, /post, /scores, /status, /summary, …)
   jobs.py              # JobCoordinator (serializes gen + posting + summary via asyncio lock)
   collectors/
     hackernews.py reddit.py github.py rss.py producthunt.py huggingface_papers.py

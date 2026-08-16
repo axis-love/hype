@@ -5,14 +5,20 @@ ADMIN_USER_ID via Bot API getUpdates (long polling). All other users
 are silently ignored.
 
 Commands:
-  /setstyle <text>  — update the style prompt for Pass B
-  /style            — show the current style prompt
-  /digest           — run the generation cycle immediately
-  /post             — post the hottest store story to the channel now
-  /status           — show store counts, threshold, slots, schedule info
-  /scores           — show hype scores for all store rows
-  /summary          — run the daily recap job now
-  /help             — list commands
+  Preview (DM only — nothing posted, no DB writes):
+    /preview          — style the hottest store story and show it here
+    /recap            — preview the daily recap here
+  Inspect:
+    /status           — store counts, threshold, slots, schedule info
+    /scores           — hype scores for all store rows
+    /style            — show the current style prompt
+  Run (posts to the channel):
+    /digest           — run the generation cycle immediately
+    /post             — post the hottest store story to the channel now
+    /summary          — run the daily recap job now
+  Configure:
+    /setstyle <text>  — update the style prompt for Pass B
+    /help             — list commands
 """
 
 from __future__ import annotations
@@ -48,6 +54,8 @@ class BotCommandHandler:
         on_status: Callable[[], Awaitable[str]] | None = None,
         on_scores: Callable[[], Awaitable[str]] | None = None,
         on_summary: Callable[[], Awaitable[None]] | None = None,
+        on_preview: Callable[[], Awaitable[str]] | None = None,
+        on_recap_preview: Callable[[], Awaitable[str]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
@@ -57,10 +65,12 @@ class BotCommandHandler:
         self.on_status = on_status
         self.on_scores = on_scores
         self.on_summary = on_summary
+        self.on_preview = on_preview
+        self.on_recap_preview = on_recap_preview
         self._offset = 0  # getUpdates offset for ack
         self._client = httpx.AsyncClient(timeout=POLL_TIMEOUT + 10)
 
-    async def _send(self, chat_id: int, text: str) -> bool:
+    async def _send(self, chat_id: int, text: str, parse_mode: str = "") -> bool:
         """Send a message to a chat. Returns True on success, False on failure."""
         url = f"{BOT_API_BASE}/bot{self.bot_token}/sendMessage"
         # Split long messages at 4000 chars (Bot API limit is 4096).
@@ -70,7 +80,7 @@ class BotCommandHandler:
                 r = await self._client.post(url, json={
                     "chat_id": chat_id,
                     "text": chunk,
-                    "parse_mode": "",
+                    "parse_mode": parse_mode,
                 })
             except Exception as exc:
                 log.warning("bot command reply failed: %s", redact_exception(exc))
@@ -130,6 +140,10 @@ class BotCommandHandler:
             await self._cmd_scores(chat_id)
         elif command == "/summary":
             await self._cmd_summary(chat_id)
+        elif command == "/preview":
+            await self._cmd_preview(chat_id)
+        elif command == "/recap":
+            await self._cmd_recap(chat_id)
         elif command == "/help":
             await self._send(chat_id, self._help_text())
         else:
@@ -137,15 +151,22 @@ class BotCommandHandler:
 
     def _help_text(self) -> str:
         return (
-            "News-bot commands:\n"
-            "/setstyle <text> — set the style prompt for post writing\n"
+            "👁 Preview (to this DM — nothing is posted)\n"
+            "/preview — style the hottest store story, show here\n"
+            "/recap — preview the daily recap, show here\n"
+            "\n"
+            "🔍 Inspect\n"
+            "/status — store counts, threshold, slots, schedule\n"
+            "/scores — hype scores for all store rows\n"
             "/style — show the current style prompt\n"
-            "/digest — run generation now (collect → filter → store raw; styling happens at pick)\n"
-            "/post — pick the hottest store story, style and post it now\n"
-            "/status — show store counts, threshold, slots and schedule info\n"
-            "/scores — show hype scores for all store rows\n"
-            "/summary — run the daily recap job now\n"
-            "/help — show this message"
+            "\n"
+            "▶️ Run (posts to the channel)\n"
+            "/digest — collect → filter → store raw now\n"
+            "/post — pick hottest, style, post now\n"
+            "/summary — run the daily recap now\n"
+            "\n"
+            "⚙️ Configure\n"
+            "/setstyle <text> — set the style prompt"
         )
 
     async def _cmd_setstyle(self, chat_id: int, arg: str) -> None:
@@ -204,6 +225,46 @@ class BotCommandHandler:
             asyncio.create_task(_post_and_notify())
         else:
             await self._send(chat_id, "No post handler registered.")
+
+    async def _cmd_preview(self, chat_id: int) -> None:
+        """Preview the hottest pick, styled, in this DM. No posting, no DB writes."""
+        handler = self.on_preview
+        if not handler:
+            await self._send(chat_id, "Preview handler not available.")
+            return
+        await self._send(chat_id, "Styling the hottest store story for preview…")
+        try:
+            message = await handler()
+        except RuntimeError as exc:
+            await self._send(chat_id, str(exc))
+            return
+        except Exception:
+            await self._send(chat_id, "Preview failed. Check logs for details.")
+            return
+        if not message:
+            await self._send(chat_id, "Preview returned nothing — styler may have failed.")
+            return
+        await self._send(chat_id, message, parse_mode="HTML")
+
+    async def _cmd_recap(self, chat_id: int) -> None:
+        """Preview the daily recap in this DM. No posting, no DB writes."""
+        handler = self.on_recap_preview
+        if not handler:
+            await self._send(chat_id, "Recap preview handler not available.")
+            return
+        await self._send(chat_id, "Writing the daily recap preview…")
+        try:
+            message = await handler()
+        except RuntimeError as exc:
+            await self._send(chat_id, str(exc))
+            return
+        except Exception:
+            await self._send(chat_id, "Recap preview failed. Check logs for details.")
+            return
+        if not message:
+            await self._send(chat_id, "Recap preview returned nothing — summarizer may have failed.")
+            return
+        await self._send(chat_id, message, parse_mode="HTML")
 
     async def _cmd_status(self, chat_id: int) -> None:
         if self.on_status:
