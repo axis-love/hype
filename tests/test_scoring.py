@@ -249,3 +249,83 @@ def test_hype_score_unchanged_without_now():
     score = hype_score(item, CFG)
     assert isinstance(score, float)
     assert score > 0
+
+
+# --- flow_001093 (Task 3): current_temperature + merge_multiplier ---
+
+
+def _store_row(**overrides) -> dict:
+    """Store row (DB dict) with known score components, published at 2026-08-16T00:00Z."""
+    row = {
+        "id": 1,
+        "title": "Test story",
+        "url": "https://example.com/x",
+        "source": "hn",
+        "published_at": "2026-08-16T00:00:00+00:00",
+        "engagement_score": 100.0,
+        "recency_at_queue": 1.0,
+        "source_weight": 1.2,
+        "topic_bonus": 15,
+        "crosspost_bonus": 30.0,
+        "penalty": 1.0,
+        "lookback_hours": 48,
+        "score_at_queue": (100.0 * 1.0 * 1.2 + 15 + 30.0) * 1.0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_current_temperature_matches_hand_computed_at_two_times():
+    """Only recency changes: (eng*rec*w + topic + crosspost)*penalty."""
+    from newsbot.scoring import current_temperature
+
+    row = _store_row()
+    # age 0h -> rec 1.0 -> (100*1.0*1.2 + 15 + 30)*1.0 = 165.0
+    now1 = datetime(2026, 8, 16, 0, 0, tzinfo=timezone.utc)
+    assert abs(current_temperature(row, CFG, now=now1) - 165.0) < 1e-6
+    # age 12h, lookback 48 -> rec = exp(-0.25)
+    import math
+
+    now2 = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)
+    expected = (100.0 * math.exp(-0.25) * 1.2 + 15 + 30.0) * 1.0
+    assert abs(current_temperature(row, CFG, now=now2) - expected) < 1e-6
+
+
+def test_current_temperature_legacy_null_engagement_is_zero():
+    from newsbot.scoring import current_temperature
+
+    row = _store_row(engagement_score=None)
+    assert current_temperature(row, CFG, now=datetime(2026, 8, 16, tzinfo=timezone.utc)) == 0.0
+
+
+def test_current_temperature_null_lookback_falls_back_to_config_default():
+    from newsbot.scoring import current_temperature
+
+    import math
+
+    row = _store_row(lookback_hours=None)
+    now = datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc)  # age 12h, lookback 48 (CFG)
+    expected = (100.0 * math.exp(-12 / 48) * 1.2 + 15 + 30.0) * 1.0
+    assert abs(current_temperature(row, CFG, now=now) - expected) < 1e-6
+
+
+def test_current_temperature_preserves_zero_penalty_and_null_components():
+    from newsbot.scoring import current_temperature
+
+    row = _store_row(penalty=0.0)
+    assert current_temperature(row, CFG, now=datetime(2026, 8, 16, tzinfo=timezone.utc)) == 0.0
+    row2 = _store_row(source_weight=None, topic_bonus=None, crosspost_bonus=None, penalty=None)
+    # defaults: w=1.0, topic=0, crosspost=0, penalty=1.0, age 0 -> 100*1*1 = 100
+    assert abs(current_temperature(row2, CFG, now=datetime(2026, 8, 16, tzinfo=timezone.utc)) - 100.0) < 1e-6
+
+
+def test_merge_multiplier_known_values():
+    from newsbot.scoring import merge_multiplier
+
+    assert merge_multiplier(None) == 1.0
+    assert merge_multiplier(1) == 1.0
+    assert abs(merge_multiplier(3) - 1.4) < 1e-9
+    assert merge_multiplier(99) == 2.0
+    # falsy/zero treated as 1; custom bonus/cap respected
+    assert merge_multiplier(0) == 1.0
+    assert abs(merge_multiplier(3, bonus=0.5, cap=1.8) - 1.8) < 1e-9
