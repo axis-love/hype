@@ -148,6 +148,7 @@ class JobCoordinator:
         self._job_lock = asyncio.Lock()
         self._gen_running = False
         self._post_running = False
+        self._summary_running = False
 
     @property
     def generation_running(self) -> bool:
@@ -156,6 +157,28 @@ class JobCoordinator:
     @property
     def posting_running(self) -> bool:
         return self._post_running
+
+    @property
+    def summary_running(self) -> bool:
+        return self._summary_running
+
+    async def run_summary(self, summary_fn: Any) -> int:
+        """Acquire the job lock and run the daily summary job.
+
+        Returns the summary_fn's result (0=success, 1=failure, 3=skipped
+        because fewer than one post landed in the window), or 2 if another
+        job is already holding the lock (busy).
+        """
+        if self._summary_running:
+            log.info("summary already in progress — skipping")
+            return 2
+        self._summary_running = True
+        try:
+            async with self._job_lock:
+                result = await summary_fn()
+                return int(result) if result is not None else 0
+        finally:
+            self._summary_running = False
 
     async def run_generation(self, gen_fn: Any, *, timeout: float = 0) -> int:
         """Acquire the job lock and run the generation cycle.
