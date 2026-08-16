@@ -495,13 +495,16 @@ class TestMarkPostedFailure:
         doesn't advance the timestamp."""
         from newsbot.jobs import JobCoordinator
         from unittest.mock import AsyncMock, patch
+        from tests.helpers import scored_story, echo_style
         import sqlite3
 
         coordinator = JobCoordinator(store, settings)
-        store.add_pending_post({"title": "T", "body": "B", "url": "http://x.com"})
+        store.add_stories_to_store([scored_story("T", 90.0)], [])
 
         # Mock post_digest to succeed (dry-run path).
-        with patch.dict("os.environ", {"BOT_TOKEN": "", "NEWS_CHANNEL_ID": ""}):
+        with patch.dict("os.environ", {"BOT_TOKEN": "", "NEWS_CHANNEL_ID": ""}), \
+             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
             # Mock mark_posted to fail.
             with patch.object(store, "mark_posted", side_effect=sqlite3.OperationalError("disk full")):
                 result = await coordinator._deliver_one()

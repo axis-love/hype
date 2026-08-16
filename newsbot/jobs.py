@@ -9,18 +9,66 @@ from __future__ import annotations
 
 import asyncio
 import html as html_module
+import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
+from lm_client import LMClient
+from newsbot.config import load_config
 from newsbot.db import NewsStore
+from newsbot.selection import pick_hottest
+from newsbot.summarizer import llm_style_posts
 from newsbot.telegram_poster import post_digest, PartialDeliveryError
 
 log = logging.getLogger(__name__)
+
+
+def _build_lm_client() -> LMClient:
+    """Build the LMClient for the LLM styler from env (LM_BASE / LM_MODEL / LM_API_KEY)."""
+    base = os.getenv("LM_BASE", "").rstrip("/")
+    model = os.getenv("LM_MODEL", "")
+    if not base or not model:
+        raise RuntimeError("LM_BASE and LM_MODEL must be set in the environment")
+    timeout = float(os.getenv("LM_TIMEOUT", "300"))
+    headers = {}
+    api_key = os.getenv("LM_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
+
+
+def _env_float(name: str, default: str) -> float:
+    """Read a float env var, falling back (with a warning) on bad values."""
+    try:
+        return float(os.getenv(name, default))
+    except ValueError:
+        log.warning("invalid float for %s — falling back to %s", name, default)
+        return float(default)
+
+
+def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape a store row like a digest-time candidate for llm_style_posts.
+
+    The styler reads title/url/snippet/published_at plus the engagement
+    signal fields — all persisted on store rows by add_stories_to_store.
+    """
+    return {
+        "candidate_id": f"s{row['id']:03d}",
+        "title": row.get("title") or "",
+        "url": row.get("url") or "",
+        "snippet": row.get("snippet") or "",
+        "published_at": row.get("published_at") or "",
+        "upvotes": row.get("upvotes") or 0,
+        "comments": row.get("comments") or 0,
+        "stars": row.get("stars") or 0,
+        "crosspost_count": row.get("crosspost_count") or 1,
+    }
 
 
 def _source_label(url: str) -> str:
@@ -157,9 +205,10 @@ class JobCoordinator:
     async def drain_posts(self) -> int:
         """Acquire the job lock and drain all pending posts.
 
-        Used by --once and dry-run modes. Posts all pending posts
-        sequentially. Returns 0 on success, 1 on failure, 2 if
-        another posting is already in progress (skipped).
+        Used by --once and dry-run modes. Picks and delivers posts
+        sequentially until the store is empty (3) or nothing is hot
+        enough (4). Returns 0 on success, 1 on failure, 2 if another
+        posting is already in progress (skipped).
         """
         if self._post_running:
             log.info("posting already in progress — cannot drain")
@@ -169,8 +218,9 @@ class JobCoordinator:
             async with self._job_lock:
                 while True:
                     result = await self._deliver_one()
-                    if result == 3:
-                        # No more pending posts — done.
+                    if result in (3, 4):
+                        # Empty store or nothing hot enough — done. Both are
+                        # healthy terminal states, so --once/dry-run exit 0.
                         return 0
                     if result != 0:
                         return result
@@ -179,40 +229,106 @@ class JobCoordinator:
             self._post_running = False
 
     async def _deliver_one(self) -> int:
-        """Fetch, format, deliver, and mark one pending post.
+        """Pick the hottest eligible store row, style it, deliver, mark posted.
+
+        Style-at-pick: the store holds RAW scored rows; styling happens here,
+        on the single winner, so ≤1 LLM styling call per post (≤12/day)
+        instead of styling the whole digest up front.
 
         Shared by run_posting (single) and drain_posts (loop).
         Returns:
-            0 — success: a post was delivered and marked posted.
-            1 — failure: delivery or marking failed.
-            3 — no-op: no pending posts to deliver.
+            0 — success: a post was styled, delivered, and marked posted.
+            1 — failure: styler or delivery failed (slot NOT consumed).
+            3 — no-op: store is empty.
+            4 — threshold skip: nothing hot enough (slot consumed).
+        """
+        cfg = load_config(self._settings)
+        rows = self._store.list_store_rows()
+        now = datetime.now(timezone.utc)
+        result = pick_hottest(
+            rows, cfg, now=now,
+            floor=_env_float("NEWS_TEMP_FLOOR", "35"),
+            ratio=_env_float("NEWS_THRESHOLD_RATIO", "0.5"),
+            merge_bonus=_env_float("NEWS_MERGE_BONUS", "0.2"),
+            merge_cap=_env_float("NEWS_MERGE_CAP", "2.0"),
+        )
+        if result.reason == "empty":
+            log.debug("store empty — nothing to post")
+            return 3
+        if result.reason == "below_threshold":
+            log.info(json.dumps({
+                "event": "post_skip",
+                "threshold": round(result.threshold, 2),
+                "median": round(result.median, 2),
+                "hottest": round(result.hottest, 2),
+            }))
+            return 4
+
+        row = result.row
+        if row is None:
+            return 4  # unreachable in practice; keeps the type narrowed
+        row_id = int(row["id"])
+        raw_temp = result.temps[row_id]
+
+        # Style the single winner at pick time.
+        try:
+            styled = await llm_style_posts(
+                [_row_to_styler_input(row)],
+                _build_lm_client(),
+                style_prompt=cfg["style_prompt"],
+            )
+        except Exception as exc:
+            log.error("styler raised for row id=%d — will retry within the hour: %s",
+                      row_id, redact_exception(exc))
+            return 1
+        if not styled:
+            log.error("styler failed for row id=%d — will retry within the hour", row_id)
+            return 1
+
+        styled_title = str(styled[0].get("title") or row.get("title") or "").strip()
+        styled_body = str(styled[0].get("body") or "").strip()
+        if not styled_body:
+            log.error("styler returned empty body for row id=%d — will retry", row_id)
+            return 1
+
+        try:
+            self._store.set_styled_content(row_id, styled_title, styled_body)
+        except Exception as db_exc:
+            log.error("CRITICAL: styled row id=%d but set_styled_content failed: %s",
+                      row_id, redact_exception(db_exc))
+            return 1
+
+        log.info(json.dumps({
+            "event": "post_pick",
+            "threshold": round(result.threshold, 2),
+            "median": round(result.median, 2),
+            "hottest": round(result.hottest, 2),
+            "chosen_id": row_id,
+            "raw_temp": round(raw_temp, 2),
+            "merge_count": row.get("merge_count") or 1,
+        }))
+
+        message = format_post_message(styled_title, styled_body, row.get("url") or "")
+        return await self._send_and_mark(row_id, message)
+
+    async def _send_and_mark(self, row_id: int, message: str) -> int:
+        """Deliver a formatted message and mark the row posted.
+
+        Dry-run (no BOT_TOKEN/NEWS_CHANNEL_ID) prints to stdout. Delivery
+        error handling is unchanged from the v1 poster.
         """
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
-
-        # TEMPORARY (flow_001092 T2): get_next_pending_post() was removed with
-        # the v2 store redesign — the poster will pick the hottest styled row
-        # in a later task. Until then, keep oldest-first delivery semantics.
-        unposted = self._store.list_unposted_posts()
-        post = unposted[0] if unposted else None
-        if not post:
-            log.debug("no pending posts to deliver")
-            return 3
-
-        title = post["title"]
-        body = post["body"]
-        url = post.get("url") or ""
-        message = format_post_message(title, body, url)
 
         if not bot_token or not chat_id:
             log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
             print(message)
             try:
-                self._store.mark_posted(post["id"])
+                self._store.mark_posted(row_id)
             except Exception as db_exc:
                 log.error(
                     "CRITICAL: post id=%d dry-run delivered but mark_posted failed: %s",
-                    post["id"], redact_exception(db_exc),
+                    row_id, redact_exception(db_exc),
                 )
                 return 1
             return 0
@@ -225,16 +341,16 @@ class JobCoordinator:
             log.warning(
                 "post id=%d partially delivered (%d chunks sent) — marking as posted "
                 "to prevent duplicate sends: %s",
-                post["id"], exc.delivered_chunks, redact_exception(exc),
+                row_id, exc.delivered_chunks, redact_exception(exc),
             )
             try:
-                self._store.mark_posted(post["id"])
+                self._store.mark_posted(row_id)
             except Exception as db_exc:
                 log.error("CRITICAL: post id=%d delivered but mark_posted failed: %s "
-                          "— row may be re-delivered on retry", post["id"], redact_exception(db_exc))
+                          "— row may be re-delivered on retry", row_id, redact_exception(db_exc))
             return 1  # Still report failure — operator should investigate
         except Exception as exc:
-            log.error("failed to post pending post id=%d: %s", post["id"], redact_exception(exc))
+            log.error("failed to post store row id=%d: %s", row_id, redact_exception(exc))
             return 1
 
         # Delivery succeeded — now mark as posted.
@@ -243,12 +359,12 @@ class JobCoordinator:
         # We must handle this atomically: if DB fails after Telegram success,
         # log a CRITICAL error so the operator can manually mark it.
         try:
-            self._store.mark_posted(post["id"])
+            self._store.mark_posted(row_id)
         except Exception as db_exc:
             log.error(
                 "CRITICAL: post id=%d delivered to Telegram but mark_posted failed: %s "
                 "— row will be re-delivered on next cycle unless manually resolved",
-                post["id"], redact_exception(db_exc),
+                row_id, redact_exception(db_exc),
             )
             return 1  # Report failure so the scheduler doesn't advance timestamp
 

@@ -240,9 +240,10 @@ class TestCoordinatorRedaction:
     async def test_post_one_redacts_bot_token(self, store, settings, caplog):
         """When post_digest raises with bot token in URL, coordinator must redact it."""
         from newsbot.jobs import JobCoordinator
+        from tests.helpers import scored_story, echo_style
 
         coordinator = JobCoordinator(store, settings)
-        store.add_pending_post({"title": "T", "body": "B", "url": "http://x.com"})
+        store.add_stories_to_store([scored_story("T", 90.0)], [])
 
         token = "123456789:AAExxxxxxxxxxxxxxxxxxxx"
 
@@ -250,7 +251,9 @@ class TestCoordinatorRedaction:
             raise Exception(f"Request to https://api.telegram.org/bot{token}/sendMessage failed")
 
         with patch.dict("os.environ", {"BOT_TOKEN": token, "NEWS_CHANNEL_ID": "@test"}):
-            with patch("newsbot.jobs.post_digest", side_effect=fake_post):
+            with patch("newsbot.jobs.post_digest", side_effect=fake_post), \
+                 patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+                 patch("newsbot.jobs._build_lm_client", return_value=object()):
                 with caplog.at_level(logging.ERROR):
                     result = await coordinator.run_posting()
 

@@ -290,12 +290,15 @@ class TestJobCoordinatorDrain:
 
     @pytest.mark.asyncio
     async def test_drain_posts_all(self, coordinator, store):
-        """Drain should post all pending posts and mark them posted."""
+        """Drain should post all eligible store rows and mark them posted."""
+        from tests.helpers import scored_story, echo_style
+
         for i in range(3):
-            store.add_pending_post({"title": f"T{i}", "body": f"B{i}", "url": f"http://x.com/{i}"})
+            store.add_stories_to_store([scored_story(f"T{i}", 90.0 - i * 5)], [])
 
         # Dry-run mode (no BOT_TOKEN).
-        with patch.dict(os.environ, {}, clear=False):
+        with patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
             result = await coordinator.drain_posts()
@@ -330,9 +333,11 @@ class TestConcurrentGenerationPostingIntegration:
         lock ensures posting finishes before generation appends, so no post
         is delivered twice and no row is lost.
         """
-        # Pre-populate the queue with 3 posts.
+        from tests.helpers import scored_story, echo_style
+
+        # Pre-populate the queue with 3 scored posts.
         for i in range(3):
-            store.add_pending_post({"title": f"Old{i}", "body": f"Body{i}", "url": f"http://old{i}.com"})
+            store.add_stories_to_store([scored_story(f"Old{i}", 90.0 - i)], [])
 
         delivered_titles: list[str] = []
 
@@ -351,7 +356,9 @@ class TestConcurrentGenerationPostingIntegration:
             store.add_stories_to_store(new_posts, seen_items)
             return 0
 
-        with patch("newsbot.jobs.post_digest", new=slow_post_digest):
+        with patch("newsbot.jobs.post_digest", new=slow_post_digest), \
+             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
                 # Launch generation and posting concurrently.
                 gen_task = asyncio.create_task(coordinator.run_generation(gen_fn))
@@ -370,8 +377,8 @@ class TestConcurrentGenerationPostingIntegration:
         assert len(delivered_titles) == len(set(delivered_titles)), \
             f"Duplicate delivery detected: {delivered_titles}"
 
-        # Generation appended 3 stories; posting delivered 1 (oldest-first,
-        # so from the original batch). No post lost or duplicated.
+        # Generation appended 3 stories; posting delivered 1 (hottest pick,
+        # from the original scored batch). No post lost or duplicated.
         assert len(delivered_titles) == 1, f"Expected 1 delivery, got {delivered_titles}"
 
         # After both jobs: 3 old + 3 new − 1 delivered = 5 pending.
@@ -387,8 +394,10 @@ class TestConcurrentGenerationPostingIntegration:
         lock serializes them. Each call delivers at most 1 post. No post
         is delivered twice, no row is lost.
         """
+        from tests.helpers import scored_story, echo_style
+
         for i in range(5):
-            store.add_pending_post({"title": f"Post{i}", "body": f"B{i}", "url": f"http://x{i}.com"})
+            store.add_stories_to_store([scored_story(f"Post{i}", 90.0 - i)], [])
 
         delivered_ids: list[int] = []
 
@@ -403,7 +412,9 @@ class TestConcurrentGenerationPostingIntegration:
             await asyncio.sleep(0.02)
             return await original_deliver()
 
-        with patch("newsbot.jobs.post_digest", new=tracking_post_digest):
+        with patch("newsbot.jobs.post_digest", new=tracking_post_digest), \
+             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
                 with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver_one):
                     results = await asyncio.gather(
@@ -435,8 +446,10 @@ class TestConcurrentGenerationPostingIntegration:
         unposted posts. No delivered post should disappear, and new posts
         should be in the queue afterward.
         """
+        from tests.helpers import scored_story, echo_style
+
         for i in range(3):
-            store.add_pending_post({"title": f"Old{i}", "body": f"B{i}", "url": f"http://old{i}.com"})
+            store.add_stories_to_store([scored_story(f"Old{i}", 90.0 - i)], [])
 
         delivered: list[str] = []
 
@@ -453,7 +466,9 @@ class TestConcurrentGenerationPostingIntegration:
             store.add_stories_to_store(new_posts, seen_items)
             return 0
 
-        with patch("newsbot.jobs.post_digest", new=tracking_post_digest):
+        with patch("newsbot.jobs.post_digest", new=tracking_post_digest), \
+             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
                 # Start drain (processes all 3 old posts sequentially).
                 drain_task = asyncio.create_task(coordinator.drain_posts())
