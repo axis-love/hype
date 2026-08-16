@@ -52,7 +52,7 @@ from newsbot.collectors import (
 from newsbot.config import load_config
 from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
-from newsbot.jobs import JobCoordinator, _env_float, format_post_message
+from newsbot.jobs import JobCoordinator, _env_float, _row_to_styler_input, format_post_message
 from newsbot.selection import pick_hottest
 from newsbot.telegram_poster import post_digest
 from newsbot.summarizer import (
@@ -849,6 +849,61 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             if result == 1:
                 raise RuntimeError("daily recap failed — check logs for details")
 
+        async def on_preview() -> str:
+            """Style the hottest store story for a DM preview.
+
+            Read-only: no DB writes, no delivery, no slot consumed. The
+            scheduled poster will style the same row again at post time.
+            """
+            cfg = load_config(settings)
+            result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, cfg)
+            if result.reason == "empty":
+                raise RuntimeError("Store is empty — run /digest first")
+            if result.reason == "below_threshold" or result.row is None:
+                raise RuntimeError(
+                    f"Nothing hot enough: hottest {result.hottest:.1f} < "
+                    f"threshold {result.threshold:.1f}"
+                )
+            row = result.row
+            styled = await llm_style_posts(
+                [_row_to_styler_input(row)],
+                _build_lm_client(),
+                style_prompt=cfg["style_prompt"],
+            )
+            if not styled:
+                raise RuntimeError("styler returned nothing — check logs")
+            title = str(styled[0].get("title") or row.get("title") or "").strip()
+            body = str(styled[0].get("body") or "").strip()
+            if not body:
+                raise RuntimeError("styler returned an empty body — check logs")
+            return format_post_message(title, body, row.get("url") or "")
+
+        async def on_recap_preview() -> str:
+            """Write the daily recap for a DM preview.
+
+            Read-only: no DB writes, no delivery, day key untouched.
+            """
+            now = local_now()
+            since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+            rows = store.list_posted_since(since_utc)
+            if not rows:
+                raise RuntimeError("nothing posted in the last 24h — nothing to recap")
+            items = [
+                {
+                    "title": row.get("title") or "",
+                    "category": row.get("category") or "",
+                    "url": row.get("url") or "",
+                    "snippet": row.get("snippet") or "",
+                    "score_at_queue": row.get("score_at_queue"),
+                    "source": row.get("source") or "",
+                }
+                for row in rows
+            ]
+            result = await llm_daily_summary(items, _build_lm_client())
+            if not result:
+                raise RuntimeError("recap LLM returned nothing — check logs")
+            return format_post_message(result["title"], result["body"], "")
+
         bot_handler = BotCommandHandler(
             bot_token=bot_token,
             admin_user_id=admin_user_id,
@@ -858,6 +913,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             on_status=on_status,
             on_scores=on_scores,
             on_summary=on_summary,
+            on_preview=on_preview,
+            on_recap_preview=on_recap_preview,
         )
 
     async def generation_loop() -> None:
