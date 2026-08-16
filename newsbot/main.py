@@ -52,7 +52,8 @@ from newsbot.collectors import (
 from newsbot.config import load_config
 from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
-from newsbot.jobs import JobCoordinator, format_post_message
+from newsbot.jobs import JobCoordinator, _env_float, format_post_message
+from newsbot.selection import pick_hottest
 from newsbot.telegram_poster import post_digest
 from newsbot.summarizer import (
     _assign_candidate_ids,
@@ -573,70 +574,69 @@ async def _scheduler_summary_iteration(
     return result
 
 
-def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
-    """Format hype scores for all queued posts (for /scores command).
+def _pick_snapshot(store: NewsStore, config: dict[str, Any]) -> tuple[Any, float, float, float, float]:
+    """Run pick_hottest over the current store rows (pure — no delivery).
 
-    Shows both current score (recency recalculated with now) and queue-time
-    score, with full component breakdown. Legacy rows (NULL score columns)
-    show 'score unavailable'. Recalculation is delegated to
-    scoring.current_temperature / scoring.current_recency — the same shared
-    path pick_hottest uses.
+    Returns (PickResult, floor, ratio, merge_bonus, merge_cap) so callers
+    (/scores, /status) share the exact same numbers the poster uses.
     """
-    import json as _json
-    from datetime import datetime, timezone
+    rows = store.list_store_rows()
+    now = datetime.now(timezone.utc)
+    floor = _env_float("NEWS_TEMP_FLOOR", "35")
+    ratio = _env_float("NEWS_THRESHOLD_RATIO", "0.5")
+    merge_bonus = _env_float("NEWS_MERGE_BONUS", "0.2")
+    merge_cap = _env_float("NEWS_MERGE_CAP", "2.0")
+    result = pick_hottest(rows, config, now=now, floor=floor, ratio=ratio, merge_bonus=merge_bonus, merge_cap=merge_cap)
+    return result, floor, ratio, merge_bonus, merge_cap
 
-    from newsbot.scoring import current_recency, current_temperature
 
-    posts = store.list_unposted_posts()
-    if not posts:
-        return "No queued posts."
+def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
+    """Format hype scores for all store rows (for /scores command).
+
+    Built on the same pick_hottest call the poster uses: one pass yields
+    current temperatures, the live threshold, and the median. Rows are
+    sorted hottest-first by EFFECTIVE temperature (raw × merge multiplier);
+    legacy rows (NULL score columns) have no reconstructable temperature
+    and sink to the bottom marked 'score unavailable'.
+    """
+    from newsbot.scoring import merge_multiplier
+
+    result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, config)
+    rows = [row for row in store.list_store_rows()]
+    if not rows:
+        return "Store is empty."
 
     now = datetime.now(timezone.utc)
-    lines = [f"Queued hype scores ({len(posts)} posts)", f"As of: {now.isoformat(timespec='seconds')}", ""]
+    lines = [
+        f"Store temperatures ({len(rows)} rows)",
+        f"As of: {now.isoformat(timespec='seconds')}",
+        f"Threshold: {result.threshold:.1f} (floor {floor:.1f}, {ratio:.2f}× median {result.median:.1f})",
+        "",
+    ]
 
-    for i, post in enumerate(posts, start=1):
-        title = (post.get("title") or "")[:60]
-        score_at_queue = post.get("score_at_queue")
-
-        if score_at_queue is None:
+    ordered = sorted(
+        rows,
+        key=lambda row: result.temps.get(row["id"], 0.0)
+        * merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap),
+        reverse=True,
+    )
+    for i, row in enumerate(ordered, start=1):
+        title = (row.get("title") or "")[:60]
+        raw_temp = result.temps.get(row["id"], 0.0)
+        if row.get("engagement_score") is None:
             lines.append(f"{i}. score unavailable — queued before scoring update")
             lines.append(title)
             lines.append("")
             continue
-
-        # Queue-time score and components.
-        eng = post.get("engagement_score")
-        eng = eng if eng is not None else 0.0
-        rec_queue = post.get("recency_at_queue")
-        rec_queue = rec_queue if rec_queue is not None else 0.0
-        weight = post.get("source_weight")
-        weight = weight if weight is not None else 1.0
-        topic = post.get("topic_bonus")
-        topic = topic if topic is not None else 0
-        crosspost = post.get("crosspost_bonus")
-        crosspost = crosspost if crosspost is not None else 0.0
-        penalty = post.get("penalty")
-        penalty = penalty if penalty is not None else 1.0
-        source = post.get("source") or "?"
-        published_at = post.get("published_at") or ""
-
-        # Current score: only recency changes (shared with pick_hottest).
-        current_rec = current_recency(post, config, now=now)
-        current_score = current_temperature(post, config, now=now)
-
-        # Matched topics.
-        matched_topics_raw = post.get("matched_topics") or "[]"
-        try:
-            matched = _json.loads(matched_topics_raw) if isinstance(matched_topics_raw, str) else matched_topics_raw
-        except Exception:
-            matched = []
-        topics_str = ", ".join(matched) if matched else "none"
-
-        lines.append(f"{i}. {current_score:.1f} now (rec={current_rec:.2f}) | {score_at_queue:.1f} queued (rec={rec_queue:.2f})")
+        mult = merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap)
+        effective = raw_temp * mult
+        flag = "styled" if row.get("styled_at") else "raw"
+        merge = row.get("merge_count") or 1
+        source = row.get("source") or "?"
+        merge_note = f" merge={merge}×{mult:.2f}" if merge > 1 else ""
+        lines.append(f"{i}. {effective:.1f} eff ({raw_temp:.1f} raw{merge_note}) [{flag}]")
         lines.append(title)
-        lines.append(f"[(eng={eng:.1f} × weight={weight:.2f} × recency) + topic={topic} + crosspost={crosspost:.0f}] × penalty={penalty:.2f}")
-        lines.append(f"topics={topics_str}")
-        lines.append(f"source={source} | published={published_at[:10] if published_at else 'unknown'}")
+        lines.append(f"source={source} | published={(row.get('published_at') or '')[:10] or 'unknown'}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -811,21 +811,43 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 raise RuntimeError("posting failed — check logs for details")
 
         async def on_status() -> str:
-            pending = store.count_pending()
+            cfg = load_config(settings)
+            rows = store.list_store_rows()
+            styled = sum(1 for row in rows if row.get("styled_at"))
+            raw = len(rows) - styled
+            result, floor, ratio, _, _ = _pick_snapshot(store, cfg)
             last_gen_slot = settings.get("scheduler", "last_gen_slot", default="") or ""
             last_post_slot = settings.get("scheduler", "last_post_slot", default="") or ""
+            last_summary_day = settings.get("scheduler", "last_summary_day", default="") or ""
+            skip = coordinator.last_skip_reason or "none"
+            tz_name = os.getenv("NEWS_TZ", "Asia/Bangkok")
             gen_status = "running" if coordinator.generation_running else "idle"
             post_status = "running" if coordinator.posting_running else "idle"
+            summary_status = "running" if coordinator.summary_running else "idle"
             return (
-                f"Pending posts: {pending}\n"
+                f"Store: {len(rows)} rows ({raw} raw, {styled} styled)\n"
+                f"Threshold: {result.threshold:.1f} (floor {floor:.1f}, {ratio:.2f}× median {result.median:.1f})\n"
+                f"Last skip: {skip}\n"
                 f"Last generation slot: {last_gen_slot or 'never'}\n"
                 f"Last post slot: {last_post_slot or 'never'}\n"
+                f"Last summary day: {last_summary_day or 'never'}\n"
                 f"Generation: {gen_status} (slots: {gen_hours})\n"
-                f"Posting: {post_status} (even hours)"
+                f"Posting: {post_status} (even hours)\n"
+                f"Summary: {summary_status} (daily at 13:00)\n"
+                f"Timezone: {tz_name}"
             )
 
         async def on_scores() -> str:
             return _format_scores(store, load_config(settings))
+
+        async def on_summary() -> None:
+            result = await coordinator.run_summary(lambda: _run_summary(store, settings, local_now()))
+            if result == 2:
+                raise RuntimeError("summary already in progress — skipped")
+            if result == 3:
+                raise RuntimeError("nothing posted in the last 24h — nothing to recap")
+            if result == 1:
+                raise RuntimeError("daily recap failed — check logs for details")
 
         bot_handler = BotCommandHandler(
             bot_token=bot_token,
@@ -835,6 +857,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             on_post=on_post,
             on_status=on_status,
             on_scores=on_scores,
+            on_summary=on_summary,
         )
 
     async def generation_loop() -> None:

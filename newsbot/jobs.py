@@ -149,6 +149,11 @@ class JobCoordinator:
         self._gen_running = False
         self._post_running = False
         self._summary_running = False
+        self._last_skip_reason = ""  # last post-skip reason ("" | "empty" | "below_threshold")
+
+    @property
+    def last_skip_reason(self) -> str:
+        return self._last_skip_reason
 
     @property
     def generation_running(self) -> bool:
@@ -277,6 +282,7 @@ class JobCoordinator:
         )
         if result.reason == "empty":
             log.debug("store empty — nothing to post")
+            self._last_skip_reason = "empty"
             return 3
         if result.reason == "below_threshold":
             log.info(json.dumps({
@@ -285,6 +291,7 @@ class JobCoordinator:
                 "median": round(result.median, 2),
                 "hottest": round(result.hottest, 2),
             }))
+            self._last_skip_reason = "below_threshold"
             return 4
 
         row = result.row
@@ -292,6 +299,7 @@ class JobCoordinator:
             return 4  # unreachable in practice; keeps the type narrowed
         row_id = int(row["id"])
         raw_temp = result.temps[row_id]
+        self._last_skip_reason = ""  # a pick happened; no skip to report
 
         # Style the single winner at pick time.
         try:

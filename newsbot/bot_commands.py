@@ -8,9 +8,10 @@ Commands:
   /setstyle <text>  — update the style prompt for Pass B
   /style            — show the current style prompt
   /digest           — run the generation cycle immediately
-  /post             — post the next pending post to the channel now
-  /status           — show pending posts count + next gen/post time
-  /scores           — show hype scores for all queued posts
+  /post             — post the hottest store story to the channel now
+  /status           — show store counts, threshold, slots, schedule info
+  /scores           — show hype scores for all store rows
+  /summary          — run the daily recap job now
   /help             — list commands
 """
 
@@ -46,6 +47,7 @@ class BotCommandHandler:
         on_post: Callable[[], Awaitable[None]] | None = None,
         on_status: Callable[[], Awaitable[str]] | None = None,
         on_scores: Callable[[], Awaitable[str]] | None = None,
+        on_summary: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
@@ -54,6 +56,7 @@ class BotCommandHandler:
         self.on_post = on_post
         self.on_status = on_status
         self.on_scores = on_scores
+        self.on_summary = on_summary
         self._offset = 0  # getUpdates offset for ack
         self._client = httpx.AsyncClient(timeout=POLL_TIMEOUT + 10)
 
@@ -125,6 +128,8 @@ class BotCommandHandler:
             await self._cmd_status(chat_id)
         elif command == "/scores":
             await self._cmd_scores(chat_id)
+        elif command == "/summary":
+            await self._cmd_summary(chat_id)
         elif command == "/help":
             await self._send(chat_id, self._help_text())
         else:
@@ -135,10 +140,11 @@ class BotCommandHandler:
             "News-bot commands:\n"
             "/setstyle <text> — set the style prompt for post writing\n"
             "/style — show the current style prompt\n"
-            "/digest — run the generation cycle now (collect → filter → style → queue)\n"
-            "/post — post the next pending post to the channel immediately\n"
-            "/status — show pending posts and schedule info\n"
-            "/scores — show hype scores for all queued posts\n"
+            "/digest — run generation now (collect → filter → store raw; styling happens at pick)\n"
+            "/post — pick the hottest store story, style and post it now\n"
+            "/status — show store counts, threshold, slots and schedule info\n"
+            "/scores — show hype scores for all store rows\n"
+            "/summary — run the daily recap job now\n"
             "/help — show this message"
         )
 
@@ -160,7 +166,7 @@ class BotCommandHandler:
             async def _run_and_notify() -> None:
                 try:
                     await self.on_digest()
-                    await self._send(chat_id, "✅ Generation complete. Posts queued for hourly delivery.")
+                    await self._send(chat_id, "✅ Generation complete. Raw stories stored — styling happens at pick.")
                 except RuntimeError as exc:
                     await self._send(chat_id, str(exc))
                 except Exception:
@@ -168,6 +174,22 @@ class BotCommandHandler:
             asyncio.create_task(_run_and_notify())
         else:
             await self._send(chat_id, "No generation handler registered.")
+
+    async def _cmd_summary(self, chat_id: int) -> None:
+        handler = self.on_summary
+        if handler:
+            await self._send(chat_id, "Running daily recap job now...")
+            async def _run_and_notify() -> None:
+                try:
+                    await handler()
+                    await self._send(chat_id, "✅ Daily recap posted.")
+                except RuntimeError as exc:
+                    await self._send(chat_id, str(exc))
+                except Exception:
+                    await self._send(chat_id, "Daily recap failed. Check logs for details.")
+            asyncio.create_task(_run_and_notify())
+        else:
+            await self._send(chat_id, "No summary handler registered.")
 
     async def _cmd_post(self, chat_id: int) -> None:
         if self.on_post:
