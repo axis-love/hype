@@ -554,7 +554,7 @@ class NewsStore:
         "crosspost_count, penalty, lookback_hours, "
         "score_at_queue, engagement_score, recency_at_queue, "
         "source_weight, topic_bonus, crosspost_bonus, "
-        "matched_topics, scored_at, merge_count, merged_urls"
+        "matched_topics, scored_at, merge_count, merged_urls, styled_at"
     )
 
     def list_store_rows(self) -> list[dict]:
@@ -725,7 +725,7 @@ class NewsStore:
         Boundary is inclusive. Source rows for the daily summary.
         """
         rows = self._conn.execute(
-            f"SELECT {self._STORE_SELECT}, body, styled_at, posted_at FROM pending_posts "
+            f"SELECT {self._STORE_SELECT}, body, posted_at FROM pending_posts "
             "WHERE posted_at IS NOT NULL AND posted_at >= ? ORDER BY posted_at ASC",
             (since_iso,),
         ).fetchall()
