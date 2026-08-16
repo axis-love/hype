@@ -34,8 +34,8 @@ class TestMigrations:
 
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
-        # Should have exactly 3 migrations applied, not duplicated.
-        assert rows["n"] == 3  # 3 migrations applied
+        # Should have exactly 4 migrations applied, not duplicated.
+        assert rows["n"] == 4  # 4 migrations applied
         store2.close()
 
     def test_tables_exist_after_migration(self, store):
@@ -79,7 +79,7 @@ class TestRetentionPruning:
         # Insert and mark as posted with an old timestamp.
         store.add_pending_post({"title": "Old", "body": "B", "url": ""})
         old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(timespec="seconds")
-        post = store.get_next_pending_post()
+        post = store.list_unposted_posts()[0]
         store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
 
         deleted = store.prune_posted_posts(max_age_days=30)
@@ -90,7 +90,7 @@ class TestRetentionPruning:
         """Recently posted posts should NOT be removed."""
         store.add_pending_post({"title": "Recent", "body": "B", "url": ""})
         recent_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
-        post = store.get_next_pending_post()
+        post = store.list_unposted_posts()[0]
         store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (recent_ts, post["id"]))
 
         deleted = store.prune_posted_posts(max_age_days=30)
@@ -148,7 +148,7 @@ class TestRetentionPruning:
         old_ts = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat(timespec="seconds")
         for i in range(100):
             store.add_pending_post({"title": f"Old{i}", "body": "B", "url": ""})
-            post = store.get_next_pending_post()
+            post = store.list_unposted_posts()[0]
             store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
 
         # Prune with small batch size.
@@ -208,23 +208,27 @@ class TestScoreColumnsMigration:
         conn.commit()
         conn.close()
 
-        # Reopen with NewsStore — migration 3 should apply and preserve the row.
+        # Reopen with NewsStore — migrations 3+4 should apply and preserve the row.
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT * FROM pending_posts WHERE title='Pre-existing'").fetchall()
         assert len(rows) == 1
         assert rows[0]["score_at_queue"] is None
         assert rows[0]["scored_at"] is None
-        # Verify migration 3 was applied.
+        # Migration 4 backfills legacy rows with merge_count=1 (additive default).
+        assert rows[0]["merge_count"] == 1
+        # Verify migration 4 was applied.
         version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert version_row["v"] == 3
+        assert version_row["v"] == 4
         store2.close()
 
 
-class TestReplaceUnpostedBatchWithScores:
-    """Verify replace_unposted_batch stores score components."""
+class TestAddStoriesToStoreWithScores:
+    """Verify add_stories_to_store stores score components (v2 successor of
+    TestReplaceUnpostedBatchWithScores — folded into test_store.py coverage,
+    kept here for the migration-3 column contract)."""
 
-    def test_replace_stores_score_components(self, store):
-        """replace_unposted_batch should store score_breakdown data in columns."""
+    def test_add_stores_score_components(self, store):
+        """add_stories_to_store should store score_breakdown data in columns."""
         from datetime import datetime, timezone
         bd = {
             "score": 123.4,
@@ -252,7 +256,7 @@ class TestReplaceUnpostedBatchWithScores:
             "candidate_id": "c001",
             "score_breakdown": bd,
         }
-        inserted, seen = store.replace_unposted_batch([post], [])
+        inserted = store.add_stories_to_store([post], [])
         assert inserted == 1
 
         row = store._conn.execute(
@@ -276,10 +280,10 @@ class TestReplaceUnpostedBatchWithScores:
         matched = json.loads(row["matched_topics"])
         assert matched == ["ai", "llm"]
 
-    def test_replace_without_score_breakdown(self, store):
-        """Posts without score_breakdown should still insert (NULL score columns)."""
+    def test_add_without_score_breakdown(self, store):
+        """Stories without score_breakdown should still insert (NULL score columns)."""
         post = {"title": "No Scores", "body": "B", "url": "https://example.com"}
-        inserted, _ = store.replace_unposted_batch([post], [])
+        inserted = store.add_stories_to_store([post], [])
         assert inserted == 1
         row = store._conn.execute(
             "SELECT score_at_queue, scored_at FROM pending_posts WHERE title='No Scores'"
@@ -294,7 +298,7 @@ class TestReplaceUnpostedBatchWithScores:
             "score": 50.0,
         }
         post = {"title": "JSON Test", "body": "B", "url": "", "score_breakdown": bd}
-        store.replace_unposted_batch([post], [])
+        store.add_stories_to_store([post], [])
         row = store._conn.execute(
             "SELECT matched_topics FROM pending_posts WHERE title='JSON Test'"
         ).fetchone()
@@ -325,7 +329,7 @@ class TestListUnpostedPosts:
         """Posted posts should not appear in list_unposted_posts."""
         store.add_pending_post({"title": "Unposted", "body": "B", "url": ""})
         store.add_pending_post({"title": "AlsoUnposted", "body": "B", "url": ""})
-        post = store.get_next_pending_post()
+        post = store.list_unposted_posts()[0]
         store.mark_posted(post["id"])
         unposted = store.list_unposted_posts()
         assert len(unposted) == 1

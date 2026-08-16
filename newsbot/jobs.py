@@ -190,7 +190,11 @@ class JobCoordinator:
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
 
-        post = self._store.get_next_pending_post()
+        # TEMPORARY (flow_001092 T2): get_next_pending_post() was removed with
+        # the v2 store redesign — the poster will pick the hottest styled row
+        # in a later task. Until then, keep oldest-first delivery semantics.
+        unposted = self._store.list_unposted_posts()
+        post = unposted[0] if unposted else None
         if not post:
             log.debug("no pending posts to deliver")
             return 3
