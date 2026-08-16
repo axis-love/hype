@@ -97,6 +97,7 @@ If you need one-shot execution (e.g. from a cron job or CI):
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
 | `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8; 0 = every 60s, NOT one-shot — use `--once`) |
 | `NEWS_POST_INTERVAL_MINUTES` | Minutes between individual post deliveries (default 60) |
+| `NEWS_STORE_CAP` | Max unposted rows kept in the store (default 36). After each digest the coldest rows are evicted. Known trade-off: an evicted story stays in `seen` for `NEWS_RETENTION_SEEN_DAYS` and cannot re-enter on the same URL. |
 | `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 

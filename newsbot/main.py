@@ -48,10 +48,10 @@ from newsbot.collectors import (
     huggingface_papers as hf_collector,
 )
 from newsbot.config import load_config
-from newsbot.db import NewsStore
-from newsbot.dedupe import dedupe_and_merge, _set_pre_merge_weights
+from newsbot.db import NewsStore, _as_dict
+from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
 from newsbot.jobs import JobCoordinator
-from newsbot.scoring import score_all
+from newsbot.scoring import current_temperature, score_all
 from newsbot.summarizer import _assign_candidate_ids, llm_filter, llm_style_posts, select_diverse_top_items
 
 log = logging.getLogger(__name__)
@@ -287,18 +287,21 @@ def _select_diverse_candidates(
 
 
 async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
-    """Generation cycle: collect → filter → score → LLM filter → LLM style → store posts.
+    """Generation cycle: collect → filter → score → LLM filter → store.
 
-    The queue replacement is transactional: existing unposted items are not
-    deleted until the new batch is fully built and ready. If any step fails
-    (collection, LLM, insertion), the prior queue remains intact.
+    v2 additive pipeline: digest fills the store with RAW scored stories
+    (body=''), merging duplicates into existing rows — no styling pass.
+    Styling happens at pick time (jobs). If the append fails, the store
+    keeps any merges already applied; nothing is ever bulk-deleted.
 
     Returns:
-        0 — success: new posts were queued and seen-items marked.
+        0 — success: store updated (rows appended and/or merged), survivors
+            marked seen. Empty appends with non-empty merges still count
+            as success.
         1 — failure: an error occurred (DB, LLM exception, etc.).
-        3 — no-progress: no new posts produced (empty collection, all seen,
-            LLM filter empty, styler empty). Distinct from success so the
-            scheduler can decide whether to advance the timestamp.
+        3 — no-progress: nothing to do (empty collection, all seen, LLM
+            filter empty). Distinct from success so the scheduler can
+            decide whether to advance the timestamp.
     """
     cfg = load_config(settings)
     # Sync pre-merge weights with active config so dedupe uses configured weights.
@@ -392,60 +395,64 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         log.warning("LLM filter kept zero items; nothing to post")
         return 3
 
-    # 7. Select a diverse top-N for styling.
+    # 7. Select a diverse top-N for the store.
     final = select_diverse_top_items(kept, cfg["max_final_news"])
-    log.info("selected %d diverse items for styling", len(final))
+    final = [_as_dict(item) for item in final]  # normalize Candidates to dicts
+    log.info("selected %d diverse items for the store", len(final))
 
-    # 8. Pass B — LLM styler (individual posts).
-    style_lm = _build_lm_client()
-    posts = await llm_style_posts(
-        final,
-        style_lm,
-        style_prompt=cfg["style_prompt"],
-        temperature=cfg["llm_temperature"],
-        max_tokens=cfg["llm_max_tokens_digest"],
-    )
-    if not posts:
-        log.warning("LLM styler produced zero posts; keeping existing queue")
-        return 3
-
-    # 9. Only mark seen the items that were actually styled into posts.
-    #    Items omitted by the styler must NOT be marked seen — they should
-    #    remain eligible for future generation cycles.
-    styled_ids = {p.get("candidate_id") for p in posts if p.get("candidate_id")}
-    seen_items = [item for item in final if item.get("candidate_id") in styled_ids]
-    omitted = len(final) - len(seen_items)
-    if omitted:
-        log.warning("LLM styler omitted %d items — not marking them seen", omitted)
-
-    # 9b. Enrich posts with score_breakdown by joining on candidate_id.
-    #     The styler returns narrow dicts (title, body, url, candidate_id).
-    #     We join back to the final items (which carry score_breakdown from
-    #     score_all()) so the DB can persist score components.
-    #     Never zip — the styler can reorder or omit items.
-    final_by_id = {}
+    # 8. Match survivors against the store.
+    store_rows = store.list_store_rows()
+    to_add: list[dict[str, Any]] = []
+    merges: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for item in final:
-        cid = item.get("candidate_id")
-        if cid:
-            bd = item.get("score_breakdown")
-            if bd:
-                final_by_id[cid] = bd
-    for post in posts:
-        cid = post.get("candidate_id")
-        if cid and cid in final_by_id:
-            post["score_breakdown"] = final_by_id[cid]
+        hit = match_candidate_to_store(item, store_rows)
+        if hit:
+            merges.append((hit, item))
+        else:
+            to_add.append(item)
 
-    # 10. Append raw stories to the store and mark items as seen (v2 additive).
-    #     If insertion fails, the existing store remains intact (rollback).
-    #     TEMPORARY (flow_001092 T2): dedup-merge, eviction, and style-at-pick
-    #     land in later tasks; this keeps the pipeline green meanwhile.
+    # 9. Merges: fold each duplicate into its existing store row
+    #    (per-field engagement max + engagement recompute inside).
+    for row, item in merges:
+        store.merge_into_store_row(row["id"], item, str(item.get("url") or ""))
+        updated = store._conn.execute(
+            "SELECT merge_count FROM pending_posts WHERE id=?", (row["id"],)
+        ).fetchone()
+        log.info(
+            "merged %r into store row %d (merge_count=%d)",
+            str(item.get("url") or item.get("title") or "?"),
+            row["id"],
+            int(updated["merge_count"]) if updated else -1,
+        )
+
+    # 10. Append new raw stories (body='') and mark ALL survivors seen —
+    #     added and merged alike; they live in the store now. The v1 rule
+    #     "styler omitted → don't mark seen" is obsolete: there is no styler.
     try:
-        inserted = store.add_stories_to_store(posts, seen_items)
+        inserted = store.add_stories_to_store(to_add, seen_items=final)
     except sqlite3.Error as exc:
-        log.error("additive store insert failed: %s — keeping existing store", exc)
+        log.error("additive store insert failed: %s — merges already applied", exc)
         return 1
+    log.info("appended %d raw stories (%d merged into existing rows)", inserted, len(merges))
 
-    log.info("appended %s raw stories to the store", inserted)
+    # 11. Eviction: trim the store back to NEWS_STORE_CAP, coldest first.
+    #     Known trade-off (documented in README): an evicted story stays in
+    #     `seen` for NEWS_RETENTION_SEEN_DAYS and cannot re-enter on the
+    #     same URL.
+    now_utc = datetime.now(timezone.utc)
+    post_rows = store.list_store_rows()
+    temps = {r["id"]: current_temperature(r, cfg, now=now_utc) for r in post_rows}
+    cap = int(os.getenv("NEWS_STORE_CAP", "36"))
+    evicted = store.evict_coldest(temps, cap=cap)
+    if evicted:
+        remaining_ids = {r["id"] for r in store.list_store_rows()}
+        gone = sorted(
+            ((tid, t) for tid, t in temps.items() if tid not in remaining_ids),
+            key=lambda kv: kv[1],
+        )
+        for tid, t in gone:
+            title = next((r["title"] for r in post_rows if r["id"] == tid), "?")
+            log.info("evicted coldest row %d (%s, temp=%.2f)", tid, title, t)
 
     return 0
 

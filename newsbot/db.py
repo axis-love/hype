@@ -38,6 +38,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from collections.abc import Sequence
 
 from newsbot.collectors.base import Candidate
 from newsbot.scoring import engagement
@@ -450,7 +451,7 @@ class NewsStore:
     # --- pending_posts as raw-story store (migration 4 / v2) -----------
 
     def add_stories_to_store(
-        self, stories: list[_StoryLike], seen_items: list[_StoryLike]
+        self, stories: Sequence[_StoryLike], seen_items: Sequence[_StoryLike]
     ) -> int:
         """Append RAW stories to the store and mark seen_items, atomically.
 

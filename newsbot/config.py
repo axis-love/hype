@@ -70,7 +70,9 @@ TOPIC_KEYWORDS: dict[str, list[str]] = {
 DEFAULT_RUN: dict[str, Any] = {
     "lookback_hours": 48,
     "max_candidates": 20,
-    "max_final_news": 8,
+    # v2: the store must feed 12 posts/day even when the threshold rejects,
+    # so digest carries more survivors per cycle.
+    "max_final_news": 14,
     "min_score": 35,
     "source_quota": 4,
     "item_prune_hours": 48,
