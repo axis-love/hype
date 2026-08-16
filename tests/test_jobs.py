@@ -265,7 +265,8 @@ class TestJobCoordinatorSerialization:
         async def capture_deliver():
             # Yield to let any concurrent call check the admission flag.
             await asyncio.sleep(0.05)
-            post = store.get_next_pending_post()
+            unposted = store.list_unposted_posts()
+            post = unposted[0] if unposted else None
             if post:
                 delivered_ids.append(post["id"])
                 store.mark_posted(post["id"])
@@ -313,8 +314,8 @@ class TestConcurrentGenerationPostingIntegration:
     """Integration tests using real NewsStore DB to verify queue integrity
     under concurrent generation+posting.
 
-    These tests exercise the real DB operations (replace_unposted_batch,
-    get_next_pending_post, mark_posted) through the JobCoordinator's
+    These tests exercise the real DB operations (add_stories_to_store,
+    list_unposted_posts, mark_posted) through the JobCoordinator's
     single-lock serialization, verifying no duplicate posts, no lost rows,
     and no reordering.
     """
@@ -325,9 +326,9 @@ class TestConcurrentGenerationPostingIntegration:
 
         Scenario: 3 pending posts in queue. Posting starts draining them
         (with a simulated slow Telegram call). Concurrently, generation
-        fires and replaces the unposted batch with new posts. The single
-        lock ensures posting finishes before generation replaces the queue,
-        so no post is delivered twice and no row is lost.
+        fires and APPENDS new stories to the store (v2 additive). The single
+        lock ensures posting finishes before generation appends, so no post
+        is delivered twice and no row is lost.
         """
         # Pre-populate the queue with 3 posts.
         for i in range(3):
@@ -347,7 +348,7 @@ class TestConcurrentGenerationPostingIntegration:
         seen_items = [{"url": f"http://new{i}.com", "title": f"New{i}"} for i in range(3)]
 
         async def gen_fn():
-            store.replace_unposted_batch(new_posts, seen_items)
+            store.add_stories_to_store(new_posts, seen_items)
             return 0
 
         with patch("newsbot.jobs.post_digest", new=slow_post_digest):
@@ -362,23 +363,20 @@ class TestConcurrentGenerationPostingIntegration:
 
         # Generation should succeed.
         assert gen_result == 0
-        # Posting should succeed (delivered one of the old posts).
+        # Posting should succeed (delivered one post).
         assert post_result == 0
 
         # No title should appear more than once — no duplicate delivery.
         assert len(delivered_titles) == len(set(delivered_titles)), \
             f"Duplicate delivery detected: {delivered_titles}"
 
-        # The delivered post is from whichever batch was in the queue when
-        # posting acquired the lock. Since generation starts first, it
-        # replaces the queue before posting runs — so the delivered post
-        # is from the new batch. Either way, no duplicate delivery occurs.
+        # Generation appended 3 stories; posting delivered 1 (oldest-first,
+        # so from the original batch). No post lost or duplicated.
         assert len(delivered_titles) == 1, f"Expected 1 delivery, got {delivered_titles}"
 
-        # After both jobs, the queue should have the remaining new posts
-        # (3 new posts minus the 1 that was posted).
+        # After both jobs: 3 old + 3 new − 1 delivered = 5 pending.
         remaining = store.count_pending()
-        assert remaining == 2
+        assert remaining == 5
 
     @pytest.mark.asyncio
     async def test_concurrent_posting_no_duplicate_or_loss(self, coordinator, store):
@@ -452,7 +450,7 @@ class TestConcurrentGenerationPostingIntegration:
         seen_items = [{"url": "http://fresh.com", "title": "FreshPost"}]
 
         async def gen_fn():
-            store.replace_unposted_batch(new_posts, seen_items)
+            store.add_stories_to_store(new_posts, seen_items)
             return 0
 
         with patch("newsbot.jobs.post_digest", new=tracking_post_digest):
@@ -487,11 +485,11 @@ class TestConcurrentGenerationPostingIntegration:
 
         async def gen_a():
             await asyncio.sleep(0.02)
-            store.replace_unposted_batch(posts_a, seen_a)
+            store.add_stories_to_store(posts_a, seen_a)
             return 0
 
         async def gen_b():
-            store.replace_unposted_batch(posts_b, seen_b)
+            store.add_stories_to_store(posts_b, seen_b)
             return 0
 
         results = await asyncio.gather(
@@ -505,7 +503,7 @@ class TestConcurrentGenerationPostingIntegration:
 
         # Queue has exactly 1 post (from whichever generation ran).
         assert store.count_pending() == 1
-        post = store.get_next_pending_post()
+        post = store.list_unposted_posts()[0]
         assert post is not None
         assert post["title"] in ("A", "B")
 
@@ -609,7 +607,7 @@ def test_format_scores_with_scored_posts(tmp_path):
         "url": "https://example.com",
         "score_breakdown": bd,
     }
-    store.replace_unposted_batch([post], [])
+    store.add_stories_to_store([post], [])
 
     result = _format_scores(store)
     assert "Test Post About LLMs" in result
@@ -698,7 +696,7 @@ def test_format_scores_queue_order(tmp_path):
     bd1 = {"score": 100.0, "source": "hn", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 50.0, "recency": 0.9, "source_weight": 1.2, "topic_bonus": 0, "crosspost_bonus": 0.0, "penalty": 1.0, "published_at": "2026-07-28T10:00:00+00:00", "upvotes": 100, "comments": 10, "stars": 0, "reposts": 0, "crosspost_count": 1}
     bd2 = {"score": 200.0, "source": "reddit", "matched_topics": [], "scored_at": "2026-07-28T12:00:00+00:00", "lookback_hours": 48, "engagement": 150.0, "recency": 0.9, "source_weight": 1.0, "topic_bonus": 0, "crosspost_bonus": 30.0, "penalty": 1.0, "published_at": "2026-07-28T10:00:00+00:00", "upvotes": 200, "comments": 50, "stars": 0, "reposts": 0, "crosspost_count": 2}
 
-    store.replace_unposted_batch([
+    store.add_stories_to_store([
         {"title": "First Post", "body": "B", "url": "https://a.com", "score_breakdown": bd1},
         {"title": "Second Post", "body": "B", "url": "https://b.com", "score_breakdown": bd2},
     ], [])

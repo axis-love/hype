@@ -435,15 +435,17 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         if cid and cid in final_by_id:
             post["score_breakdown"] = final_by_id[cid]
 
-    # 10. Atomically replace unposted queue with new posts and mark items as seen.
-    #     If insertion fails, the old queue remains intact (rollback).
+    # 10. Append raw stories to the store and mark items as seen (v2 additive).
+    #     If insertion fails, the existing store remains intact (rollback).
+    #     TEMPORARY (flow_001092 T2): dedup-merge, eviction, and style-at-pick
+    #     land in later tasks; this keeps the pipeline green meanwhile.
     try:
-        inserted, seen = store.replace_unposted_batch(posts, seen_items)
+        inserted = store.add_stories_to_store(posts, seen_items)
     except sqlite3.Error as exc:
-        log.error("transactional queue replacement failed: %s — keeping existing queue", exc)
+        log.error("additive store insert failed: %s — keeping existing store", exc)
         return 1
 
-    log.info("queued %d posts for delivery (marked %d items as seen)", inserted, seen)
+    log.info("appended %s raw stories to the store", inserted)
 
     return 0
 

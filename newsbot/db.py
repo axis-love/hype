@@ -1,13 +1,33 @@
 """SQLite-backed news bot storage.
 
 Tables:
-  - pending_posts: individual posts waiting to be sent to Telegram
-  - seen:          URLs/titles already delivered (dedup state)
-  - schema_version: migration tracking
+  - pending_posts:   the STORY STORE — raw scored news waiting to be styled
+                     and delivered (and, after delivery, the posted archive)
+  - daily_summaries: one recap post per local day (migration 4)
+  - seen:            URLs/titles already delivered (dedup state)
+  - schema_version:  migration tracking
 
 WAL mode, autocommit, single connection per process — same pattern as
 core/settings_store.py. Schema evolution is handled by a lightweight
 migration mechanism that records applied versions in schema_version.
+
+Store semantics (migration 4 / v2):
+  The digest APPENDS raw scored stories (add_stories_to_store); it never
+  clears the queue. Duplicates merge into existing rows (merge_into_store_row),
+  and the poster styles a single winner at pick time (set_styled_content).
+
+  ``body`` stays NOT NULL (SQLite cannot relax NOT NULL without a table
+  rebuild), so new raw rows insert ``body=''``. The poster fills ``body`` +
+  ``styled_at`` when it styles the winner. The marker for "raw, not yet
+  styled" is therefore ``body='' AND styled_at IS NULL``.
+
+  ``posted_at`` means "delivered to the Telegram channel" — nothing else.
+  Future consumers (girllm hot_take feeder, blog writer) get a
+  ``deliveries(post_id, channel, delivered_at)`` table (planned migration 5);
+  do not overload ``posted_at`` as a general consumption marker.
+
+  Legacy rows (pre-migration-4) carry merge_count=1 and NULL in the new
+  columns; all reads must be NULL-safe.
 """
 
 from __future__ import annotations
@@ -19,8 +39,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from newsbot.collectors.base import Candidate
+from newsbot.scoring import engagement
 
 log = logging.getLogger(__name__)
+
+#: Story/candidate input: plain dicts or collector Candidate dataclasses
+#: (same union shape used by summarizer.py).
+_StoryLike = dict[str, Any] | Candidate
+
+
+def _as_dict(item: _StoryLike) -> dict[str, Any]:
+    """Normalize a story/candidate to a plain dict (Candidate.to_dict())."""
+    if isinstance(item, Candidate):
+        return item.to_dict()
+    return item
 
 
 def _utc_now_iso() -> str:
@@ -147,6 +180,35 @@ def _migration_3(cur: sqlite3.Cursor) -> None:
     cur.execute("ALTER TABLE pending_posts ADD COLUMN crosspost_bonus REAL")
     cur.execute("ALTER TABLE pending_posts ADD COLUMN matched_topics TEXT")
     cur.execute("ALTER TABLE pending_posts ADD COLUMN scored_at TEXT")
+
+
+@_migration(4, "Additive raw-story store: merge/raw-material columns + daily_summaries")
+def _migration_4(cur: sqlite3.Cursor) -> None:
+    """Turn pending_posts into an additive raw-story store.
+
+    Additive-only: ALTER ADD columns (existing rows get merge_count=1 and
+    NULL elsewhere) plus the daily_summaries table. No rebuild — ``body``
+    keeps its NOT NULL constraint, so raw rows insert ``body=''``.
+    """
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN merge_count INTEGER NOT NULL DEFAULT 1")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN merged_urls TEXT")  # JSON list, audit trail
+    # Raw material for style-at-pick and for future consumers (girllm, blog).
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN snippet TEXT")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN source_name TEXT")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN raw_json TEXT")  # JSON, collector payload
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN styled_at TEXT")  # set when the styler ran
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_summaries(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL UNIQUE,
+          posted_at TEXT NOT NULL,
+          summary_text TEXT NOT NULL,
+          model_used TEXT,
+          item_count INTEGER
+        )
+        """
+    )
 
 
 class NewsStore:
@@ -374,18 +436,6 @@ class NewsStore:
             return None
         return int(cur.lastrowid)
 
-    def get_next_pending_post(self) -> Optional[dict[str, Any]]:
-        """Get the oldest unposted post from the queue."""
-        row = self._conn.execute(
-            """
-            SELECT * FROM pending_posts
-            WHERE posted_at IS NULL
-            ORDER BY created_at ASC, id ASC
-            LIMIT 1
-            """
-        ).fetchone()
-        return dict(row) if row else None
-
     def mark_posted(self, post_id: int) -> None:
         """Mark a pending post as posted."""
         self._conn.execute(
@@ -393,49 +443,50 @@ class NewsStore:
             (_utc_now_iso(), post_id),
         )
 
-    # Note: clear_unposted() was removed — replace_unposted_batch()
-    # handles queue replacement transactionally. No callers remain.
+    # Note: clear_unposted(), replace_unposted_batch(), and
+    # get_next_pending_post() were removed in the v2 store redesign —
+    # the store is now additive (see module docstring).
 
-    def replace_unposted_batch(
-        self, new_posts: list[dict[str, Any]], seen_items: list[dict[str, Any]]
-    ) -> tuple[int, int]:
-        """Atomically replace unposted posts with a new batch and mark items as seen.
+    # --- pending_posts as raw-story store (migration 4 / v2) -----------
 
-        Each post in new_posts may carry a 'score_breakdown' dict (from
-        score_all()) with all hype score components. These are stored in
-        dedicated columns for audit/debugging via /scores.
+    def add_stories_to_store(
+        self, stories: list[_StoryLike], seen_items: list[_StoryLike]
+    ) -> int:
+        """Append RAW stories to the store and mark seen_items, atomically.
 
-        This performs clear + insert + mark-seen in a single transaction.
-        If any insertion fails, the transaction is rolled back and the
-        previous queue remains intact.
+        Accepts plain dicts or collector Candidate dataclasses (both carry
+        the same fields; Candidates are normalized via to_dict()).
 
-        Returns (posts_inserted, seen_marked).
+        Raw rows insert body='' (NOT NULL cannot be relaxed); the poster
+        fills body + styled_at at pick time. Every score-component column
+        is persisted from story['score_breakdown']. NO delete of unposted
+        rows — the store is additive.
+
+        Returns the number of rows inserted.
         Raises sqlite3.Error on failure (transaction rolled back).
         """
         now = _utc_now_iso()
-        posts_inserted = 0
-        seen_marked = 0
-
         cur = self._conn.cursor()
         try:
-            # Use explicit transaction (autocommit is normally on).
             cur.execute("BEGIN IMMEDIATE")
 
-            # 1. Clear old unposted posts.
-            cur.execute("DELETE FROM pending_posts WHERE posted_at IS NULL")
-
-            # 2. Insert new posts with score data (batched via executemany).
             post_rows = []
-            for post in new_posts:
-                bd = post.get("score_breakdown") or {}
+            for raw_story in stories:
+                story = _as_dict(raw_story)
+                bd = story.get("score_breakdown") or {}
+                raw_json = story.get("raw_json")
+                if raw_json is not None and not isinstance(raw_json, str):
+                    raw_json = json.dumps(raw_json)
                 post_rows.append((
-                    str(post.get("title") or "").strip(),
-                    str(post.get("body") or "").strip(),
-                    str(post.get("category") or "").strip() or None,
-                    post.get("importance"),
-                    str(post.get("url") or "").strip() or None,
+                    str(story.get("title") or "").strip(),
+                    "",  # body — raw, not yet styled
+                    str(story.get("category") or "").strip() or None,
+                    str(story.get("url") or "").strip() or None,
                     now,
-                    # Score columns (from score_breakdown, nullable for legacy).
+                    str(story.get("snippet") or "").strip() or None,
+                    str(story.get("source_name") or "").strip() or None,
+                    raw_json,
+                    # Score columns (from score_breakdown).
                     bd.get("source"),
                     bd.get("published_at"),
                     bd.get("upvotes"),
@@ -458,24 +509,23 @@ class NewsStore:
                 cur.executemany(
                     """
                     INSERT INTO pending_posts(
-                        title, body, category, importance, url, created_at,
+                        title, body, category, url, created_at,
+                        snippet, source_name, raw_json,
                         source, published_at, upvotes, comments, stars, reposts,
                         crosspost_count, penalty, lookback_hours,
                         score_at_queue, engagement_score, recency_at_queue,
                         source_weight, topic_bonus, crosspost_bonus,
                         matched_topics, scored_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     post_rows,
                 )
-                posts_inserted = len(post_rows)
 
-            # 3. Mark source items as seen (batched via executemany).
             seen_rows = [
                 (str(item.get("url") or "").strip() or None,
                  str(item.get("title") or "").strip().lower() or None,
                  now)
-                for item in seen_items
+                for item in map(_as_dict, seen_items)
                 if str(item.get("url") or "").strip() or str(item.get("title") or "").strip()
             ]
             if seen_rows:
@@ -483,13 +533,10 @@ class NewsStore:
                     "INSERT OR IGNORE INTO seen(url, title, first_seen_at) VALUES(?,?,?)",
                     seen_rows,
                 )
-                # Use actual rowcount (duplicates ignored by OR IGNORE),
-                # not len(seen_rows) which counts attempted inserts.
-                seen_marked = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
             cur.execute("COMMIT")
         except Exception as exc:
-            log.error("replace_unposted_batch failed, rolling back: %s", exc)
+            log.error("add_stories_to_store failed, rolling back: %s", exc)
             try:
                 cur.execute("ROLLBACK")
             except Exception:
@@ -498,7 +545,209 @@ class NewsStore:
         finally:
             cur.close()
 
-        return posts_inserted, seen_marked
+        return len(post_rows)
+
+    _STORE_SELECT = (
+        "id, title, url, snippet, source_name, raw_json, category, "
+        "source, published_at, upvotes, comments, stars, reposts, "
+        "crosspost_count, penalty, lookback_hours, "
+        "score_at_queue, engagement_score, recency_at_queue, "
+        "source_weight, topic_bonus, crosspost_bonus, "
+        "matched_topics, scored_at, merge_count, merged_urls"
+    )
+
+    def list_store_rows(self) -> list[dict]:
+        """Return all unposted store rows (raw material + score components)."""
+        rows = self._conn.execute(
+            f"SELECT {self._STORE_SELECT} FROM pending_posts "
+            "WHERE posted_at IS NULL ORDER BY created_at ASC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def merge_into_store_row(
+        self, row_id: int, candidate: _StoryLike, extra_url: str
+    ) -> None:
+        """Merge a duplicate candidate into an existing store row.
+
+        merge_count += 1; raw engagement fields take per-field max(stored,
+        candidate); published_at takes the max; extra_url is appended to
+        merged_urls (deduped). engagement_score is RECOMPUTED via
+        scoring.engagement() from the merged raw fields — never copied from
+        either side — so a hotter stored row can never lose temperature to a
+        colder candidate. The remaining components (source_weight,
+        topic_bonus, crosspost_bonus, penalty, lookback_hours) refresh from
+        candidate['score_breakdown'], and score_at_queue is recomputed from
+        the rebuilt components using the queue-time formula:
+        (engagement * recency * source_weight + topic_bonus + crosspost_bonus)
+        * penalty.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM pending_posts WHERE id=?", (row_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"merge_into_store_row: no such row id={row_id}")
+        candidate = _as_dict(candidate)
+        bd = candidate.get("score_breakdown") or {}
+
+        def _field_max(column: str, candidate_key: str) -> int:
+            stored = row[column]
+            cand = (bd.get(candidate_key) if candidate_key in bd else candidate.get(candidate_key))
+            stored_v = int(stored) if stored is not None else 0
+            cand_v = int(cand) if cand is not None else 0
+            return max(stored_v, cand_v)
+
+        upvotes = _field_max("upvotes", "upvotes")
+        comments = _field_max("comments", "comments")
+        stars = _field_max("stars", "stars")
+        reposts = _field_max("reposts", "reposts")
+
+        # published_at: max of stored vs candidate (ISO strings compare
+        # chronologically when formats match; fall back to whichever exists).
+        stored_pub = row["published_at"] or ""
+        cand_pub = str(bd.get("published_at") or candidate.get("published_at") or "")
+        published_at = max(stored_pub, cand_pub) or None
+
+        merged_urls: list[str] = []
+        if row["merged_urls"]:
+            try:
+                merged_urls = list(json.loads(row["merged_urls"]))
+            except (json.JSONDecodeError, TypeError):
+                merged_urls = []
+        url = str(extra_url or "").strip()
+        if url and url not in merged_urls:
+            merged_urls.append(url)
+
+        # Recompute engagement from the merged raw fields — never copy.
+        merged_engagement = engagement({
+            "upvotes": upvotes, "comments": comments,
+            "stars": stars, "reposts": reposts,
+        })
+
+        # Refresh the non-engagement components from the candidate breakdown.
+        source_weight = bd.get("source_weight")
+        if source_weight is None:
+            source_weight = row["source_weight"]
+        topic_bonus_v = bd.get("topic_bonus")
+        if topic_bonus_v is None:
+            topic_bonus_v = row["topic_bonus"]
+        crosspost_bonus = bd.get("crosspost_bonus")
+        if crosspost_bonus is None:
+            crosspost_bonus = row["crosspost_bonus"]
+        penalty = bd.get("penalty")
+        if penalty is None:
+            penalty = row["penalty"]
+        lookback_hours = bd.get("lookback_hours")
+        if lookback_hours is None:
+            lookback_hours = row["lookback_hours"]
+
+        # Rebuild score_at_queue from the merged components (queue-time
+        # formula; recency_at_queue is the stored snapshot).
+        recency = row["recency_at_queue"]
+        recency_v = float(recency) if recency is not None else 0.0
+        weight_v = float(source_weight) if source_weight is not None else 1.0
+        penalty_v = float(penalty) if penalty is not None else 1.0
+        score_at_queue = (
+            merged_engagement * recency_v * weight_v
+            + float(topic_bonus_v or 0) + float(crosspost_bonus or 0)
+        ) * penalty_v
+
+        self._conn.execute(
+            """
+            UPDATE pending_posts SET
+                merge_count = merge_count + 1,
+                merged_urls = ?,
+                upvotes = ?, comments = ?, stars = ?, reposts = ?,
+                published_at = ?,
+                engagement_score = ?,
+                source_weight = ?, topic_bonus = ?, crosspost_bonus = ?,
+                penalty = ?, lookback_hours = ?,
+                score_at_queue = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(merged_urls),
+                upvotes, comments, stars, reposts,
+                published_at,
+                merged_engagement,
+                source_weight, topic_bonus_v, crosspost_bonus,
+                penalty, lookback_hours,
+                score_at_queue,
+                row_id,
+            ),
+        )
+
+    def set_styled_content(self, row_id: int, title: str, body: str) -> None:
+        """Fill the styled title/body and stamp styled_at (UTC ISO).
+
+        Called by the poster after styling the picked winner. Clears the
+        raw-not-yet-styled marker (body='' AND styled_at IS NULL).
+        """
+        self._conn.execute(
+            "UPDATE pending_posts SET title=?, body=?, styled_at=? WHERE id=?",
+            (title, body, _utc_now_iso(), row_id),
+        )
+
+    def evict_coldest(self, temps: dict[int, float], cap: int) -> int:
+        """Delete unposted rows with the lowest temperatures until count <= cap.
+
+        temps maps row_id -> raw current temperature (computed by the caller).
+        Rows missing from temps are treated as coldest-first by id. Never
+        touches posted rows. Returns the number of rows evicted.
+        """
+        rows = self._conn.execute(
+            "SELECT id FROM pending_posts WHERE posted_at IS NULL"
+        ).fetchall()
+        count = len(rows)
+        if count <= cap:
+            return 0
+        # Sort by temperature ascending; unknown ids sort coldest (stable by id).
+        ids_sorted = sorted(
+            (r["id"] for r in rows),
+            key=lambda rid: (temps.get(rid, float("-inf")), rid),
+        )
+        to_evict = ids_sorted[:count - cap]
+        if not to_evict:
+            return 0
+        placeholders = ",".join("?" * len(to_evict))
+        cur = self._conn.execute(
+            f"DELETE FROM pending_posts WHERE posted_at IS NULL AND id IN ({placeholders})",
+            to_evict,
+        )
+        evicted = int(cur.rowcount or 0)
+        if evicted:
+            log.info("evicted %d coldest store rows (cap=%d)", evicted, cap)
+        return evicted
+
+    def list_posted_since(self, since_iso: str) -> list[dict]:
+        """Return posted rows with posted_at >= since_iso, oldest first.
+
+        Boundary is inclusive. Source rows for the daily summary.
+        """
+        rows = self._conn.execute(
+            f"SELECT {self._STORE_SELECT}, body, styled_at, posted_at FROM pending_posts "
+            "WHERE posted_at IS NOT NULL AND posted_at >= ? ORDER BY posted_at ASC",
+            (since_iso,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- daily_summaries -------------------------------------------------
+
+    def add_summary(self, day: str, text: str, model: str, item_count: int) -> None:
+        """Record a delivered daily summary. day UNIQUE guards against dupes."""
+        self._conn.execute(
+            """
+            INSERT INTO daily_summaries(day, posted_at, summary_text, model_used, item_count)
+            VALUES(?,?,?,?,?)
+            """,
+            (day, _utc_now_iso(), text, model, item_count),
+        )
+
+    def get_summary_for_day(self, day: str) -> Optional[dict]:
+        """Return the summary row for a local day ('YYYY-MM-DD'), or None."""
+        row = self._conn.execute(
+            "SELECT * FROM daily_summaries WHERE day=?", (day,)
+        ).fetchone()
+        return dict(row) if row else None
 
     def count_pending(self) -> int:
         """Count unposted posts in the queue."""

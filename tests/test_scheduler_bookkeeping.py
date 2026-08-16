@@ -444,7 +444,7 @@ class TestRetentionConfigurable:
         store = NewsStore(tmp_path / "test.sqlite")
         # Add a posted post with an old timestamp so it's eligible for pruning.
         store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
-        post = store.get_next_pending_post()
+        post = store.list_unposted_posts()[0]
         store.mark_posted(post["id"])
         # Set posted_at to 5 days ago.
         old_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
@@ -471,7 +471,7 @@ class TestRetentionConfigurable:
 
         store = NewsStore(tmp_path / "test.sqlite")
         store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
-        post = store.get_next_pending_post()
+        post = store.list_unposted_posts()[0]
         store.mark_posted(post["id"])
 
         # Clear retention env vars to test defaults.
