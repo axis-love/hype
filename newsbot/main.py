@@ -649,6 +649,10 @@ async def _scheduler_post_iteration(
             log.info("posting skipped — already in progress")
         elif result == 3:
             log.debug("no pending posts to deliver")
+        elif result == 4:
+            # Nothing hot enough — a healthy slot skip. The slot IS consumed
+            # (threshold skip), so advance last_post_utc to keep cadence.
+            post_success = True
         else:
             log.error("posting failed (code=%d)", result)
     except Exception as exc:
@@ -716,6 +720,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 raise RuntimeError("posting already in progress — skipped")
             if result == 3:
                 raise RuntimeError("no pending posts to deliver")
+            if result == 4:
+                raise RuntimeError("nothing hot enough to post right now")
             if result == 1:
                 raise RuntimeError("posting failed — check logs for details")
 
