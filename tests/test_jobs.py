@@ -570,7 +570,7 @@ def test_format_scores_empty_queue(tmp_path):
     from newsbot.db import NewsStore
     from newsbot.main import _format_scores
     store = NewsStore(tmp_path / "test.sqlite")
-    result = _format_scores(store)
+    result = _format_scores(store, {"lookback_hours": 48})
     assert result == "No queued posts."
     store.close()
 
@@ -609,7 +609,7 @@ def test_format_scores_with_scored_posts(tmp_path):
     }
     store.add_stories_to_store([post], [])
 
-    result = _format_scores(store)
+    result = _format_scores(store, {"lookback_hours": 48})
     assert "Test Post About LLMs" in result
     assert "queued" in result
     assert "now" in result
@@ -631,7 +631,7 @@ def test_format_scores_with_legacy_rows(tmp_path):
     # Insert a legacy post (no score data).
     store.add_pending_post({"title": "Legacy Post", "body": "B", "url": ""})
 
-    result = _format_scores(store)
+    result = _format_scores(store, {"lookback_hours": 48})
     assert "score unavailable" in result
     assert "Legacy Post" in result
     store.close()
@@ -677,7 +677,7 @@ def test_format_scores_mixed_queue(tmp_path):
         ),
     )
 
-    result = _format_scores(store)
+    result = _format_scores(store, {"lookback_hours": 48})
     # Both posts should appear.
     assert "Legacy Post" in result
     assert "Scored Post" in result
@@ -701,7 +701,7 @@ def test_format_scores_queue_order(tmp_path):
         {"title": "Second Post", "body": "B", "url": "https://b.com", "score_breakdown": bd2},
     ], [])
 
-    result = _format_scores(store)
+    result = _format_scores(store, {"lookback_hours": 48})
     # First Post should appear before Second Post.
     idx_first = result.find("First Post")
     idx_second = result.find("Second Post")

@@ -253,6 +253,51 @@ def score_breakdown(
     }
 
 
+def current_recency(row: dict[str, Any], config: dict[str, Any], *, now: datetime) -> float:
+    """Recency for a STORE ROW (DB dict) as of ``now``.
+
+    Lookback resolves row['lookback_hours'] first, falling back to the
+    config default (matching score_breakdown). Rows without a parseable
+    published_at inherit recency_decay's neutral 0.5.
+    """
+    lookback_hours = row.get("lookback_hours") or config.get("lookback_hours") or 48
+    return recency_decay(row.get("published_at"), lookback_hours=float(lookback_hours), now=now)
+
+
+def current_temperature(row: dict[str, Any], config: dict[str, Any], *, now: datetime) -> float:
+    """Recompute the hype score for a STORE ROW (DB dict) as of ``now``.
+
+    Reuses the persisted components (engagement_score, source_weight,
+    topic_bonus, crosspost_bonus, penalty) unchanged; ONLY recency is
+    recomputed via recency_decay from row['published_at'] and the row's
+    lookback_hours (config default when NULL). Formula identical to
+    score_breakdown: (eng * rec * w + topic + crosspost) * penalty.
+
+    Legacy rows (engagement_score NULL — queued before scoring existed)
+    have no reconstructable temperature and return 0.0.
+    """
+    eng = row.get("engagement_score")
+    if eng is None:
+        return 0.0
+    rec = current_recency(row, config, now=now)
+    weight = row.get("source_weight")
+    weight = float(weight) if weight is not None else 1.0
+    topic = row.get("topic_bonus") or 0
+    crosspost = row.get("crosspost_bonus") or 0.0
+    penalty = row.get("penalty")
+    penalty = float(penalty) if penalty is not None else 1.0
+    return (float(eng) * rec * weight + topic + crosspost) * penalty
+
+
+def merge_multiplier(merge_count: int | None, *, bonus: float = 0.2, cap: float = 2.0) -> float:
+    """Ranking multiplier for merged stories: min(1 + bonus * max(0, (count or 1) - 1), cap).
+
+    None/0/1 merges -> 1.0. Pick-time only: boosts ranking, never eligibility.
+    """
+    count = merge_count or 1
+    return min(1.0 + bonus * max(0, count - 1), cap)
+
+
 def hype_score(
     item: dict[str, Any],
     config: dict[str, Any],
