@@ -3,30 +3,34 @@
 A lightweight hype-driven tech news bot. Collects candidate news from
 engagement-bearing sources (Hacker News, Reddit, GitHub, Product Hunt,
 Hugging Face Papers, RSS), ranks by hype signals, deduplicates across
-sources, filters and styles via an OpenAI-compatible LLM, and posts
-individual news items to a Telegram channel on an hourly schedule.
+sources, filters via an OpenAI-compatible LLM, and posts the hottest
+stories to a Telegram channel — styled on demand, gated by a live
+temperature threshold.
 
 ## What it does
 
 ```text
-GENERATION (every 8h):
+GENERATION (wall-clock slots, default 05:00 + 17:00 NEWS_TZ):
   collect (HN/Reddit/GitHub/PH/HF Papers/RSS)
     → filter already-seen
-    → cross-source dedupe + merge engagement
+    → cross-source dedupe + merge engagement (merged rows re-score hotter)
     → score by hype (upvotes, comments, stars, recency, topic, crossposts)
     → LLM Pass A: filter garbage, classify, importance, one-line summary (JSON)
-    → LLM Pass B: style individual posts (JSON: title + body per item)
-    → store 8 posts in pending_posts table (atomic replacement)
-    → mark items seen
+    → append RAW stories to the store (no styling yet); evict coldest past cap
 
-POSTING (every 1h):
-  pull oldest unposted post from pending_posts
-    → post to Telegram
-    → mark as posted
+POSTING (even hours, NEWS_TZ):
+  pick hottest store row above the live threshold
+    (threshold = max(floor, ratio × median store temperature))
+    → LLM Pass B: style the single winner (title + body)
+    → post to Telegram → mark posted
+
+DAILY SUMMARY (13:00 NEWS_TZ):
+  recap the last 24h of posted news → post as one recap message
 ```
 
-The code decides what's trending; the LLM filters and writes the posts.
-Posts are delivered one at a time, spread over the interval.
+The code decides what's trending; the LLM filters, and styles each
+story exactly once, at the moment it is picked. Stories that never
+reach the threshold are never styled — no wasted LLM calls.
 
 ## Quick start
 
@@ -38,12 +42,8 @@ python -m newsbot.main --once  # one-shot mode (generates + posts all immediatel
 ```
 
 Without `BOT_TOKEN` and `NEWS_CHANNEL_ID`, the bot runs in dry-run mode
-(printing posts to stdout). Without `NEWS_INTERVAL_HOURS`, it runs once
-and exits.
-
-> **Note:** `NEWS_INTERVAL_HOURS=0` does NOT mean one-shot — it causes
-> generation every 60 seconds. Use `--once` for one-shot mode, or leave
-> `NEWS_INTERVAL_HOURS` unset for dry-run single execution.
+(printing posts to stdout). Scheduled mode runs forever — use `--once`
+for a single generate-and-drain pass (e.g. from cron or CI).
 
 ## Bot Commands
 
@@ -53,18 +53,28 @@ user can issue commands.
 
 | Command | Action |
 |---|---|
-| `/setstyle <text>` | Update the style prompt for Pass B (post writing) |
+| `/setstyle <text>` | Update the style prompt for post writing |
 | `/style` | Show the current style prompt |
-| `/digest` | Trigger a generation cycle immediately (collect → filter → style → queue) |
-| `/post` | Post the next pending post to the channel immediately |
-| `/status` | Show pending posts count + schedule info |
+| `/digest` | Trigger a generation cycle immediately (collect → filter → store raw; styling happens at pick) |
+| `/post` | Pick the hottest store story, style and post it now |
+| `/scores` | Show hype scores for all store rows (hottest first, with live threshold) |
+| `/status` | Show store counts, threshold, slots and schedule info |
+| `/summary` | Run the daily recap job now |
 | `/help` | List commands |
 
 ## Scheduling
 
 The bot has a **built-in scheduler** — do NOT use external cron for
-scheduled mode. The container runs three concurrent async loops
-(generation, posting, bot commands) and stays alive as long as needed.
+scheduled mode. The container runs four concurrent async loops
+(generation, posting, daily summary, bot commands) and stays alive as
+long as needed. All times are wall-clock in `NEWS_TZ` (default
+`Asia/Bangkok`).
+
+| Job | Schedule | Notes |
+|---|---|---|
+| Generation | `NEWS_GEN_HOURS` (default `5,17`) | One digest per listed hour. **Catch-up:** if the process was down past a slot, the most recent due slot fires exactly once when it comes back. |
+| Posting | Even hours (00, 02, …, 22) | One pick per slot; skipped (never backfilled) if the bot was down. |
+| Daily summary | 13:00 | Recaps the last 24h of posted news. |
 
 ```bash
 # Scheduled mode (recommended) — stays alive, handles its own timing
@@ -77,9 +87,31 @@ If you need one-shot execution (e.g. from a cron job or CI):
 0 9 * * * cd /opt/newsbot && python -m newsbot.main --once
 ```
 
+`--once` generates one digest, then drains the store (posting every row
+hot enough) and exits.
+
 > **Warning:** Do NOT run `python -m newsbot.main` (without `--once`)
 > from cron — it starts a long-lived process that never exits. Multiple
 > invocations will create duplicate bot instances posting to the same channel.
+
+## Store semantics
+
+Generation appends **raw** scored stories to a persistent store;
+styling happens at pick time on the single winner (style-at-pick), so
+each story costs at most one styling LLM call.
+
+- **Merge:** when a new candidate duplicates an existing store story,
+  its engagement merges into the stored row (per-field max), and the
+  row re-scores hotter — a hot story seen on two sources beats the
+  same story seen once. Merged rows rank higher via the merge
+  multiplier (ranking only; it never makes a cold row eligible).
+- **Posting gate:** each posting slot picks the hottest row whose raw
+  temperature ≥ `max(NEWS_TEMP_FLOOR, NEWS_THRESHOLD_RATIO × median)`.
+  Below-threshold slots post nothing — quiet hours stay quiet.
+- **Eviction:** after each digest, the coldest rows past
+  `NEWS_STORE_CAP` are evicted. Known trade-off: an evicted story
+  stays in `seen` for `NEWS_RETENTION_SEEN_DAYS` and cannot re-enter
+  on the same URL.
 
 ## Environment
 
@@ -95,9 +127,13 @@ If you need one-shot execution (e.g. from a cron job or CI):
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
-| `NEWS_INTERVAL_HOURS` | Hours between generation cycles (default 8; 0 = every 60s, NOT one-shot — use `--once`) |
-| `NEWS_POST_INTERVAL_MINUTES` | Minutes between individual post deliveries (default 60) |
+| `NEWS_TZ` | Wall-clock timezone for all schedules (default `Asia/Bangkok`) |
+| `NEWS_GEN_HOURS` | Comma-separated local hours for digests (default `5,17`; catch-up fires once after downtime) |
 | `NEWS_STORE_CAP` | Max unposted rows kept in the store (default 36). After each digest the coldest rows are evicted. Known trade-off: an evicted story stays in `seen` for `NEWS_RETENTION_SEEN_DAYS` and cannot re-enter on the same URL. |
+| `NEWS_TEMP_FLOOR` | Minimum raw temperature to post (default 35) |
+| `NEWS_THRESHOLD_RATIO` | Threshold = max(floor, ratio × median) (default 0.5) |
+| `NEWS_MERGE_BONUS` | Ranking multiplier bonus per extra merge (default 0.2) |
+| `NEWS_MERGE_CAP` | Cap on the merge multiplier (default 2.0) |
 | `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 
@@ -163,19 +199,38 @@ older than configurable thresholds are pruned:
 | `NEWS_RETENTION_SEEN_DAYS` | 14 | Days to keep seen entries |
 | `NEWS_RETENTION_DIGEST_DAYS` | 90 | Days to keep old digests |
 
+## Reusing the engine (girllm, blog writer)
+
+The store and pick logic are deliberately consumer-agnostic. Other
+agents (girllm hot takes, the blog writer) can consume the same store
+instead of re-collecting:
+
+- Read candidates with `NewsStore.list_store_rows()` and pick with
+  `newsbot.selection.pick_hottest()` — the same pure function the
+  Telegram poster uses. Style the winner for your own medium with
+  `summarizer.llm_style_posts()`.
+- `posted_at` marks delivery **to the Telegram channel only**. It is
+  not a global "consumed" flag — other consumers may still pick a
+  TG-posted row.
+- Multi-consumer cursors (per-consumer "seen" tracking) are planned as
+  the migration-5 `deliveries` table; until then, consumers track
+  their own consumption.
+
 ## Layout
 
 ```text
 newsbot/
-  main.py              # split generation + posting scheduler + bot command handler
+  main.py              # wall-clock schedulers (gen/post/summary) + handlers
+  clock.py             # NEWS_TZ wall-clock helpers (slots, day keys)
+  selection.py         # pure pick_hottest (temperature gate + merge ranking)
   config.py            # load_config + defaults + validation (incl. style_prompt)
-  db.py                # NewsStore (pending_posts, seen, migrations, retention)
+  db.py                # NewsStore (store, seen, summaries, migrations, retention)
   scoring.py           # hype_score (engagement × recency × weight + topics + crosspost)
   dedupe.py            # canonical URL + fuzzy title + GitHub repo + merge
-  summarizer.py        # two-pass: llm_filter (JSON) + llm_style_posts (JSON per-item)
+  summarizer.py        # llm_filter + llm_style_posts + llm_daily_summary
   telegram_poster.py   # httpx Bot API sendMessage, 429 retry, tag-safe 4096 split
-  bot_commands.py      # long-polling command handler (/setstyle, /digest, /post, /status)
-  jobs.py              # JobCoordinator (serializes generation + posting via asyncio locks)
+  bot_commands.py      # long-polling command handler (/digest, /post, /scores, /status, /summary, …)
+  jobs.py              # JobCoordinator (serializes gen + posting + summary via asyncio lock)
   collectors/
     hackernews.py reddit.py github.py rss.py producthunt.py huggingface_papers.py
 lm_client.py           # OpenAI-compatible HTTP client with bounded retries

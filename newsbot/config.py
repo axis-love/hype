@@ -133,7 +133,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
       news.topic_boost      — dict (DEFAULT_TOPIC_BOOST)
       news.lookback_hours   — int (48)
       news.max_candidates    — int (80)
-      news.max_final_news    — int (10)
+      news.max_final_news    — int (14)
       news.min_score         — float (35)
       news.item_prune_hours  — int (48)
       news.llm_temperature   — float (0.4)
