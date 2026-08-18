@@ -49,10 +49,17 @@ from newsbot.collectors import (
     producthunt as ph_collector,
     huggingface_papers as hf_collector,
 )
+from newsbot.collectors.base import Candidate
 from newsbot.config import load_config
 from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
-from newsbot.jobs import JobCoordinator, _env_float, _row_to_styler_input, format_post_message
+from newsbot.jobs import (
+    JobCoordinator,
+    _env_float,
+    _row_to_styler_input,
+    format_post_message,
+    format_recap_message,
+)
 from newsbot.selection import pick_hottest
 from newsbot.telegram_poster import post_digest
 from newsbot.summarizer import (
@@ -483,6 +490,52 @@ def _run_retention(store: NewsStore) -> None:
         log.warning("retention cleanup failed: %s", exc)
 
 
+def _recap_input_items(rows: list[dict]) -> list[dict[str, Any] | Candidate]:
+    """Build the item list llm_daily_summary receives, from posted store rows.
+
+    Rows carry the STYLED content actually posted: set_styled_content
+    overwrites title/body before posting, so for styled rows these fields
+    are exactly what the channel saw. Legacy rows posted before styling
+    (body empty, styled_at NULL) fall back to the raw snippet.
+    """
+    items: list[dict[str, Any] | Candidate] = []
+    for row in rows:
+        body = (row.get("body") or "").strip()
+        if not body:
+            body = (row.get("snippet") or "").strip()
+        items.append({
+            "title": row.get("title") or "",
+            "body": body,
+            "category": row.get("category") or "",
+            "url": row.get("url") or "",
+            "source": row.get("source") or "",
+            "posted_at": row.get("posted_at") or "",
+            "message_id": row.get("message_id"),
+        })
+    return items
+
+
+def _format_recap_input_sheet(items: list[dict[str, Any] | Candidate]) -> str:
+    """Render the /recap input sheet: exactly what the LLM receives.
+
+    Item count, 24h window, and per item: title, category, source,
+    posted time. Plain text — this is a transparency aid, not a post.
+    """
+    lines = [
+        f"Recap input — {len(items)} posts from the last 24h:",
+        "",
+    ]
+    for idx, item in enumerate(items, start=1):
+        lines.append(f"{idx}. {item.get('title') or '(untitled)'}")
+        meta_bits = [
+            item.get("category") or "",
+            item.get("source") or "",
+            item.get("posted_at") or "",
+        ]
+        lines.append("   " + " | ".join(b for b in meta_bits if b))
+    return "\n".join(lines)
+
+
 async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime) -> int:
     """Build and deliver the daily recap of the last 24h of posted news.
 
@@ -499,20 +552,13 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         log.info("daily summary: no posts in the last 24h — skipping day %s", day)
         return 3
 
-    items = [
-        {
-            "title": row.get("title") or "",
-            "category": row.get("category") or "",
-            "url": row.get("url") or "",
-            "snippet": row.get("snippet") or "",
-            "score_at_queue": row.get("score_at_queue"),
-            "source": row.get("source") or "",
-        }
-        for row in rows
-    ]
+    cfg = load_config(settings)
+    items = _recap_input_items(rows)
 
     try:
-        result = await llm_daily_summary(items, _build_lm_client())
+        result = await llm_daily_summary(
+            items, _build_lm_client(), recap_prompt=cfg["recap_prompt"],
+        )
     except Exception as exc:
         log.error("daily summary LLM call failed: %s", redact_exception(exc))
         return 1
@@ -520,7 +566,7 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         log.error("daily summary LLM returned nothing — will retry")
         return 1
 
-    message = format_post_message(result["title"], result["body"], "")
+    message = format_recap_message(result["title"], result["items"])
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
@@ -878,31 +924,27 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 raise RuntimeError("styler returned an empty body — check logs")
             return format_post_message(title, body, row.get("url") or "")
 
-        async def on_recap_preview() -> str:
+        async def on_recap_preview() -> tuple[str, str]:
             """Write the daily recap for a DM preview.
 
             Read-only: no DB writes, no delivery, day key untouched.
+            Returns (input_sheet, recap_message): the sheet shows exactly
+            what the LLM will receive; the recap is the generated output.
             """
             now = local_now()
             since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
             rows = store.list_posted_since(since_utc)
             if not rows:
                 raise RuntimeError("nothing posted in the last 24h — nothing to recap")
-            items = [
-                {
-                    "title": row.get("title") or "",
-                    "category": row.get("category") or "",
-                    "url": row.get("url") or "",
-                    "snippet": row.get("snippet") or "",
-                    "score_at_queue": row.get("score_at_queue"),
-                    "source": row.get("source") or "",
-                }
-                for row in rows
-            ]
-            result = await llm_daily_summary(items, _build_lm_client())
+            cfg = load_config(settings)
+            items = _recap_input_items(rows)
+            sheet = _format_recap_input_sheet(items)
+            result = await llm_daily_summary(
+                items, _build_lm_client(), recap_prompt=cfg["recap_prompt"],
+            )
             if not result:
                 raise RuntimeError("recap LLM returned nothing — check logs")
-            return format_post_message(result["title"], result["body"], "")
+            return sheet, format_recap_message(result["title"], result["items"])
 
         bot_handler = BotCommandHandler(
             bot_token=bot_token,

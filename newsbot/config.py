@@ -94,6 +94,23 @@ DEFAULT_STYLE_PROMPT = (
     "No hype words like 'revolutionary' or 'game-changing'. No emojis. No clickbait. "
 )
 
+# Default system prompt for the daily recap (llm_daily_summary). Overridable
+# via SQLite setting news.recap_prompt or the /setrecap bot command.
+# Contract: STRICT JSON {"title": ..., "items": [{"id": ..., "summary": ...}]}.
+# IDs are assigned by the app; the model echoes them back for binding.
+# The model decides ORDER (most important first) — the app preserves it.
+DEFAULT_RECAP_PROMPT = (
+    "You write the daily recap for a Telegram tech-news channel. "
+    "You receive the posts published in the last 24 hours, each tagged with an id. "
+    "Return STRICT JSON: {\"title\": \"...\", \"items\": [{\"id\": \"...\", \"summary\": \"...\"}]}. "
+    "The title is ONE headline summarizing the whole day (short, no hype words). "
+    "Each item carries the 'id' field exactly as given in the input, plus a "
+    "one-line summary (max ~25 words) of what was posted and why it matters. "
+    "Order items by importance — biggest story first. Include every input item "
+    "exactly once. Do NOT invent ids. Do NOT add fields. "
+    "The application renders the final layout — return data only, no formatting."
+)
+
 # --- Default source config (so the bot runs with no settings) ---------
 
 DEFAULT_SOURCES: dict[str, Any] = {
@@ -139,6 +156,8 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
       news.llm_temperature   — float (0.4)
       news.llm_max_tokens_filter  — int (800)
       news.llm_max_tokens_digest  — int (1500)
+      news.style_prompt           — str (DEFAULT_STYLE_PROMPT)
+      news.recap_prompt           — str (DEFAULT_RECAP_PROMPT)
     """
     raw = settings.list("news") if hasattr(settings, "list") else {}
 
@@ -160,6 +179,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
         "llm_max_tokens_filter": _as_int(raw.get("llm_max_tokens_filter"), DEFAULT_LLM["max_tokens_filter"], key="llm_max_tokens_filter"),
         "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"], key="llm_max_tokens_digest"),
         "style_prompt": str(raw.get("style_prompt") or DEFAULT_STYLE_PROMPT),
+        "recap_prompt": str(raw.get("recap_prompt") or DEFAULT_RECAP_PROMPT),
     }
 
     _validate_config(config)

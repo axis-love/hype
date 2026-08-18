@@ -7,7 +7,8 @@ are silently ignored.
 Commands:
   Preview (DM only — nothing posted, no DB writes):
     /preview          — style the hottest store story and show it here
-    /recap            — preview the daily recap here
+    /recap            — preview the daily recap here (input sheet + recap)
+    /recap prompt     — show the current recap prompt
   Inspect:
     /status           — store counts, threshold, slots, schedule info
     /scores           — hype scores for all store rows
@@ -18,6 +19,7 @@ Commands:
     /summary          — run the daily recap job now
   Configure:
     /setstyle <text>  — update the style prompt for Pass B
+    /setrecap <text>  — update the recap prompt
     /help             — list commands
 """
 
@@ -33,7 +35,7 @@ import httpx
 
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
-from newsbot.config import DEFAULT_STYLE_PROMPT
+from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ class BotCommandHandler:
         on_scores: Callable[[], Awaitable[str]] | None = None,
         on_summary: Callable[[], Awaitable[None]] | None = None,
         on_preview: Callable[[], Awaitable[str]] | None = None,
-        on_recap_preview: Callable[[], Awaitable[str]] | None = None,
+        on_recap_preview: Callable[[], Awaitable[tuple[str, str]]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
@@ -143,7 +145,9 @@ class BotCommandHandler:
         elif command == "/preview":
             await self._cmd_preview(chat_id)
         elif command == "/recap":
-            await self._cmd_recap(chat_id)
+            await self._cmd_recap(chat_id, arg)
+        elif command == "/setrecap":
+            await self._cmd_setrecap(chat_id, arg)
         elif command == "/help":
             await self._send(chat_id, self._help_text())
         else:
@@ -153,7 +157,8 @@ class BotCommandHandler:
         return (
             "👁 Preview (to this DM — nothing is posted)\n"
             "/preview — style the hottest store story, show here\n"
-            "/recap — preview the daily recap, show here\n"
+            "/recap — preview the daily recap (input sheet + recap), show here\n"
+            "/recap prompt — show the current recap prompt\n"
             "\n"
             "🔍 Inspect\n"
             "/status — store counts, threshold, slots, schedule\n"
@@ -166,7 +171,8 @@ class BotCommandHandler:
             "/summary — run the daily recap now\n"
             "\n"
             "⚙️ Configure\n"
-            "/setstyle <text> — set the style prompt"
+            "/setstyle <text> — set the style prompt\n"
+            "/setrecap <text> — set the recap prompt"
         )
 
     async def _cmd_setstyle(self, chat_id: int, arg: str) -> None:
@@ -246,15 +252,26 @@ class BotCommandHandler:
             return
         await self._send(chat_id, message, parse_mode="HTML")
 
-    async def _cmd_recap(self, chat_id: int) -> None:
-        """Preview the daily recap in this DM. No posting, no DB writes."""
+    async def _cmd_recap(self, chat_id: int, arg: str = "") -> None:
+        """Recap commands.
+
+        /recap          — preview the daily recap in this DM. Two messages:
+                          first the input sheet (what the LLM receives),
+                          then the generated recap. No posting, no DB writes.
+        /recap prompt   — show the current recap prompt.
+        """
+        if arg.lower() == "prompt":
+            prompt = self.settings.get("news", "recap_prompt", DEFAULT_RECAP_PROMPT)
+            await self._send(chat_id, f"Current recap prompt:\n\n{prompt}")
+            return
+
         handler = self.on_recap_preview
         if not handler:
             await self._send(chat_id, "Recap preview handler not available.")
             return
         await self._send(chat_id, "Writing the daily recap preview…")
         try:
-            message = await handler()
+            sheet, message = await handler()
         except RuntimeError as exc:
             await self._send(chat_id, str(exc))
             return
@@ -264,7 +281,16 @@ class BotCommandHandler:
         if not message:
             await self._send(chat_id, "Recap preview returned nothing — summarizer may have failed.")
             return
+        await self._send(chat_id, sheet)
         await self._send(chat_id, message, parse_mode="HTML")
+
+    async def _cmd_setrecap(self, chat_id: int, arg: str) -> None:
+        if not arg:
+            await self._send(chat_id, "Usage: /setrecap <recap instructions>")
+            return
+        self.settings.set("news", "recap_prompt", arg)
+        log.info("recap prompt updated via /setrecap")
+        await self._send(chat_id, f"Recap prompt updated.\n\nNew prompt:\n{arg}")
 
     async def _cmd_status(self, chat_id: int) -> None:
         if self.on_status:
