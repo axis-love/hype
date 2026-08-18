@@ -61,8 +61,8 @@ class TestHelpPanel:
         handler = _make_handler()
         text = handler._help_text()
         # Every command in the panel must be documented.
-        for cmd in ["/preview", "/recap", "/recap prompt", "/status", "/scores", "/store",
-                    "/style", "/digest", "/post", "/summary", "/setstyle", "/setrecap"]:
+        for cmd in ["/preview", "/recap", "/recap prompt", "/digest dry", "/status", "/scores",
+                    "/store", "/style", "/digest", "/post", "/summary", "/setstyle", "/setrecap"]:
             assert cmd in text, f"/help missing {cmd}"
         # Grouped sections exist.
         assert "Preview" in text
@@ -249,3 +249,35 @@ class TestStoreCommand:
         calls = _capture_send(handler)
         await handler._handle(_update(123, "/store"))
         assert any("not available" in c[1] for c in calls)
+
+
+class TestDigestDryCommand:
+    @pytest.mark.asyncio
+    async def test_digest_dry_dispatches_to_handler(self):
+        called = []
+        async def on_digest_dry():
+            called.append(True)
+            return "Dry-run funnel: collected 10 → final 3"
+        handler = _make_handler(on_digest_dry=on_digest_dry)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/digest dry"))
+        assert len(calls) >= 1
+        assert "dry-run" in calls[0][1].lower() or "funnel" in calls[1][1] if len(calls) > 1 else True
+
+    @pytest.mark.asyncio
+    async def test_digest_dry_no_handler(self):
+        handler = _make_handler()
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/digest dry"))
+        assert any("not registered" in c[1] or "no" in c[1].lower() for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_bare_digest_still_works(self):
+        called = []
+        async def on_digest():
+            called.append(True)
+        handler = _make_handler(on_digest=on_digest)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/digest"))
+        assert any("Triggering" in c[1] for c in calls)
+        assert not any("dry" in c[1].lower() for c in calls)
