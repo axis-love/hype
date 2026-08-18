@@ -12,6 +12,8 @@ Commands:
   Inspect:
     /status           — store counts, threshold, slots, schedule info
     /scores           — hype scores for all store rows
+    /store            — browse all store rows (hottest first)
+    /store <id>       — full dump of one store row (scores, merges, styled content)
     /style            — show the current style prompt
   Run (posts to the channel):
     /digest           — run the generation cycle immediately
@@ -56,6 +58,7 @@ class BotCommandHandler:
         on_status: Callable[[], Awaitable[str]] | None = None,
         on_scores: Callable[[], Awaitable[str]] | None = None,
         on_summary: Callable[[], Awaitable[None]] | None = None,
+        on_store: Callable[[str], Awaitable[str]] | None = None,
         on_preview: Callable[[], Awaitable[str]] | None = None,
         on_recap_preview: Callable[[], Awaitable[tuple[str, str]]] | None = None,
     ) -> None:
@@ -67,6 +70,7 @@ class BotCommandHandler:
         self.on_status = on_status
         self.on_scores = on_scores
         self.on_summary = on_summary
+        self.on_store = on_store
         self.on_preview = on_preview
         self.on_recap_preview = on_recap_preview
         self._offset = 0  # getUpdates offset for ack
@@ -140,6 +144,8 @@ class BotCommandHandler:
             await self._cmd_status(chat_id)
         elif command == "/scores":
             await self._cmd_scores(chat_id)
+        elif command == "/store":
+            await self._cmd_store(chat_id, arg)
         elif command == "/summary":
             await self._cmd_summary(chat_id)
         elif command == "/preview":
@@ -163,6 +169,8 @@ class BotCommandHandler:
             "🔍 Inspect\n"
             "/status — store counts, threshold, slots, schedule\n"
             "/scores — hype scores for all store rows\n"
+            "/store — browse all store rows (hottest first)\n"
+            "/store <id> — full dump of one store row\n"
             "/style — show the current style prompt\n"
             "\n"
             "▶️ Run (posts to the channel)\n"
@@ -311,6 +319,16 @@ class BotCommandHandler:
                 await self._send(chat_id, "Scores error. Check logs for details.")
         else:
             await self._send(chat_id, "Scores handler not available.")
+
+    async def _cmd_store(self, chat_id: int, arg: str) -> None:
+        if self.on_store:
+            try:
+                store_text = await self.on_store(arg)
+                await self._send(chat_id, store_text)
+            except Exception:
+                await self._send(chat_id, "Store error. Check logs for details.")
+        else:
+            await self._send(chat_id, "Store handler not available.")
 
     async def poll_loop(self) -> None:
         """Long-poll getUpdates forever."""

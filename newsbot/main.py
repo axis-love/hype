@@ -691,6 +691,152 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
+def _format_store_browse(store: NewsStore, config: dict[str, Any]) -> str:
+    """Browse the store: all rows hottest-first, compact 3-line format.
+
+    Per row: rank + effective temp, title (truncated), meta line
+    (source, published, signals, merge count, raw/styled flag, snippet
+    excerpt). Capped to fit a sane Telegram message.
+    """
+    from newsbot.scoring import merge_multiplier
+
+    result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, config)
+    rows = store.list_store_rows()
+    if not rows:
+        return "Store is empty."
+
+    ordered = sorted(
+        rows,
+        key=lambda row: result.temps.get(row["id"], 0.0)
+        * merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap),
+        reverse=True,
+    )
+
+    lines = [f"Store browse ({len(rows)} rows, hottest first):", ""]
+
+    for i, row in enumerate(ordered, start=1):
+        title = (row.get("title") or "(untitled)")[:60]
+        raw_temp = result.temps.get(row["id"], 0.0)
+        mult = merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap)
+        effective = raw_temp * mult
+        flag = "styled" if row.get("styled_at") else "raw"
+        source = row.get("source") or "?"
+        published = (row.get("published_at") or "")[:10] or "?"
+        merge = row.get("merge_count") or 1
+
+        # Signal bits: upvotes/comments/stars/reposts
+        signals = []
+        for sig_key, sig_label in [("upvotes", "↑"), ("comments", "💬"), ("stars", "★"), ("reposts", "↻")]:
+            val = row.get(sig_key)
+            if val is not None:
+                signals.append(f"{sig_label}{val}")
+        signal_str = " ".join(signals) if signals else "—"
+
+        snippet = (row.get("snippet") or "")[:100]
+        if len(row.get("snippet") or "") > 100:
+            snippet += "…"
+
+        merge_note = f" merge×{merge}" if merge > 1 else ""
+        lines.append(f"{i}. [{row['id']}] {effective:.1f}° [{flag}]{merge_note}")
+        lines.append(f"   {title}")
+        lines.append(f"   {source} | {published} | {signal_str} | {snippet}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _format_store_detail(store: NewsStore, row_id: int) -> str:
+    """Full dump of one store row: score components, merge trail, styled content.
+
+    Returns a helpful error with valid id hints if the row is not found.
+    """
+    row = store.get_store_row(row_id)
+    if row is None:
+        valid_ids = store.list_store_ids()
+        if valid_ids:
+            id_str = ", ".join(str(i) for i in valid_ids[:20])
+            suffix = f" … ({len(valid_ids)} total)" if len(valid_ids) > 20 else ""
+            return f"Row id {row_id} not found in store.\n\nValid ids: {id_str}{suffix}"
+        return f"Row id {row_id} not found — store is empty."
+
+    lines = [f"Store row {row_id}", ""]
+
+    title = row.get("title") or "(untitled)"
+    flag = "styled" if row.get("styled_at") else "raw"
+    lines.append(f"Title: {title}")
+    lines.append(f"State: {flag}")
+    lines.append("")
+
+    # Score breakdown
+    lines.append("Score components:")
+    score_keys = [
+        ("score_at_queue", "Score at queue"),
+        ("engagement_score", "Engagement"),
+        ("recency_at_queue", "Recency at queue"),
+        ("source_weight", "Source weight"),
+        ("topic_bonus", "Topic bonus"),
+        ("crosspost_bonus", "Crosspost bonus"),
+        ("penalty", "Penalty"),
+        ("matched_topics", "Matched topics"),
+    ]
+    for key, label in score_keys:
+        val = row.get(key)
+        if val is not None:
+            lines.append(f"  {label}: {val}")
+        else:
+            lines.append(f"  {label}: —")
+    lines.append("")
+
+    # Raw signals
+    lines.append("Raw signals:")
+    for key, label in [("upvotes", "Upvotes"), ("comments", "Comments"),
+                       ("stars", "Stars"), ("reposts", "Reposts"),
+                       ("crosspost_count", "Crossposts")]:
+        val = row.get(key)
+        if val is not None:
+            lines.append(f"  {label}: {val}")
+    lines.append("")
+
+    # Meta
+    lines.append("Metadata:")
+    lines.append(f"  Source: {row.get('source') or '?'}")
+    lines.append(f"  URL: {row.get('url') or '(none)'}")
+    lines.append(f"  Category: {row.get('category') or '(none)'}")
+    lines.append(f"  Published: {row.get('published_at') or '?'}")
+    lines.append(f"  Merge count: {row.get('merge_count') or 1}")
+
+    merged_urls_raw = row.get("merged_urls")
+    if merged_urls_raw:
+        try:
+            import json
+            merged = json.loads(merged_urls_raw) if isinstance(merged_urls_raw, str) else merged_urls_raw
+            if isinstance(merged, list) and merged:
+                lines.append(f"  Merged URLs ({len(merged)}):")
+                for url in merged[:5]:
+                    lines.append(f"    {url}")
+                if len(merged) > 5:
+                    lines.append(f"    … ({len(merged)} total)")
+        except Exception:
+            lines.append(f"  Merged URLs: (parse error)")
+
+    styled_at = row.get("styled_at")
+    if styled_at:
+        lines.append(f"  Styled at: {styled_at}")
+        body = row.get("body") or ""
+        if body:
+            lines.append(f"  Styled body: {body[:200]}{'…' if len(body) > 200 else ''}")
+    else:
+        snippet = row.get("snippet") or ""
+        if snippet:
+            lines.append(f"  Snippet: {snippet[:200]}{'…' if len(snippet) > 200 else ''}")
+
+    lines.append(f"  Scored at: {row.get('scored_at') or '(unscored)'}")
+    lines.append(f"  Lookback hours: {row.get('lookback_hours') or '?'}")
+    lines.append(f"  Message ID: {row.get('message_id') or '(none)'}")
+
+    return "\n".join(lines)
+
+
 async def _scheduler_gen_iteration(
     coordinator: JobCoordinator,
     store: NewsStore,
@@ -889,6 +1035,15 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
         async def on_scores() -> str:
             return _format_scores(store, load_config(settings))
 
+        async def on_store(arg: str) -> str:
+            if arg.strip():
+                try:
+                    row_id = int(arg.strip())
+                except ValueError:
+                    return f"Invalid id: {arg.strip()!r} — /store expects a row id number."
+                return _format_store_detail(store, row_id)
+            return _format_store_browse(store, load_config(settings))
+
         async def on_summary() -> None:
             result = await coordinator.run_summary(lambda: _run_summary(store, settings, local_now()))
             if result == 2:
@@ -961,6 +1116,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             on_status=on_status,
             on_scores=on_scores,
             on_summary=on_summary,
+            on_store=on_store,
             on_preview=on_preview,
             on_recap_preview=on_recap_preview,
         )

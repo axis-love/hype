@@ -800,3 +800,113 @@ class TestSendMessageIdPersistence:
             "SELECT message_id FROM pending_posts WHERE posted_at IS NOT NULL"
         ).fetchone()
         assert row["message_id"] is None
+
+
+# --- OQ-3: /store browse and detail format ------------------------------
+
+def _seed_store_row(store, title="Test Story", score=80.0, **extra):
+    """Add a scored row to the store for /store tests."""
+    from tests.helpers import scored_story
+    story = scored_story(title, score)
+    store.add_stories_to_store([story], [])
+    row = store.list_store_rows()[0]
+    if extra.get("styled"):
+        store.set_styled_content(int(row["id"]), title, "Styled body text.")
+    return int(row["id"])
+
+
+class TestFormatStoreBrowse:
+    def test_empty_store(self, store):
+        from newsbot.main import _format_store_browse
+        from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
+
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        result = _format_store_browse(store, config)
+        assert "empty" in result.lower()
+
+    def test_shows_rows_hottest_first(self, store):
+        from newsbot.main import _format_store_browse
+        from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
+
+        _seed_store_row(store, "Cold Story", 50.0)
+        _seed_store_row(store, "Hot Story", 300.0)
+
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        result = _format_store_browse(store, config)
+        assert "Hot Story" in result
+        assert "Cold Story" in result
+        assert result.index("Hot Story") < result.index("Cold Story")
+
+    def test_shows_row_id_temp_flag_snippet(self, store):
+        from newsbot.main import _format_store_browse
+        from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
+
+        row_id = _seed_store_row(store, "Tale", 80.0)
+
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        result = _format_store_browse(store, config)
+        assert f"[{row_id}]" in result
+        assert "raw" in result
+        assert "Tale" in result
+
+    def test_styled_flag_shown(self, store):
+        from newsbot.main import _format_store_browse
+        from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
+
+        _seed_store_row(store, "Styled", 80.0, styled=True)
+
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        result = _format_store_browse(store, config)
+        assert "styled" in result
+
+
+class TestFormatStoreDetail:
+    def test_not_found_lists_valid_ids(self, store):
+        from newsbot.main import _format_store_detail
+
+        _seed_store_row(store, "Real", 80.0)
+        result = _format_store_detail(store, 999999)
+        assert "not found" in result.lower()
+        assert "Valid ids" in result
+
+    def test_not_found_empty_store(self, store):
+        from newsbot.main import _format_store_detail
+
+        result = _format_store_detail(store, 1)
+        assert "empty" in result.lower()
+
+    def test_shows_score_components(self, store):
+        from newsbot.main import _format_store_detail
+
+        row_id = _seed_store_row(store, "Scored", 80.0)
+        result = _format_store_detail(store, row_id)
+        assert "Score components" in result
+        assert "Score at queue" in result
+        assert "Engagement" in result
+
+    def test_shows_styled_body_when_styled(self, store):
+        from newsbot.main import _format_store_detail
+
+        row_id = _seed_store_row(store, "Styled", 80.0, styled=True)
+        result = _format_store_detail(store, row_id)
+        assert "State: styled" in result
+        assert "Styled body" in result
+        assert "Styled body text" in result
+
+    def test_shows_snippet_when_raw(self, store):
+        from newsbot.main import _format_store_detail
+
+        row_id = _seed_store_row(store, "Raw", 80.0)
+        result = _format_store_detail(store, row_id)
+        assert "State: raw" in result
+        assert "Snippet" in result
+
+    def test_shows_metadata(self, store):
+        from newsbot.main import _format_store_detail
+
+        row_id = _seed_store_row(store, "Meta", 80.0)
+        result = _format_store_detail(store, row_id)
+        assert "Source:" in result
+        assert "URL:" in result
+        assert "Merge count:" in result
+        assert "Message ID:" in result

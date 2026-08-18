@@ -61,8 +61,8 @@ class TestHelpPanel:
         handler = _make_handler()
         text = handler._help_text()
         # Every command in the panel must be documented.
-        for cmd in ["/preview", "/recap", "/recap prompt", "/status", "/scores", "/style",
-                    "/digest", "/post", "/summary", "/setstyle", "/setrecap"]:
+        for cmd in ["/preview", "/recap", "/recap prompt", "/status", "/scores", "/store",
+                    "/style", "/digest", "/post", "/summary", "/setstyle", "/setrecap"]:
             assert cmd in text, f"/help missing {cmd}"
         # Grouped sections exist.
         assert "Preview" in text
@@ -217,4 +217,35 @@ class TestRecapPreview:
         handler = _make_handler()
         calls = _capture_send(handler)
         await handler._handle(_update(123, "/recap"))
+        assert any("not available" in c[1] for c in calls)
+
+
+class TestStoreCommand:
+    @pytest.mark.asyncio
+    async def test_store_browse_calls_handler(self):
+        async def on_store(arg):
+            assert arg == ""
+            return "Store browse (3 rows, hottest first):\n..."
+        handler = _make_handler(on_store=on_store)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/store"))
+        assert len(calls) == 1
+        assert "Store browse" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_store_detail_calls_handler_with_id(self):
+        async def on_store(arg):
+            assert arg == "42"
+            return "Store row 42\n..."
+        handler = _make_handler(on_store=on_store)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/store 42"))
+        assert len(calls) == 1
+        assert "Store row 42" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_store_no_handler(self):
+        handler = _make_handler()
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/store"))
         assert any("not available" in c[1] for c in calls)

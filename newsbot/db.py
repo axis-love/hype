@@ -791,6 +791,21 @@ class NewsStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_store_row(self, row_id: int) -> dict[str, Any] | None:
+        """Return a single unposted store row by id, or None if not found."""
+        row = self._conn.execute(
+            f"SELECT {self._STORE_SELECT}, body FROM pending_posts WHERE id=? AND posted_at IS NULL",
+            (row_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def list_store_ids(self) -> list[int]:
+        """Return all unposted store row ids (for /store error hints)."""
+        rows = self._conn.execute(
+            "SELECT id FROM pending_posts WHERE posted_at IS NULL ORDER BY id ASC"
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
+
     # --- Retention / cleanup --------------------------------------------
 
     def prune_posted_posts(self, max_age_days: int = 30, batch_size: int = 500) -> int:
