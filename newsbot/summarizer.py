@@ -415,52 +415,60 @@ async def llm_style_posts(
     return result
 
 
-SUMMARY_SYSTEM = (
-    "You write the daily recap for a Telegram tech-news channel. "
-    "You receive the news items posted in the last 24 hours. Write ONE post: "
-    "a short headline and a body of 4-8 sentences that groups related items, "
-    "highlights the biggest story first, and ends with one lesser-known gem. "
-    "Same style rules as regular posts: no hype words, no emojis, plain text. "
-    "Return STRICT JSON: {\"title\": \"...\", \"body\": \"...\"}."
-)
-
-
 async def llm_daily_summary(
-    items: list[dict[str, Any]],
+    items: list[dict[str, Any] | Candidate],
     lm_client: Any,
     *,
+    recap_prompt: str = "",
     temperature: float = 0.5,
     max_tokens: int = 4000,
 ) -> dict[str, Any] | None:
-    """Write one recap post from the items posted in the last 24 hours.
+    """Write the daily recap from the posts published in the last 24 hours.
 
-    Each item carries: title, category, url, snippet, score_at_queue, source.
-    Returns {"title": str, "body": str} or None on any LLM failure.
+    Each item carries the styled content actually posted: title, category,
+    source, posted_at, body (styled body; raw snippet fallback for legacy
+    rows). The application assigns opaque IDs (same binding pattern as
+    llm_filter / llm_style_posts) and does all layout — the model only
+    returns data.
+
+    The system prompt comes from settings (news.recap_prompt) and must
+    request STRICT JSON {"title": "...", "items": [{"id","summary"}]}.
+
+    Returns {"title": str, "items": [{...}]} in the LLM's order
+    (importance), or None on any failure. Each result item carries:
+    id, summary (LLM data) plus title, url, message_id merged from the
+    trusted application item — never from LLM output (same hygiene as
+    llm_style_posts).
     """
     if not items:
         return None
 
-    def item_block(item: dict[str, Any]) -> str:
-        lines = [f"Title: {item.get('title') or '(untitled)'}"]
+    if not recap_prompt:
+        log.warning("llm_daily_summary called with an empty recap_prompt")
+        return None
+
+    # Bind LLM output back to input items by opaque application-owned ID.
+    id_map = _assign_missing_candidate_ids(items)
+
+    def item_block(item: dict[str, Any] | Candidate) -> str:
+        cid = item.get("candidate_id", "c000")
+        lines = [f"[{cid}] Title: {item.get('title') or '(untitled)'}"]
         if item.get("category"):
             lines.append(f"   Category: {item['category']}")
-        if item.get("snippet"):
-            lines.append(f"   Summary: {item['snippet']}")
         if item.get("source"):
             lines.append(f"   Source: {item['source']}")
-        score = item.get("score_at_queue")
-        if score is not None:
-            lines.append(f"   Score at queue: {score}")
-        if item.get("url"):
-            lines.append(f"   URL: {item['url']}")
+        if item.get("posted_at"):
+            lines.append(f"   Posted: {item['posted_at']}")
+        if item.get("body"):
+            lines.append(f"   Body: {item['body']}")
         return "\n".join(lines)
 
     user_body = "\n\n".join(item_block(item) for item in items)
     messages = [
-        {"role": "system", "content": SUMMARY_SYSTEM},
+        {"role": "system", "content": recap_prompt},
         {
             "role": "user",
-            "content": f"Items posted in the last 24 hours ({len(items)}):\n\n{user_body}",
+            "content": f"Posts published in the last 24 hours ({len(items)}):\n\n{user_body}",
         },
     ]
 
@@ -484,8 +492,50 @@ async def llm_daily_summary(
         log.warning("LLM summarizer JSON is not an object")
         return None
     title = str(data.get("title") or "").strip()
-    body = str(data.get("body") or "").strip()
-    if not title or not body:
-        log.warning("LLM summarizer returned empty title or body")
+    if not title:
+        log.warning("LLM summarizer returned an empty title")
         return None
-    return {"title": title, "body": body}
+    items_raw = data.get("items")
+    if not isinstance(items_raw, list):
+        log.warning("LLM summarizer JSON has no 'items' list")
+        return None
+
+    # Match LLM items to inputs by opaque ID. Order = LLM's order
+    # (the prompt instructs the model to order by importance).
+    seen_ids: set[str] = set()
+    result_items: list[dict[str, Any]] = []
+    for entry in items_raw:
+        if not isinstance(entry, dict):
+            log.warning("LLM summarizer returned a malformed entry (non-dict)")
+            continue
+        cid = str(entry.get("id") or "").strip()
+        if not cid or cid not in id_map:
+            # Log only the length — the model could embed echoed prompt or
+            # article content in an ID field (same hygiene as llm_filter).
+            log.warning("LLM summarizer returned unknown id (len=%d) — skipping", len(cid))
+            continue
+        if cid in seen_ids:
+            log.warning("LLM summarizer returned duplicate id (len=%d) — skipping", len(cid))
+            continue
+        seen_ids.add(cid)
+        original = id_map[cid]
+        # Title/url always from trusted app data — never from LLM output
+        # (same hygiene as llm_style_posts). message_id passes through for
+        # the recap renderer (None for legacy rows without one).
+        result_items.append({
+            "id": cid,
+            "summary": str(entry.get("summary") or "").strip(),
+            "title": str(original.get("title") or ""),
+            "url": str(original.get("url") or ""),
+            "message_id": original.get("message_id"),
+        })
+
+    omitted_ids = set(id_map.keys()) - seen_ids
+    if omitted_ids:
+        log.warning(
+            "LLM summarizer omitted %d/%d item IDs: %s",
+            len(omitted_ids), len(id_map), ", ".join(sorted(omitted_ids)),
+        )
+
+    log.info("LLM summarizer: %d items in, %d summaries out", len(items), len(result_items))
+    return {"title": title, "items": result_items}

@@ -13,6 +13,19 @@ import pytest
 from newsbot.bot_commands import BotCommandHandler
 
 
+class _FakeSettings:
+    """In-memory SettingsStore double: get/set over a nested dict."""
+
+    def __init__(self, data: dict[str, dict[str, object]] | None = None):
+        self._data: dict[str, dict[str, object]] = data or {}
+
+    def get(self, section: str, key: str, default=None):
+        return self._data.get(section, {}).get(key, default)
+
+    def set(self, section: str, key: str, value: object) -> None:
+        self._data.setdefault(section, {})[key] = value
+
+
 def _make_handler(**overrides: Any) -> BotCommandHandler:
     kwargs: dict[str, Any] = dict(bot_token="test", admin_user_id="123", settings=None)
     kwargs.update(overrides)
@@ -48,8 +61,8 @@ class TestHelpPanel:
         handler = _make_handler()
         text = handler._help_text()
         # Every command in the panel must be documented.
-        for cmd in ["/preview", "/recap", "/status", "/scores", "/style",
-                    "/digest", "/post", "/summary", "/setstyle"]:
+        for cmd in ["/preview", "/recap", "/recap prompt", "/status", "/scores", "/style",
+                    "/digest", "/post", "/summary", "/setstyle", "/setrecap"]:
             assert cmd in text, f"/help missing {cmd}"
         # Grouped sections exist.
         assert "Preview" in text
@@ -132,16 +145,62 @@ class TestPreview:
 
 class TestRecapPreview:
     @pytest.mark.asyncio
-    async def test_recap_sends_html_to_dm(self):
+    async def test_recap_sends_input_sheet_then_html_recap(self):
+        """Bare /recap: ack, then input sheet (plain), then recap (HTML)."""
         async def on_recap_preview():
-            return "<b>Daily recap</b>\n\nBiggest story first."
+            return (
+                "Recap input — 1 posts from the last 24h:\n\n1. Big launch\n   AI | hn | 2026-08-16T06:00:00+00:00",
+                "<b>Daily recap</b>\n\nBiggest story first.",
+            )
 
         handler = _make_handler(on_recap_preview=on_recap_preview)
         calls = _capture_send(handler)
         await handler._handle(_update(123, "/recap"))
-        assert len(calls) == 2
-        assert calls[1][1] == "<b>Daily recap</b>\n\nBiggest story first."
-        assert calls[1][2] == "HTML"
+        # Three messages: ack, input sheet, recap.
+        assert len(calls) == 3
+        assert "Recap input" in calls[1][1]
+        assert calls[1][2] == ""  # input sheet is plain text
+        assert calls[2][1] == "<b>Daily recap</b>\n\nBiggest story first."
+        assert calls[2][2] == "HTML"
+
+    @pytest.mark.asyncio
+    async def test_recap_prompt_shows_current_prompt(self):
+        """/recap prompt shows the stored recap prompt, no preview call."""
+        settings = _FakeSettings({"news": {"recap_prompt": "CUSTOM RECAP PROMPT"}})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/recap prompt"))
+        assert len(calls) == 1
+        assert "CUSTOM RECAP PROMPT" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_recap_prompt_defaults_when_unset(self):
+        """/recap prompt falls back to DEFAULT_RECAP_PROMPT when unset."""
+        from newsbot.config import DEFAULT_RECAP_PROMPT
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/recap prompt"))
+        assert DEFAULT_RECAP_PROMPT in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_setrecap_updates_prompt(self):
+        """/setrecap persists news.recap_prompt and echoes it back."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/setrecap order by importance"))
+        assert settings._data["news"]["recap_prompt"] == "order by importance"
+        assert "order by importance" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_setrecap_empty_arg_shows_usage(self):
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/setrecap"))
+        assert "Usage" in calls[0][1]
+        assert "news" not in settings._data  # nothing written
 
     @pytest.mark.asyncio
     async def test_recap_runtime_error_surfaced(self):

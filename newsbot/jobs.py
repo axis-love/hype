@@ -126,6 +126,53 @@ def format_post_message(title: str, body: str, url: str) -> str:
     return "\n".join(parts)
 
 
+def format_recap_message(title: str, items: list[dict[str, Any]]) -> str:
+    """Build the Telegram HTML message for the daily recap.
+
+    Format: <b>Title</b> → blank line → numbered items. Each item shows a
+    short heading (title) followed by its one-line summary. The renderer
+    owns all layout; the LLM only supplies title + per-item summaries.
+
+    Items carry: title, summary, url, message_id (None for legacy rows).
+    OQ-2 adds channel-post links via message_id; without it (or before that
+    pass) items render as plain text.
+    """
+    _MAX_MESSAGE_CHARS = 3000
+
+    parts: list[str] = [f"<b>{html_module.escape(title)}</b>", ""]
+    for idx, item in enumerate(items, start=1):
+        item_title = str(item.get("title") or "(untitled)").strip()
+        summary = str(item.get("summary") or "").strip()
+        heading = f"{idx}. {item_title}"
+        parts.append(html_module.escape(heading))
+        if summary:
+            parts.append(html_module.escape(summary))
+        parts.append("")
+
+    message = "\n".join(parts).rstrip("\n")
+
+    # Stay under the single-message budget where possible. If over, drop
+    # summary lines longest-first until it fits (titles always kept).
+    if len(message) > _MAX_MESSAGE_CHARS:
+        log.warning(
+            "recap message %d chars exceeds budget %d — trimming summaries",
+            len(message), _MAX_MESSAGE_CHARS,
+        )
+        trimmed = list(items)
+        for i in sorted(range(len(items)), key=lambda i: -len(str(items[i].get("summary") or ""))):
+            trimmed[i] = {**items[i], "summary": ""}
+            candidate_parts: list[str] = [f"<b>{html_module.escape(title)}</b>", ""]
+            for idx, it in enumerate(trimmed, start=1):
+                candidate_parts.append(html_module.escape(f"{idx}. {str(it.get('title') or '(untitled)').strip()}"))
+                if it.get("summary"):
+                    candidate_parts.append(html_module.escape(str(it["summary"]).strip()))
+                candidate_parts.append("")
+            message = "\n".join(candidate_parts).rstrip("\n")
+            if len(message) <= _MAX_MESSAGE_CHARS:
+                break
+    return message
+
+
 class JobCoordinator:
     """Serializes generation and posting jobs via a single asyncio lock.
 

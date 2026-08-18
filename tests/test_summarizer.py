@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from newsbot.summarizer import llm_filter, llm_style_posts, select_diverse_top_items
+from newsbot.summarizer import llm_daily_summary, llm_filter, llm_style_posts, select_diverse_top_items
 
 
 class _FakeLM:
@@ -167,3 +167,127 @@ def test_unknown_llm_id_not_logged_raw(caplog):
             f"Raw LLM ID leaked into log: {record.getMessage()}"
     # But the length should be mentioned
     assert any("len=" in r.getMessage() for r in caplog.records)
+
+
+# --- llm_daily_summary (OQ-1 recap contract) ----------------------------
+
+_RECAP_PROMPT = "Return strict JSON {title, items:[{id, summary}]}."
+
+
+def _recap_item(title, url, **extra) -> dict[str, Any]:
+    return {
+        "title": title,
+        "body": f"Styled body for {title}",
+        "category": "AI",
+        "source": "hn",
+        "posted_at": "2026-08-16T06:00:00+00:00",
+        "url": url,
+        "message_id": extra.pop("message_id", None),
+        **extra,
+    }
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_binds_by_id_and_merges_trusted_fields():
+    """LLM items bind to inputs by app-assigned id; title/url/message_id
+    always come from trusted app data, never from LLM output."""
+    payload = {
+        "title": "Day recap",
+        "items": [
+            {"id": "c002", "summary": "Second post first", "title": "LLM-FAKED TITLE",
+             "url": "https://evil.example/hijack"},
+            {"id": "c001", "summary": "First post second"},
+        ],
+    }
+    lm = _FakeLM(json.dumps(payload))
+    items = [
+        _recap_item("Post A", "https://trusted.example/a"),
+        _recap_item("Post B", "https://trusted.example/b", message_id=42),
+    ]
+    result = await llm_daily_summary(items, lm, recap_prompt=_RECAP_PROMPT)
+    assert result is not None
+    assert result["title"] == "Day recap"
+    # Order follows the LLM (importance), not input order.
+    assert [i["id"] for i in result["items"]] == ["c002", "c001"]
+    first = result["items"][0]
+    assert first["summary"] == "Second post first"
+    assert first["title"] == "Post B"  # trusted title, LLM title ignored
+    assert first["url"] == "https://trusted.example/b"  # trusted url
+    assert first["message_id"] == 42
+    # IDs were assigned to the input items for the prompt.
+    assert items[0]["candidate_id"] == "c001"
+    assert items[1]["candidate_id"] == "c002"
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_skips_unknown_and_duplicate_ids(caplog):
+    payload = {
+        "title": "Day recap",
+        "items": [
+            {"id": "c001", "summary": "Valid"},
+            {"id": "c999", "summary": "Unknown id"},
+            {"id": "c001", "summary": "Duplicate"},
+            {"id": "", "summary": "Missing id"},
+        ],
+    }
+    lm = _FakeLM(json.dumps(payload))
+    items = [_recap_item("Post A", "https://a.example")]
+    result = await llm_daily_summary(items, lm, recap_prompt=_RECAP_PROMPT)
+    assert result is not None
+    assert [i["id"] for i in result["items"]] == ["c001"]
+    assert result["items"][0]["summary"] == "Valid"
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("unknown id" in m for m in messages)
+    assert any("duplicate id" in m for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_warns_on_omitted_items(caplog):
+    payload = {"title": "Day recap", "items": [{"id": "c001", "summary": "Only one"}]}
+    lm = _FakeLM(json.dumps(payload))
+    items = [
+        _recap_item("Post A", "https://a.example"),
+        _recap_item("Post B", "https://b.example"),
+    ]
+    result = await llm_daily_summary(items, lm, recap_prompt=_RECAP_PROMPT)
+    assert result is not None
+    assert len(result["items"]) == 1
+    assert any("omitted" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_strips_think_blocks():
+    raw = "<think>reasoning</think>\n" + json.dumps({
+        "title": "T", "items": [{"id": "c001", "summary": "S"}],
+    })
+    lm = _FakeLM(raw)
+    result = await llm_daily_summary(
+        [_recap_item("Post A", "https://a.example")], lm, recap_prompt=_RECAP_PROMPT,
+    )
+    assert result is not None
+    assert result["title"] == "T"
+    assert result["items"][0]["summary"] == "S"
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_empty_recap_prompt_returns_none():
+    lm = _FakeLM(json.dumps({"title": "T", "items": []}))
+    result = await llm_daily_summary(
+        [_recap_item("Post A", "https://a.example")], lm, recap_prompt="",
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_invalid_json_returns_none():
+    lm = _FakeLM("not json at all")
+    result = await llm_daily_summary(
+        [_recap_item("Post A", "https://a.example")], lm, recap_prompt=_RECAP_PROMPT,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_llm_daily_summary_empty_items_returns_none():
+    lm = _FakeLM(json.dumps({"title": "T", "items": []}))
+    assert await llm_daily_summary([], lm, recap_prompt=_RECAP_PROMPT) is None
