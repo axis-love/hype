@@ -9,6 +9,7 @@ Commands:
     /preview          — style the hottest store story and show it here
     /recap            — preview the daily recap here (input sheet + recap)
     /recap prompt     — show the current recap prompt
+    /digest dry       — dry-run generation: funnel report, no DB writes
   Inspect:
     /status           — store counts, threshold, slots, schedule info
     /scores           — hype scores for all store rows
@@ -54,6 +55,7 @@ class BotCommandHandler:
         admin_user_id: str,
         settings: SettingsStore,
         on_digest: Callable[[], Awaitable[None]] | None = None,
+        on_digest_dry: Callable[[], Awaitable[str]] | None = None,
         on_post: Callable[[], Awaitable[None]] | None = None,
         on_status: Callable[[], Awaitable[str]] | None = None,
         on_scores: Callable[[], Awaitable[str]] | None = None,
@@ -66,6 +68,7 @@ class BotCommandHandler:
         self.admin_user_id = str(admin_user_id).strip()
         self.settings = settings
         self.on_digest = on_digest
+        self.on_digest_dry = on_digest_dry
         self.on_post = on_post
         self.on_status = on_status
         self.on_scores = on_scores
@@ -137,7 +140,10 @@ class BotCommandHandler:
         elif command == "/style":
             await self._cmd_show_style(chat_id)
         elif command == "/digest":
-            await self._cmd_digest(chat_id)
+            if arg.strip().lower() == "dry":
+                await self._cmd_digest_dry(chat_id)
+            else:
+                await self._cmd_digest(chat_id)
         elif command == "/post":
             await self._cmd_post(chat_id)
         elif command == "/status":
@@ -165,6 +171,7 @@ class BotCommandHandler:
             "/preview — style the hottest store story, show here\n"
             "/recap — preview the daily recap (input sheet + recap), show here\n"
             "/recap prompt — show the current recap prompt\n"
+            "/digest dry — dry-run generation (funnel report, no DB writes)\n"
             "\n"
             "🔍 Inspect\n"
             "/status — store counts, threshold, slots, schedule\n"
@@ -209,6 +216,21 @@ class BotCommandHandler:
             asyncio.create_task(_run_and_notify())
         else:
             await self._send(chat_id, "No generation handler registered.")
+
+    async def _cmd_digest_dry(self, chat_id: int) -> None:
+        if self.on_digest_dry:
+            await self._send(chat_id, "Running dry-run generation (no DB writes)...")
+            async def _run_and_notify() -> None:
+                try:
+                    report = await self.on_digest_dry()
+                    await self._send(chat_id, report)
+                except RuntimeError as exc:
+                    await self._send(chat_id, str(exc))
+                except Exception:
+                    await self._send(chat_id, "Dry-run failed. Check logs for details.")
+            asyncio.create_task(_run_and_notify())
+        else:
+            await self._send(chat_id, "No dry-run handler registered.")
 
     async def _cmd_summary(self, chat_id: int) -> None:
         handler = self.on_summary

@@ -239,3 +239,161 @@ class TestAdditiveGeneration:
         assert result == 0
         rows = store.list_store_rows()
         assert len(rows) == 1 and rows[0]["merge_count"] == 2
+
+
+# --- OQ-4: pipeline extraction + dry-run write-freedom -------------------
+
+class TestRunGenerationPipeline:
+    """_run_generation_pipeline: pure pipeline, no DB writes."""
+
+    async def test_funnel_counts_correct(self, store, monkeypatch):
+        """Funnel: collected → unseen → deduped → above_min → filter → kept → final."""
+        from newsbot.main import _run_generation_pipeline
+
+        stories = [
+            _story("Story A", "https://a.example.com/1", upvotes=200),
+            _story("Story B", "https://b.example.com/2", upvotes=150),
+            _story("Story C", "https://c.example.com/3", upvotes=50),
+        ]
+        _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids={"c001", "c002"})
+
+        result = await _run_generation_pipeline(store, _make_cfg())
+        assert result is not None
+        assert result.collected == 3
+        assert result.unseen == 3   # filter_seen mocked to identity
+        assert result.deduped == 3  # dedupe mocked to identity
+        assert result.above_min_score == 3  # all above min_score=0
+        assert result.sent_to_filter == 3
+        assert result.llm_kept == 2  # only c001 and c002 kept by mock LLM
+        assert result.final_count == 2
+
+    async def test_items_classified_add_vs_merge(self, store, monkeypatch):
+        """Items that match an existing store row are 'merge', others 'add'."""
+        from newsbot.main import _run_generation_pipeline
+
+        # Pre-seed a row that will match one of the candidates.
+        original = _story("Existing", "https://existing.example.com/1", upvotes=100)
+        original["score_breakdown"] = {
+            "score": 100.0, "engagement": 90.0, "recency": 0.9,
+            "source_weight": 1.0, "topic_bonus": 0, "crosspost_bonus": 0.0,
+            "penalty": 1.0, "lookback_hours": 48, "published_at": original["published_at"],
+        }
+        store.add_stories_to_store([original], [])
+        row_id = store.list_store_rows()[0]["id"]
+
+        stories = [
+            _story("New Story", "https://new.example.com/2", upvotes=200),
+            _story("Existing!", "https://existing.example.com/1", upvotes=250),
+        ]
+        _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids={"c001", "c002"})
+
+        result = await _run_generation_pipeline(store, _make_cfg())
+        assert result is not None
+        actions = {item["title"]: item["action"] for item in result.items}
+        assert actions["New Story"] == "add"
+        assert actions["Existing!"] == "merge"
+        merge_item = next(i for i in result.items if i["action"] == "merge")
+        assert merge_item["merge_row_id"] == row_id
+
+    async def test_returns_none_on_empty_collection(self, store, monkeypatch):
+        from newsbot.main import _run_generation_pipeline
+
+        _patch_pipeline(monkeypatch, _make_cfg(), [], keep_ids=set())
+        result = await _run_generation_pipeline(store, _make_cfg())
+        assert result is None
+
+    async def test_returns_none_when_llm_keeps_zero(self, store, monkeypatch):
+        from newsbot.main import _run_generation_pipeline
+
+        stories = [_story("Story A", "https://a.example.com/1")]
+        _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids=set())
+        result = await _run_generation_pipeline(store, _make_cfg())
+        assert result is None
+
+    async def test_no_db_writes(self, store, monkeypatch):
+        """Pipeline must not write to the store — row count and seen unchanged."""
+        from newsbot.main import _run_generation_pipeline
+
+        # Pre-seed one row so we can verify it's untouched.
+        original = _story("Seed", "https://seed.example.com/1", upvotes=100)
+        original["score_breakdown"] = {
+            "score": 100.0, "engagement": 90.0, "recency": 0.9,
+            "source_weight": 1.0, "topic_bonus": 0, "crosspost_bonus": 0.0,
+            "penalty": 1.0, "lookback_hours": 48, "published_at": original["published_at"],
+        }
+        store.add_stories_to_store([original], [])
+
+        rows_before = len(store.list_store_rows())
+        seen_before = store._conn.execute("SELECT COUNT(*) AS n FROM seen").fetchone()["n"]
+
+        stories = [
+            _story("Fresh", "https://fresh.example.com/2", upvotes=300),
+            _story("Seed!", "https://seed.example.com/1", upvotes=350),
+        ]
+        _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids={"c001", "c002"})
+
+        result = await _run_generation_pipeline(store, _make_cfg())
+        assert result is not None
+
+        rows_after = len(store.list_store_rows())
+        seen_after = store._conn.execute("SELECT COUNT(*) AS n FROM seen").fetchone()["n"]
+        assert rows_after == rows_before, "pipeline must not add rows"
+        assert seen_after == seen_before, "pipeline must not mark seen"
+        # merge_count unchanged — no merge written.
+        row = store.list_store_rows()[0]
+        assert row["merge_count"] == 1
+
+
+class TestFormatDryRunReport:
+    """_format_dry_run_report renders funnel + per-item classification."""
+
+    def test_renders_funnel_and_items(self):
+        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+
+        result = GenerationPipelineResult(
+            collected=74, unseen=41, deduped=33, above_min_score=20,
+            sent_to_filter=15, llm_kept=12, final_count=8,
+            items=[
+                {"title": "Hot Story", "source": "hn", "score": 250.0,
+                 "action": "add", "merge_row_id": None,
+                 "category": "AI", "importance": 5},
+                {"title": "Merged Tale", "source": "reddit", "score": 180.0,
+                 "action": "merge", "merge_row_id": 42,
+                 "category": "", "importance": ""},
+            ],
+            failed_collectors=[],
+        )
+        report = _format_dry_run_report(result)
+        assert "collected 74" in report
+        assert "unseen 41" in report
+        assert "final 8" in report
+        assert "Hot Story" in report
+        assert "ADD" in report
+        assert "MERGE" in report
+        assert "row 42" in report
+
+    def test_failed_collectors_shown(self):
+        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+
+        result = GenerationPipelineResult(
+            collected=10, unseen=10, deduped=10, above_min_score=5,
+            sent_to_filter=5, llm_kept=3, final_count=2,
+            items=[],
+            failed_collectors=["reddit", "github"],
+        )
+        report = _format_dry_run_report(result)
+        assert "reddit" in report
+        assert "github" in report
+
+    def test_empty_items_just_funnel(self):
+        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+
+        result = GenerationPipelineResult(
+            collected=0, unseen=0, deduped=0, above_min_score=0,
+            sent_to_filter=0, llm_kept=0, final_count=0,
+            items=[],
+            failed_collectors=[],
+        )
+        report = _format_dry_run_report(result)
+        assert "collected 0" in report
+        assert "final 0" in report

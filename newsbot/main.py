@@ -28,6 +28,7 @@ import logging
 import os
 import sqlite3
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -299,77 +300,68 @@ def _select_diverse_candidates(
     return top
 
 
-async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
-    """Generation cycle: collect → filter → score → LLM filter → store.
+@dataclass
+class GenerationPipelineResult:
+    """Structured result of the pure generation pipeline (no DB writes).
 
-    v2 additive pipeline: digest fills the store with RAW scored stories
-    (body=''), merging duplicates into existing rows — no styling pass.
-    Styling happens at pick time (jobs). If the append fails, the store
-    keeps any merges already applied; nothing is ever bulk-deleted.
-
-    Returns:
-        0 — success: store updated (rows appended and/or merged), survivors
-            marked seen. Empty appends with non-empty merges still count
-            as success.
-        1 — failure: an error occurred (DB, LLM exception, etc.).
-        3 — no-progress: nothing to do (empty collection, all seen, LLM
-            filter empty). Distinct from success so the scheduler can
-            decide whether to advance the timestamp.
+    Funnel counts at each stage + final items annotated with their
+    classification (add vs merge-against existing row). Used by both
+    _run_generation (which applies writes) and /digest dry (which
+    reports without writing).
     """
-    cfg = load_config(settings)
-    # Sync pre-merge weights with active config so dedupe uses configured weights.
+    collected: int
+    unseen: int
+    deduped: int
+    above_min_score: int
+    sent_to_filter: int
+    llm_kept: int
+    final_count: int
+    items: list[dict[str, Any]]  # each carries 'action': 'add' or 'merge', 'merge_row_id': int | None
+    failed_collectors: list[str]
+
+
+async def _run_generation_pipeline(
+    store: NewsStore, cfg: dict[str, Any],
+) -> GenerationPipelineResult | None:
+    """Pure pipeline: collect → filter_seen → dedupe → score → LLM filter →
+    store-match classification. NO DB writes, NO seen-marking.
+
+    Returns None if the pipeline produces nothing (empty collection,
+    all-seen, or LLM filter empty). The caller decides what to do.
+    """
     _set_pre_merge_weights(cfg.get("source_weights") or {})
 
-    # NOTE: Do NOT clear unposted items here. The old queue stays intact
-    # until the new batch is ready (transactional replacement at the end).
-
-    # 1. Collect from every enabled source concurrently.
-    log.info("collecting from %d source types", len(cfg["sources"]))
+    # 1. Collect.
     candidates = await collect_all(cfg)
     if not candidates:
-        log.warning("no candidates collected; keeping existing queue")
-        return 3
-    log.info("collected %d raw candidates", len(candidates))
+        return None
+    collected = len(candidates)
 
-    # 2. Drop already-seen items.
+    # 2. Filter seen.
     candidates = filter_seen(candidates, store)
+    unseen = len(candidates)
 
-    # 3. Cross-source dedupe + merge engagement signals.
+    # 3. Dedupe + merge.
     candidates = dedupe_and_merge(candidates)
+    deduped = len(candidates)
 
-    # 4. Score by hype.
+    # 4. Score.
     candidates = score_all(candidates, cfg)
     candidates.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
 
-    # 5. Keep the top N for the LLM filter, dropping anything below min_score.
-    #    Source diversity: guarantee minimum slots per source so one source
-    #    (e.g. GitHub) can't crowd out all others.
-    #    Uses round-robin allocation so all sources get representation even
-    #    when number_of_sources × quota > max_candidates.
+    # 5. Min_score + diverse selection.
     min_score = float(cfg.get("min_score") or 0.0)
     scored = [c for c in candidates if float(c.get("score") or 0.0) >= min_score]
-    max_candidates = int(cfg["max_candidates"])
-
-    top = _select_diverse_candidates(scored, max_candidates, cfg)
-
+    above_min_score = len(scored)
+    top = _select_diverse_candidates(scored, int(cfg["max_candidates"]), cfg)
+    sent_to_filter = len(top)
     if not top:
-        log.warning("no candidates above min_score=%.1f; nothing to do", min_score)
-        return 3
+        return None
 
-    source_counts: dict[str, int] = {}
-    for c in top:
-        src = str(c.get("source") or "unknown")
-        source_counts[src] = source_counts.get(src, 0) + 1
-    log.info(
-        "top %d candidates (score >= %.1f) sent to LLM filter — sources: %s",
-        len(top), min_score, ", ".join(f"{k}={v}" for k, v in sorted(source_counts.items(), key=lambda x: -x[1])),
-    )
-
-    # 5b. Assign candidate IDs here (after diverse selection, before LLM filter)
-    #     so they can be logged and preserved through the filter pass.
+    # 6. LLM filter.
     _assign_candidate_ids(top)
 
-    # 5c. Log each candidate sent to the LLM filter as one JSON line at INFO.
+    # 6b. Log each candidate sent to the LLM filter (score_candidate event).
     for rank, c in enumerate(top, start=1):
         bd = c.get("score_breakdown") or {}
         log_line = json.dumps({
@@ -396,51 +388,101 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         })
         log.info(log_line)
 
-    # 6. Pass A — LLM filter.
     filter_lm = _build_filter_lm_client()
     kept = await llm_filter(
-        top,
-        filter_lm,
+        top, filter_lm,
         temperature=cfg["llm_temperature"],
         max_tokens=cfg["llm_max_tokens_filter"],
     )
     if not kept:
-        log.warning("LLM filter kept zero items; nothing to post")
-        return 3
+        return None
+    llm_kept = len(kept)
 
-    # 7. Select a diverse top-N for the store.
+    # 7. Diverse top-N.
     final = select_diverse_top_items(kept, cfg["max_final_news"])
-    final = [_as_dict(item) for item in final]  # normalize Candidates to dicts
-    log.info("selected %d diverse items for the store", len(final))
+    final = [_as_dict(item) for item in final]
 
-    # 8. Match survivors against the store.
+    # 8. Classify against store (add vs merge).
     store_rows = store.list_store_rows()
-    to_add: list[dict[str, Any]] = []
-    merges: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    items: list[dict[str, Any]] = []
     for item in final:
         hit = match_candidate_to_store(item, store_rows)
         if hit:
-            merges.append((hit, item))
+            items.append({**item, "action": "merge", "merge_row_id": hit["id"]})
+        else:
+            items.append({**item, "action": "add", "merge_row_id": None})
+
+    return GenerationPipelineResult(
+        collected=collected,
+        unseen=unseen,
+        deduped=deduped,
+        above_min_score=above_min_score,
+        sent_to_filter=sent_to_filter,
+        llm_kept=llm_kept,
+        final_count=len(items),
+        items=items,
+        failed_collectors=[],  # collect_all logs internally; future: return tuple
+    )
+
+
+async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
+    """Generation cycle: collect → filter → score → LLM filter → store.
+
+    v2 additive pipeline: digest fills the store with RAW scored stories
+    (body=''), merging duplicates into existing rows — no styling pass.
+    Styling happens at pick time (jobs). If the append fails, the store
+    keeps any merges already applied; nothing is ever bulk-deleted.
+
+    Returns:
+        0 — success: store updated (rows appended and/or merged), survivors
+            marked seen. Empty appends with non-empty merges still count
+            as success.
+        1 — failure: an error occurred (DB, LLM exception, etc.).
+        3 — no-progress: nothing to do (empty collection, all seen, LLM
+            filter empty). Distinct from success so the scheduler can
+            decide whether to advance the timestamp.
+    """
+    cfg = load_config(settings)
+
+    # Run the pure pipeline (collect → filter → dedupe → score → LLM filter → classify).
+    # No DB writes — the pipeline only reads the store for seen-filtering and classification.
+    pipeline = await _run_generation_pipeline(store, cfg)
+    if pipeline is None:
+        log.warning("generation pipeline produced nothing; keeping existing queue")
+        return 3
+
+    log.info(
+        "generation funnel: collected %d → unseen %d → deduped %d → above_min %d → filter %d → kept %d → final %d",
+        pipeline.collected, pipeline.unseen, pipeline.deduped,
+        pipeline.above_min_score, pipeline.sent_to_filter,
+        pipeline.llm_kept, pipeline.final_count,
+    )
+
+    # Separate adds from merges for the write phase.
+    to_add: list[dict[str, Any]] = []
+    merges: list[tuple[int, dict[str, Any]]] = []  # (store_row_id, item)
+    for item in pipeline.items:
+        if item.get("action") == "merge" and item.get("merge_row_id") is not None:
+            merges.append((int(item["merge_row_id"]), item))
         else:
             to_add.append(item)
 
     # 9. Merges: fold each duplicate into its existing store row
-    #    (per-field engagement max + engagement recompute inside).
-    for row, item in merges:
-        store.merge_into_store_row(row["id"], item, str(item.get("url") or ""))
+    for row_id, item in merges:
+        store.merge_into_store_row(row_id, item, str(item.get("url") or ""))
         updated = store._conn.execute(
-            "SELECT merge_count FROM pending_posts WHERE id=?", (row["id"],)
+            "SELECT merge_count FROM pending_posts WHERE id=?", (row_id,)
         ).fetchone()
         log.info(
             "merged %r into store row %d (merge_count=%d)",
             str(item.get("url") or item.get("title") or "?"),
-            row["id"],
+            row_id,
             int(updated["merge_count"]) if updated else -1,
         )
 
     # 10. Append new raw stories (body='') and mark ALL survivors seen —
-    #     added and merged alike; they live in the store now. The v1 rule
-    #     "styler omitted → don't mark seen" is obsolete: there is no styler.
+    #     added and merged alike; they live in the store now.
+    final = [item for item in pipeline.items]
     try:
         inserted = store.add_stories_to_store(to_add, seen_items=final)
     except sqlite3.Error as exc:
@@ -449,9 +491,6 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     log.info("appended %d raw stories (%d merged into existing rows)", inserted, len(merges))
 
     # 11. Eviction: trim the store back to NEWS_STORE_CAP, coldest first.
-    #     Known trade-off (documented in README): an evicted story stays in
-    #     `seen` for NEWS_RETENTION_SEEN_DAYS and cannot re-enter on the
-    #     same URL.
     now_utc = datetime.now(timezone.utc)
     post_rows = store.list_store_rows()
     temps = {r["id"]: current_temperature(r, cfg, now=now_utc) for r in post_rows}
@@ -837,6 +876,40 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
     return "\n".join(lines)
 
 
+def _format_dry_run_report(result: GenerationPipelineResult) -> str:
+    """Format the /digest dry-run funnel report + per-item classification."""
+    lines = [
+        f"Dry-run generation funnel:",
+        f"  collected {result.collected}",
+        f"  → unseen {result.unseen}",
+        f"  → deduped {result.deduped}",
+        f"  → above_min_score {result.above_min_score}",
+        f"  → sent_to_filter {result.sent_to_filter}",
+        f"  → llm_kept {result.llm_kept}",
+        f"  → final {result.final_count}",
+        "",
+    ]
+    if result.failed_collectors:
+        lines.append(f"Failed collectors: {', '.join(result.failed_collectors)}")
+        lines.append("")
+
+    for idx, item in enumerate(result.items, start=1):
+        title = (item.get("title") or "(untitled)")[:60]
+        source = item.get("source") or "?"
+        score = float(item.get("score") or 0.0)
+        action = item.get("action") or "add"
+        merge_id = item.get("merge_row_id")
+        category = item.get("category") or ""
+        importance = item.get("importance") or ""
+        action_str = f"MERGE→row {merge_id}" if action == "merge" and merge_id else "ADD"
+        cat_str = f" [{category} imp={importance}]" if category or importance else ""
+        lines.append(f"{idx}. {title}")
+        lines.append(f"   {source} | score={score:.1f} | {action_str}{cat_str}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
 async def _scheduler_gen_iteration(
     coordinator: JobCoordinator,
     store: NewsStore,
@@ -994,6 +1067,28 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             if result == 1:
                 raise RuntimeError("generation failed — check logs for details")
 
+        async def on_digest_dry() -> str:
+            """Dry-run: run the pipeline through the generation lock, no DB writes."""
+            async def _dry_run():
+                cfg = load_config(settings)
+                result = await _run_generation_pipeline(store, cfg)
+                if result is None:
+                    return "Dry-run: pipeline produced nothing (empty collection, all seen, or LLM filter empty)."
+                return _format_dry_run_report(result)
+            # Returns int from run_generation, but _dry_run returns str.
+            # We need to capture the string result before the lock wraps it.
+            dry_result: list[str] = []
+            async def _dry_wrapped():
+                r = await _dry_run()
+                dry_result.append(r)
+                return 0
+            rc = await coordinator.run_generation(_dry_wrapped, timeout=GENERATION_TIMEOUT_SECONDS)
+            if rc == 2:
+                raise RuntimeError("generation already in progress — skipped")
+            if dry_result:
+                return dry_result[0]
+            return "Dry-run: no result returned."
+
         async def on_post() -> None:
             result = await coordinator.run_posting()
             if result == 2:
@@ -1112,6 +1207,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             admin_user_id=admin_user_id,
             settings=settings,
             on_digest=on_digest,
+            on_digest_dry=on_digest_dry,
             on_post=on_post,
             on_status=on_status,
             on_scores=on_scores,
