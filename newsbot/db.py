@@ -23,8 +23,10 @@ Store semantics (migration 4 / v2):
 
   ``posted_at`` means "delivered to the Telegram channel" — nothing else.
   Future consumers (girllm hot_take feeder, blog writer) get a
-  ``deliveries(post_id, channel, delivered_at)`` table (planned migration 5);
+  ``deliveries(post_id, channel, delivered_at)`` table (future migration);
   do not overload ``posted_at`` as a general consumption marker.
+  ``message_id`` (migration 5) stores the Telegram channel message_id for
+  recap linking — it is NOT a general consumption marker.
 
   Legacy rows (pre-migration-4) carry merge_count=1 and NULL in the new
   columns; all reads must be NULL-safe.
@@ -210,6 +212,17 @@ def _migration_4(cur: sqlite3.Cursor) -> None:
         )
         """
     )
+
+
+@_migration(5, "Add message_id to pending_posts for channel-post linking")
+def _migration_5(cur: sqlite3.Cursor) -> None:
+    """Add message_id column to pending_posts.
+
+    Stores the Telegram channel message_id returned by sendMessage, so
+    the daily recap can link each item to its actual channel post via
+    a t.me link. Existing rows get NULL (legacy — no link, plain text).
+    """
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN message_id INTEGER")
 
 
 class NewsStore:
@@ -437,12 +450,18 @@ class NewsStore:
             return None
         return int(cur.lastrowid)
 
-    def mark_posted(self, post_id: int) -> None:
-        """Mark a pending post as posted."""
-        self._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (_utc_now_iso(), post_id),
-        )
+    def mark_posted(self, post_id: int, message_id: int | None = None) -> None:
+        """Mark a pending post as posted, optionally storing its channel message_id."""
+        if message_id is not None:
+            self._conn.execute(
+                "UPDATE pending_posts SET posted_at=?, message_id=? WHERE id=?",
+                (_utc_now_iso(), message_id, post_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE pending_posts SET posted_at=? WHERE id=?",
+                (_utc_now_iso(), post_id),
+            )
 
     # Note: clear_unposted(), replace_unposted_batch(), and
     # get_next_pending_post() were removed in the v2 store redesign —
@@ -554,7 +573,8 @@ class NewsStore:
         "crosspost_count, penalty, lookback_hours, "
         "score_at_queue, engagement_score, recency_at_queue, "
         "source_weight, topic_bonus, crosspost_bonus, "
-        "matched_topics, scored_at, merge_count, merged_urls, styled_at"
+        "matched_topics, scored_at, merge_count, merged_urls, "
+        "styled_at, message_id"
     )
 
     def list_store_rows(self) -> list[dict]:

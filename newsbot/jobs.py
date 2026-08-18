@@ -126,50 +126,97 @@ def format_post_message(title: str, body: str, url: str) -> str:
     return "\n".join(parts)
 
 
-def format_recap_message(title: str, items: list[dict[str, Any]]) -> str:
+def _build_channel_link(chat_id: str, message_id: int | None) -> str | None:
+    """Build a t.me link to a channel post.
+
+    - numeric id (-1001234567890) → https://t.me/c/1234567890/<message_id>
+    - @username channel           → https://t.me/username/<message_id>
+    - message_id is None          → None (legacy rows have no link)
+    """
+    if message_id is None:
+        return None
+    chat = chat_id.strip()
+    if chat.startswith("@"):
+        return f"https://t.me/{chat[1:]}/{message_id}"
+    # Numeric channel ids start with -100. Strip the -100 prefix
+    # to get the raw id t.me expects: https://t.me/c/<raw_id>/<msg_id>
+    if chat.startswith("-100"):
+        raw_id = chat[4:]
+        return f"https://t.me/c/{raw_id}/{message_id}"
+    return None
+
+
+def format_recap_message(
+    title: str, items: list[dict[str, Any]], *, chat_id: str = "",
+) -> str:
     """Build the Telegram HTML message for the daily recap.
 
-    Format: <b>Title</b> → blank line → numbered items. Each item shows a
-    short heading (title) followed by its one-line summary. The renderer
-    owns all layout; the LLM only supplies title + per-item summaries.
+    Format (Anton's linked recap):
+        <b>Title summarizing the whole recap</b>
 
-    Items carry: title, summary, url, message_id (None for legacy rows).
-    OQ-2 adds channel-post links via message_id; without it (or before that
-    pass) items render as plain text.
+        1. <a href="CHANNEL_POST_URL">Short title</a>
+        One-line summary of the post.
+        <a href="SOURCE_URL">Source: domain.tld</a>
+
+        2. ...
+
+    The renderer owns all layout and links; the LLM only supplies the
+    headline + per-item summaries. Channel-post links come from the
+    message_id persisted at posting time (OQ-2). Items without a
+    message_id (legacy rows) render the title as plain text.
+
+    The message is kept under a single Telegram message budget (~3000
+    chars). If over, summaries are trimmed longest-first; titles and
+    links are always kept.
     """
     _MAX_MESSAGE_CHARS = 3000
 
-    parts: list[str] = [f"<b>{html_module.escape(title)}</b>", ""]
-    for idx, item in enumerate(items, start=1):
+    def render_item(idx: int, item: dict[str, Any]) -> list[str]:
         item_title = str(item.get("title") or "(untitled)").strip()
         summary = str(item.get("summary") or "").strip()
-        heading = f"{idx}. {item_title}"
-        parts.append(html_module.escape(heading))
+        url = str(item.get("url") or "").strip()
+        message_id = item.get("message_id")
+        heading = f"{idx}. "
+
+        parts: list[str] = []
+        link = _build_channel_link(chat_id, message_id)
+        title_escaped = html_module.escape(item_title)
+        if link:
+            safe_link = html_module.escape(link, quote=True)
+            parts.append(f'{heading}<a href="{safe_link}">{title_escaped}</a>')
+        else:
+            parts.append(html_module.escape(heading + item_title))
         if summary:
             parts.append(html_module.escape(summary))
-        parts.append("")
+        if url:
+            label = html_module.escape(_source_label(url))
+            safe_url = html_module.escape(url, quote=True)
+            parts.append(f'<a href="{safe_url}">Source: {label}</a>')
+        return parts
 
-    message = "\n".join(parts).rstrip("\n")
+    def assemble(all_items: list[dict[str, Any]], include_summaries: bool = True) -> str:
+        lines: list[str] = [f"<b>{html_module.escape(title)}</b>", ""]
+        for idx, item in enumerate(all_items, start=1):
+            if not include_summaries:
+                item = {**item, "summary": ""}
+            lines.extend(render_item(idx, item))
+            lines.append("")
+        return "\n".join(lines).rstrip("\n")
 
-    # Stay under the single-message budget where possible. If over, drop
-    # summary lines longest-first until it fits (titles always kept).
+    message = assemble(items)
+
     if len(message) > _MAX_MESSAGE_CHARS:
         log.warning(
             "recap message %d chars exceeds budget %d — trimming summaries",
             len(message), _MAX_MESSAGE_CHARS,
         )
-        trimmed = list(items)
         for i in sorted(range(len(items)), key=lambda i: -len(str(items[i].get("summary") or ""))):
+            trimmed = list(items)
             trimmed[i] = {**items[i], "summary": ""}
-            candidate_parts: list[str] = [f"<b>{html_module.escape(title)}</b>", ""]
-            for idx, it in enumerate(trimmed, start=1):
-                candidate_parts.append(html_module.escape(f"{idx}. {str(it.get('title') or '(untitled)').strip()}"))
-                if it.get("summary"):
-                    candidate_parts.append(html_module.escape(str(it["summary"]).strip()))
-                candidate_parts.append("")
-            message = "\n".join(candidate_parts).rstrip("\n")
+            message = assemble(trimmed)
             if len(message) <= _MAX_MESSAGE_CHARS:
                 break
+
     return message
 
 
@@ -393,7 +440,9 @@ class JobCoordinator:
         """Deliver a formatted message and mark the row posted.
 
         Dry-run (no BOT_TOKEN/NEWS_CHANNEL_ID) prints to stdout. Delivery
-        error handling is unchanged from the v1 poster.
+        error handling is unchanged from the v1 poster. On success the
+        Telegram message_id is captured from the first chunk's response
+        and persisted via mark_posted for channel-post linking (OQ-2).
         """
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
@@ -412,7 +461,7 @@ class JobCoordinator:
             return 0
 
         try:
-            await post_digest(message, bot_token=bot_token, chat_id=chat_id)
+            results = await post_digest(message, bot_token=bot_token, chat_id=chat_id)
         except PartialDeliveryError as exc:
             # Some chunks were delivered, later chunks failed.
             # Mark as posted to prevent duplicate delivery of early chunks on retry.
@@ -431,13 +480,25 @@ class JobCoordinator:
             log.error("failed to post store row id=%d: %s", row_id, redact_exception(exc))
             return 1
 
-        # Delivery succeeded — now mark as posted.
+        # Delivery succeeded — extract message_id from the first chunk's
+        # Telegram response for channel-post linking (OQ-2).
+        message_id = None
+        if results and isinstance(results[0], dict):
+            try:
+                message_id = results[0].get("result", {}).get("message_id")
+            except (AttributeError, TypeError):
+                pass
+        if message_id is not None:
+            log.info("post id=%d delivered as channel message_id=%s", row_id, message_id)
+        else:
+            log.warning("post id=%d delivered but message_id not found in response", row_id)
+
         # If mark_posted fails, the row stays pending and will be re-delivered
         # on the next posting cycle, causing duplicate channel posts.
         # We must handle this atomically: if DB fails after Telegram success,
         # log a CRITICAL error so the operator can manually mark it.
         try:
-            self._store.mark_posted(row_id)
+            self._store.mark_posted(row_id, message_id=message_id)
         except Exception as db_exc:
             log.error(
                 "CRITICAL: post id=%d delivered to Telegram but mark_posted failed: %s "

@@ -34,8 +34,8 @@ class TestMigrations:
 
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
-        # Should have exactly 4 migrations applied, not duplicated.
-        assert rows["n"] == 4  # 4 migrations applied
+        # Should have exactly 5 migrations applied, not duplicated.
+        assert rows["n"] == 5
         store2.close()
 
     def test_tables_exist_after_migration(self, store):
@@ -208,7 +208,7 @@ class TestScoreColumnsMigration:
         conn.commit()
         conn.close()
 
-        # Reopen with NewsStore — migrations 3+4 should apply and preserve the row.
+        # Reopen with NewsStore — migrations 3+4+5 should apply and preserve the row.
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT * FROM pending_posts WHERE title='Pre-existing'").fetchall()
         assert len(rows) == 1
@@ -216,9 +216,11 @@ class TestScoreColumnsMigration:
         assert rows[0]["scored_at"] is None
         # Migration 4 backfills legacy rows with merge_count=1 (additive default).
         assert rows[0]["merge_count"] == 1
-        # Verify migration 4 was applied.
+        # Migration 5 adds message_id (NULL for legacy rows).
+        assert rows[0]["message_id"] is None
+        # Verify migration 5 was applied.
         version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert version_row["v"] == 4
+        assert version_row["v"] == 5
         store2.close()
 
 
