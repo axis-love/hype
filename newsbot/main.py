@@ -566,7 +566,10 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         log.error("daily summary LLM returned nothing — will retry")
         return 1
 
-    message = format_recap_message(result["title"], result["items"])
+    message = format_recap_message(
+        result["title"], result["items"],
+        chat_id=os.getenv("NEWS_CHANNEL_ID", "").strip(),
+    )
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
@@ -944,7 +947,10 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             )
             if not result:
                 raise RuntimeError("recap LLM returned nothing — check logs")
-            return sheet, format_recap_message(result["title"], result["items"])
+            return sheet, format_recap_message(
+                result["title"], result["items"],
+                chat_id=os.getenv("NEWS_CHANNEL_ID", "").strip(),
+            )
 
         bot_handler = BotCommandHandler(
             bot_token=bot_token,

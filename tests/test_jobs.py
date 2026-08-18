@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from newsbot.db import NewsStore
-from newsbot.jobs import JobCoordinator, format_post_message
+from newsbot.jobs import JobCoordinator, _build_channel_link, format_post_message, format_recap_message
 
 
 @pytest.fixture
@@ -665,3 +665,138 @@ def test_format_scores_hottest_first(tmp_path):
     idx_cold = result.index("Cold Post")
     assert idx_hot < idx_warm < idx_cold
     store.close()
+
+
+# --- OQ-2: channel-post links + format_recap_message --------------------
+
+class TestBuildChannelLink:
+    """_build_channel_link converts chat_id + message_id to t.me URLs."""
+
+    def test_numeric_channel_id_strips_minus_100_prefix(self):
+        link = _build_channel_link("-1001234567890", 42)
+        assert link == "https://t.me/c/1234567890/42"
+
+    def test_username_channel(self):
+        link = _build_channel_link("@axis_love", 7)
+        assert link == "https://t.me/axis_love/7"
+
+    def test_none_message_id_returns_none(self):
+        assert _build_channel_link("-1001234567890", None) is None
+        assert _build_channel_link("@axis_love", None) is None
+
+    def test_empty_chat_id_returns_none(self):
+        assert _build_channel_link("", 42) is None
+
+    def test_unrecognized_chat_format_returns_none(self):
+        assert _build_channel_link("1234567890", 42) is None
+
+
+class TestFormatRecapMessage:
+    """format_recap_message renders Anton's linked recap format."""
+
+    def test_item_with_message_id_gets_channel_link(self):
+        items = [{"title": "Big Story", "summary": "One line.", "url": "https://x.io",
+                  "message_id": 42}]
+        msg = format_recap_message("Day Recap", items, chat_id="-1001234567890")
+        assert "<b>Day Recap</b>" in msg
+        assert 'href="https://t.me/c/1234567890/42"' in msg
+        assert ">Big Story</a>" in msg
+        assert "One line." in msg
+        assert 'Source: x.io' in msg
+
+    def test_item_with_username_channel_gets_t_me_link(self):
+        items = [{"title": "Story", "summary": "Sum.", "url": "",
+                  "message_id": 7}]
+        msg = format_recap_message("Recap", items, chat_id="@mychan")
+        assert 'href="https://t.me/mychan/7"' in msg
+
+    def test_legacy_item_without_message_id_renders_plain_text_title(self):
+        items = [{"title": "Old Story", "summary": "Sum.", "url": "",
+                  "message_id": None}]
+        msg = format_recap_message("Recap", items, chat_id="-1001234567890")
+        assert "1. Old Story" in msg
+        assert "t.me" not in msg
+
+    def test_numbering_follows_item_order(self):
+        items = [
+            {"title": "First", "summary": "S1", "url": "", "message_id": 1},
+            {"title": "Second", "summary": "S2", "url": "", "message_id": 2},
+        ]
+        msg = format_recap_message("Recap", items, chat_id="@chan")
+        assert msg.index("1. ") < msg.index("2. ")
+        assert "First" in msg
+        assert "Second" in msg
+
+    def test_source_link_uses_domain_label(self):
+        items = [{"title": "T", "summary": "S", "url": "https://blog.example.com/post",
+                  "message_id": None}]
+        msg = format_recap_message("R", items, chat_id="")
+        assert 'Source: blog.example.com' in msg
+
+    def test_html_escaped_title(self):
+        items = [{"title": "A & B <script>", "summary": "", "url": "",
+                  "message_id": None}]
+        msg = format_recap_message("R", items, chat_id="")
+        assert "&amp;" in msg
+        assert "&lt;script&gt;" in msg
+
+    def test_trimming_drops_longest_summary_first(self, caplog):
+        long_summary = "x" * 3500
+        items = [
+            {"title": "Short", "summary": "Short.", "url": "", "message_id": 1},
+            {"title": "Long", "summary": long_summary, "url": "", "message_id": 2},
+        ]
+        msg = format_recap_message("R", items, chat_id="@chan")
+        assert "Short." in msg
+        assert long_summary not in msg
+        assert any("trimming summaries" in r.getMessage() for r in caplog.records)
+
+    def test_empty_items_renders_just_title(self):
+        msg = format_recap_message("Empty Day", [], chat_id="@chan")
+        assert msg.strip() == "<b>Empty Day</b>"
+
+
+class TestSendMessageIdPersistence:
+    """_send_and_mark captures message_id from post_digest and persists it."""
+
+    @pytest.mark.asyncio
+    async def test_message_id_captured_and_stored(self, coordinator, store):
+        from tests.helpers import scored_story, echo_style
+
+        store.add_stories_to_store([scored_story("Test", 80.0)], [])
+
+        async def fake_post_digest(message, **kwargs):
+            return [{"ok": True, "result": {"message_id": 999, "date": 1234567890}}]
+
+        with patch("newsbot.jobs.post_digest", new=fake_post_digest), \
+             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
+            with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "-1001234567890"}):
+                result = await coordinator.run_posting()
+
+        assert result == 0
+        row = store._conn.execute(
+            "SELECT message_id FROM pending_posts WHERE posted_at IS NOT NULL"
+        ).fetchone()
+        assert row["message_id"] == 999
+
+    @pytest.mark.asyncio
+    async def test_no_message_id_when_post_digest_returns_empty(self, coordinator, store):
+        from tests.helpers import scored_story, echo_style
+
+        store.add_stories_to_store([scored_story("Test", 80.0)], [])
+
+        async def fake_post_digest(message, **kwargs):
+            return []  # edge case: no results returned
+
+        with patch("newsbot.jobs.post_digest", new=fake_post_digest), \
+             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
+             patch("newsbot.jobs._build_lm_client", return_value=object()):
+            with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
+                result = await coordinator.run_posting()
+
+        assert result == 0
+        row = store._conn.execute(
+            "SELECT message_id FROM pending_posts WHERE posted_at IS NOT NULL"
+        ).fetchone()
+        assert row["message_id"] is None
