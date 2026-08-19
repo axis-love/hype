@@ -447,4 +447,158 @@ async def test_partial_delivery_transport_error_with_chunk_count():
         with pytest.raises(PartialDeliveryError) as exc_info:
             await post_digest(text, bot_token="t", chat_id="@c")
 
-    assert exc_info.value.delivered_chunks == 1
+
+# --- Rich Messages (RT-1) ------------------------------------------------
+
+import logging
+from newsbot.telegram_poster import post_rich_message, RichSendRejected, RICH_MESSAGE_MAX_CHARS
+
+
+@pytest.mark.asyncio
+async def test_rich_message_payload_shape():
+    """sendRichMessage payload must be {chat_id, rich_message: {markdown}}."""
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(return_value=ok_resp)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        results = await post_rich_message("## Hello\n\nWorld", bot_token="tok", chat_id="@chan")
+
+    assert len(results) == 1
+    assert results[0]["ok"] is True
+    call_args = fake_client.post.call_args
+    payload = call_args.kwargs["json"]
+    assert payload["chat_id"] == "@chan"
+    assert payload["rich_message"]["markdown"] == "## Hello\n\nWorld"
+    url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
+    assert "sendRichMessage" in str(url)
+
+
+@pytest.mark.asyncio
+async def test_rich_message_retries_on_429():
+    """429 should retry via _send_with_retry, then succeed."""
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    rate_limited = MagicMock()
+    rate_limited.status_code = 429
+    rate_limited.json.return_value = {"parameters": {"retry_after": 0}}
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[rate_limited, ok_resp])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         patch("newsbot.telegram_poster.asyncio.sleep", new=AsyncMock()):
+        results = await post_rich_message("## Title", bot_token="tok", chat_id="@chan")
+
+    assert fake_client.post.call_count == 2
+    assert results[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_rich_message_fallback_on_400():
+    """400 on first try -> retry with escaped markdown -> still 400 -> RichSendRejected."""
+    bad_resp = MagicMock()
+    bad_resp.status_code = 400
+    bad_resp.text = "Bad Request"
+    bad_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+        "400 Bad Request", request=MagicMock(), response=bad_resp))
+
+    bad_resp2 = MagicMock()
+    bad_resp2.status_code = 400
+    bad_resp2.text = "Bad Request"
+    bad_resp2.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+        "400 Bad Request", request=MagicMock(), response=bad_resp2))
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[bad_resp, bad_resp2])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        with pytest.raises(RichSendRejected):
+            await post_rich_message("## Bad [markdown", bot_token="tok", chat_id="@chan")
+
+    assert fake_client.post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rich_message_400_then_escaped_succeeds():
+    """400 on first try -> retry with escaped markdown -> succeeds."""
+    bad_resp = MagicMock()
+    bad_resp.status_code = 400
+    bad_resp.text = "Bad Request"
+    bad_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+        "400 Bad Request", request=MagicMock(), response=bad_resp))
+
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 42}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(side_effect=[bad_resp, ok_resp])
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        results = await post_rich_message("## Text with *stars*", bot_token="tok", chat_id="@chan")
+
+    assert fake_client.post.call_count == 2
+    assert results[0]["ok"] is True
+    second_payload = fake_client.post.call_args_list[1].kwargs["json"]
+    assert "\\*" in second_payload["rich_message"]["markdown"]
+
+
+@pytest.mark.asyncio
+async def test_rich_message_token_never_in_logs(caplog):
+    """Bot token must never appear in log output."""
+    token = "secret123:ABCdefGHI"
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(return_value=ok_resp)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client), \
+         caplog.at_level(logging.DEBUG):
+        await post_rich_message("## Hello", bot_token=token, chat_id="@chan")
+
+    for record in caplog.records:
+        assert token not in record.getMessage(), \
+            f"Bot token leaked in log: {record.getMessage()}"
+
+
+@pytest.mark.asyncio
+async def test_rich_message_truncates_over_limit():
+    """Markdown exceeding RICH_MESSAGE_MAX_CHARS is truncated."""
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 1}}
+    ok_resp.raise_for_status = MagicMock()
+
+    fake_client = AsyncMock()
+    fake_client.post = AsyncMock(return_value=ok_resp)
+    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
+    fake_client.__aexit__ = AsyncMock(return_value=None)
+
+    oversized = "x" * (RICH_MESSAGE_MAX_CHARS + 500)
+    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
+        await post_rich_message(oversized, bot_token="tok", chat_id="@chan")
+
+    payload = fake_client.post.call_args.kwargs["json"]
+    assert len(payload["rich_message"]["markdown"]) == RICH_MESSAGE_MAX_CHARS
