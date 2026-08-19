@@ -15,13 +15,13 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from lm_client import LMClient
 from newsbot.config import load_config
 from newsbot.db import NewsStore
+from newsbot.richmd import _build_channel_link, _source_label
 from newsbot.selection import pick_hottest
 from newsbot.summarizer import llm_style_posts
 from newsbot.telegram_poster import post_digest, PartialDeliveryError
@@ -71,18 +71,6 @@ def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _source_label(url: str) -> str:
-    """Extract a clean 'domain.tld' label from a URL for the source link."""
-    try:
-        parsed = urlparse(url)
-        host = parsed.hostname or ""
-        if host.startswith("www."):
-            host = host[4:]
-        return host or url
-    except Exception:
-        return url
-
-
 def format_post_message(title: str, body: str, url: str) -> str:
     """Build the Telegram HTML message for a single post.
 
@@ -124,26 +112,6 @@ def format_post_message(title: str, body: str, url: str) -> str:
         safe_url = html_module.escape(url, quote=True)
         parts.append(f'<a href="{safe_url}">Source: {label}</a>')
     return "\n".join(parts)
-
-
-def _build_channel_link(chat_id: str, message_id: int | None) -> str | None:
-    """Build a t.me link to a channel post.
-
-    - numeric id (-1001234567890) → https://t.me/c/1234567890/<message_id>
-    - @username channel           → https://t.me/username/<message_id>
-    - message_id is None          → None (legacy rows have no link)
-    """
-    if message_id is None:
-        return None
-    chat = chat_id.strip()
-    if chat.startswith("@"):
-        return f"https://t.me/{chat[1:]}/{message_id}"
-    # Numeric channel ids start with -100. Strip the -100 prefix
-    # to get the raw id t.me expects: https://t.me/c/<raw_id>/<msg_id>
-    if chat.startswith("-100"):
-        raw_id = chat[4:]
-        return f"https://t.me/c/{raw_id}/{message_id}"
-    return None
 
 
 def format_recap_message(
