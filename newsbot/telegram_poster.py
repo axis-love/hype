@@ -381,16 +381,17 @@ class RichSendRejected(Exception):
 
 
 def _escape_rich_markdown(text: str) -> str:
-    """Backslash-escape characters that have special meaning in rich markdown.
+    """Backslash-escape an entire document for rich markdown.
 
-    Used as a re-escape retry when the API returns 400 — the original
-    markdown may contain unescaped characters the API parser rejects.
+    Transport-level last resort: applied to the WHOLE document when
+    the API rejects the original. This is the nuclear option — it
+    destroys intended markdown structure. Delegates to
+    richmd.escape_rich_md for the character set (same chars), applied
+    indiscriminately. Renderer-level escaping (applied to content
+    segments before structure) uses richmd.escape_rich_md directly.
     """
-    # Escape backslash first, then other special chars.
-    result = text.replace("\\", "\\\\")
-    for char in "*_~`[]|>#":
-        result = result.replace(char, f"\\{char}")
-    return result
+    from newsbot.richmd import escape_rich_md
+    return escape_rich_md(text)
 
 
 async def post_rich_message(
