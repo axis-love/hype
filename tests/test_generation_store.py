@@ -397,3 +397,16 @@ class TestFormatDryRunReport:
         report = _format_dry_run_report(result)
         assert "collected 0" in report
         assert "final 0" in report
+
+    def test_dry_run_report_has_no_fenced_markdown_when_empty(self):
+        """The base report has no fenced markdown block when items is empty."""
+        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+
+        result = GenerationPipelineResult(
+            collected=5, unseen=5, deduped=5, above_min_score=3,
+            sent_to_filter=3, llm_kept=2, final_count=0,
+            items=[],
+            failed_collectors=[],
+        )
+        report = _format_dry_run_report(result)
+        assert "```markdown" not in report
