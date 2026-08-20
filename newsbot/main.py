@@ -1170,11 +1170,13 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             if result == 1:
                 raise RuntimeError("daily recap failed — check logs for details")
 
-        async def on_preview() -> str:
+        async def on_preview() -> tuple[str, str]:
             """Style the hottest store story for a DM preview.
 
             Read-only: no DB writes, no delivery, no slot consumed. The
             scheduled poster will style the same row again at post time.
+            Returns (rich_markdown, html_fallback) — both rendered from
+            the same styled data, mirroring the channel posting path.
             """
             cfg = load_config(settings)
             result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, cfg)
@@ -1197,14 +1199,16 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             body = str(styled[0].get("body") or "").strip()
             if not body:
                 raise RuntimeError("styler returned an empty body — check logs")
-            return render_post(title, body, row.get("url") or "")
+            url = row.get("url") or ""
+            return render_post(title, body, url), format_post_message(title, body, url)
 
-        async def on_recap_preview() -> tuple[str, str]:
+        async def on_recap_preview() -> tuple[str, str, str]:
             """Write the daily recap for a DM preview.
 
             Read-only: no DB writes, no delivery, day key untouched.
-            Returns (input_sheet, recap_message): the sheet shows exactly
-            what the LLM will receive; the recap is the generated output.
+            Returns (input_sheet, rich_markdown, html_fallback): the sheet
+            shows exactly what the LLM will receive; markdown and fallback
+            are both rendered from the same result data.
             """
             now = local_now()
             since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
@@ -1220,8 +1224,10 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             if not result:
                 raise RuntimeError("recap LLM returned nothing — check logs")
             chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
-            return sheet, render_recap(
-                result["title"], result["items"], chat_id=chat_id,
+            return (
+                sheet,
+                render_recap(result["title"], result["items"], chat_id=chat_id),
+                _format_recap_html_fallback(result["title"], result["items"], chat_id=chat_id),
             )
 
         bot_handler = BotCommandHandler(

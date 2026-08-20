@@ -118,7 +118,10 @@ class TestPreview:
     async def test_preview_sends_rich_markdown_to_dm(self):
         """Preview sends via _send_rich (sendRichMessage), not _send with HTML."""
         async def on_preview():
-            return "## Title\n\nBody text.\n\n[Source: x.io](https://x.io)"
+            return (
+                "**Title**\n\nBody text.\n\n[Source: x.io](https://x.io)",
+                '<b>Title</b>\n\nBody text.\n<a href="https://x.io">Source: x.io</a>',
+            )
 
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
@@ -129,15 +132,15 @@ class TestPreview:
         assert "Styling" in calls[0][1]
         assert len(rich_calls) == 1
         assert rich_calls[0][0] == 123
-        assert "## Title" in rich_calls[0][1]
-        # HTML fallback should be built.
-        assert rich_calls[0][2]  # non-empty fallback
+        assert "**Title**" in rich_calls[0][1]
+        # HTML fallback comes from the handler, rendered from the same data.
+        assert "<b>Title</b>" in rich_calls[0][2]
 
     @pytest.mark.asyncio
     async def test_preview_fallback_on_rich_rejected(self):
         """On RichSendRejected, preview falls back to HTML _send."""
         async def on_preview():
-            return "## Title\n\nBody."
+            return "**Title**\n\nBody.", "<b>Title</b>\n\nBody."
 
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
@@ -172,7 +175,7 @@ class TestPreview:
     @pytest.mark.asyncio
     async def test_preview_empty_result(self):
         async def on_preview():
-            return ""
+            return "", ""
 
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
@@ -187,7 +190,8 @@ class TestRecapPreview:
         async def on_recap_preview():
             return (
                 "Recap input — 1 posts from the last 24h:\n\n1. Big launch\n   AI | hn | 2026-08-16T06:00:00+00:00",
-                "## Daily recap\n\n1. [Big launch](https://t.me/c/1/10)",
+                "**Daily recap**\n\n1. [Big launch](https://t.me/c/1/10)",
+                '<b>Daily recap</b>\n\n1. <a href="https://t.me/c/1/10">Big launch</a>',
             )
 
         handler = _make_handler(on_recap_preview=on_recap_preview)
@@ -200,7 +204,7 @@ class TestRecapPreview:
         assert "Recap input" in calls[1][1]
         assert calls[1][2] == ""  # input sheet is plain text
         assert len(rich_calls) == 1
-        assert "## Daily recap" in rich_calls[0][1]
+        assert "**Daily recap**" in rich_calls[0][1]
         assert rich_calls[0][2]  # HTML fallback should be present
 
     @pytest.mark.asyncio

@@ -115,13 +115,13 @@ class TestBuildChannelLink:
 class TestRenderPost:
     def test_basic_shape(self):
         md = render_post("Big Launch", "Company X released a new product.", "https://example.com/post")
-        assert md.startswith("## Big Launch")
+        assert md.startswith("**Big Launch**")
         assert "Company X released a new product." in md
         assert "[Source: example.com](https://example.com/post)" in md
 
     def test_title_escaped(self):
         md = render_post("AI *is* great", "Body.", "https://x.io")
-        assert "## AI \\*is\\* great" in md
+        assert "**AI \\*is\\* great**" in md
 
     def test_no_url(self):
         md = render_post("Title", "Body.", "")
@@ -129,11 +129,11 @@ class TestRenderPost:
 
     def test_no_title(self):
         md = render_post("", "Body.", "https://x.io")
-        assert not md.startswith("##")
+        assert not md.startswith("**")
 
     def test_body_truncation_respects_budget(self):
         """Body exceeding the budget is truncated to fit RICH_MESSAGE_MAX_CHARS."""
-        from newsbot.telegram_poster import RICH_MESSAGE_MAX_CHARS
+        from newsbot.richmd import RICH_MESSAGE_MAX_CHARS
         long_body = "This is a sentence. " * (RICH_MESSAGE_MAX_CHARS // 10)
         md = render_post("T", long_body, "https://example.com/very/long/url")
         assert len(md) <= RICH_MESSAGE_MAX_CHARS
@@ -144,6 +144,11 @@ class TestRenderPost:
         body = "Short body."
         md = render_post("T", body, "https://x.io")
         assert body in md
+
+    def test_body_escaped(self):
+        """Styler output is plain text — markdown specials in it are literal."""
+        md = render_post("T", "a *b* _c_ [d] #e", "")
+        assert "a \\*b\\* \\_c\\_ \\[d\\] \\#e" in md
 
 
 # --- render_recap --------------------------------------------------------
@@ -157,7 +162,7 @@ class TestRenderRecap:
         ]
         md = render_recap("Day Recap", items, chat_id="@chan")
         expected = (
-            "## Day Recap\n"
+            "**Day Recap**\n"
             "\n"
             "1. [Story A](https://t.me/chan/10) — [a.example.com](https://a.example.com)\n"
             "2. [Story B](https://t.me/chan/20) — [b.example.com](https://b.example.com)"
@@ -192,7 +197,7 @@ class TestRenderRecap:
 
     def test_empty_items(self):
         md = render_recap("Empty Day", [], chat_id="@chan")
-        assert md.strip() == "## Empty Day"
+        assert md.strip() == "**Empty Day**"
 
     def test_numeric_chat_id(self):
         items = [{"title": "S", "url": "", "message_id": 5}]

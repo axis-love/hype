@@ -341,11 +341,11 @@ class TestConcurrentGenerationPostingIntegration:
 
         delivered_titles: list[str] = []
 
-        async def slow_post_digest(message, **kwargs):
+        async def slow_post_rich(markdown, **kwargs):
             await asyncio.sleep(0.05)  # Simulate network latency
-            # Extract title from the HTML message for tracking.
+            # Extract title from the rich markdown for tracking.
             import re
-            m = re.search(r"<b>(.*?)</b>", message)
+            m = re.search(r"\*\*(.*?)\*\*", markdown)
             if m:
                 delivered_titles.append(m.group(1))
 
@@ -356,7 +356,7 @@ class TestConcurrentGenerationPostingIntegration:
             store.add_stories_to_store(new_posts, seen_items)
             return 0
 
-        with patch("newsbot.jobs.post_digest", new=slow_post_digest), \
+        with patch("newsbot.jobs.post_rich_message", new=slow_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
              patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
@@ -401,7 +401,7 @@ class TestConcurrentGenerationPostingIntegration:
 
         delivered_ids: list[int] = []
 
-        async def tracking_post_digest(message, **kwargs):
+        async def tracking_post_rich(markdown, **kwargs):
             await asyncio.sleep(0.02)
             # Don't track here — tracking happens in _deliver_one via mark_posted.
 
@@ -412,7 +412,7 @@ class TestConcurrentGenerationPostingIntegration:
             await asyncio.sleep(0.02)
             return await original_deliver()
 
-        with patch("newsbot.jobs.post_digest", new=tracking_post_digest), \
+        with patch("newsbot.jobs.post_rich_message", new=tracking_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
              patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
@@ -453,9 +453,9 @@ class TestConcurrentGenerationPostingIntegration:
 
         delivered: list[str] = []
 
-        async def tracking_post_digest(message, **kwargs):
+        async def tracking_post_rich(markdown, **kwargs):
             import re
-            m = re.search(r"<b>(.*?)</b>", message)
+            m = re.search(r"\*\*(.*?)\*\*", markdown)
             if m:
                 delivered.append(m.group(1))
 
@@ -466,7 +466,7 @@ class TestConcurrentGenerationPostingIntegration:
             store.add_stories_to_store(new_posts, seen_items)
             return 0
 
-        with patch("newsbot.jobs.post_digest", new=tracking_post_digest), \
+        with patch("newsbot.jobs.post_rich_message", new=tracking_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
              patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
@@ -708,7 +708,7 @@ class TestFormatRecapHtmlFallback:
 
 
 class TestSendMessageIdPersistence:
-    """_send_and_mark captures message_id from post_digest and persists it."""
+    """_send_and_mark captures message_id from the send result and persists it."""
 
     @pytest.mark.asyncio
     async def test_message_id_captured_and_stored(self, coordinator, store):
@@ -716,10 +716,10 @@ class TestSendMessageIdPersistence:
 
         store.add_stories_to_store([scored_story("Test", 80.0)], [])
 
-        async def fake_post_digest(message, **kwargs):
+        async def fake_post_rich(markdown, **kwargs):
             return [{"ok": True, "result": {"message_id": 999, "date": 1234567890}}]
 
-        with patch("newsbot.jobs.post_digest", new=fake_post_digest), \
+        with patch("newsbot.jobs.post_rich_message", new=fake_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
              patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "-1001234567890"}):
@@ -737,10 +737,10 @@ class TestSendMessageIdPersistence:
 
         store.add_stories_to_store([scored_story("Test", 80.0)], [])
 
-        async def fake_post_digest(message, **kwargs):
+        async def fake_post_rich(markdown, **kwargs):
             return []  # edge case: no results returned
 
-        with patch("newsbot.jobs.post_digest", new=fake_post_digest), \
+        with patch("newsbot.jobs.post_rich_message", new=fake_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
              patch("newsbot.jobs._build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):

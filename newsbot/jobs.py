@@ -21,10 +21,15 @@ from core.settings_store import SettingsStore
 from lm_client import LMClient
 from newsbot.config import load_config
 from newsbot.db import NewsStore
-from newsbot.richmd import _build_channel_link, _source_label
+from newsbot.richmd import RECAP_MAX_ITEMS, _build_channel_link, _source_label, render_post
 from newsbot.selection import pick_hottest
 from newsbot.summarizer import llm_style_posts
-from newsbot.telegram_poster import post_digest, PartialDeliveryError
+from newsbot.telegram_poster import (
+    PartialDeliveryError,
+    RichSendRejected,
+    post_digest,
+    post_rich_message,
+)
 
 log = logging.getLogger(__name__)
 
@@ -144,7 +149,7 @@ def _format_recap_html_fallback(
         return "".join(parts)
 
     lines = [f"<b>{html_module.escape(title)}</b>", ""]
-    for idx, item in enumerate(items[:30], start=1):
+    for idx, item in enumerate(items[:RECAP_MAX_ITEMS], start=1):
         lines.append(render_item(idx, item))
     return "\n".join(lines)
 
@@ -362,23 +367,26 @@ class JobCoordinator:
             "merge_count": row.get("merge_count") or 1,
         }))
 
-        message = format_post_message(styled_title, styled_body, row.get("url") or "")
-        return await self._send_and_mark(row_id, message)
+        markdown = render_post(styled_title, styled_body, row.get("url") or "")
+        html_fallback = format_post_message(styled_title, styled_body, row.get("url") or "")
+        return await self._send_and_mark(row_id, markdown, html_fallback)
 
-    async def _send_and_mark(self, row_id: int, message: str) -> int:
-        """Deliver a formatted message and mark the row posted.
+    async def _send_and_mark(self, row_id: int, markdown: str, html_fallback: str) -> int:
+        """Deliver a post (rich markdown, HTML fallback) and mark it posted.
 
-        Dry-run (no BOT_TOKEN/NEWS_CHANNEL_ID) prints to stdout. Delivery
-        error handling is unchanged from the v1 poster. On success the
-        Telegram message_id is captured from the first chunk's response
-        and persisted via mark_posted for channel-post linking (OQ-2).
+        Delivery goes through sendRichMessage — the exact renderer and
+        transport /preview uses — and falls back to the HTML sendMessage
+        path on RichSendRejected. Dry-run (no BOT_TOKEN/NEWS_CHANNEL_ID)
+        prints the markdown to stdout. On success the Telegram message_id
+        is captured from the response and persisted via mark_posted for
+        channel-post linking (OQ-2).
         """
         bot_token = os.getenv("BOT_TOKEN", "").strip()
         chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
 
         if not bot_token or not chat_id:
             log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
-            print(message)
+            print(markdown)
             try:
                 self._store.mark_posted(row_id)
             except Exception as db_exc:
@@ -390,7 +398,11 @@ class JobCoordinator:
             return 0
 
         try:
-            results = await post_digest(message, bot_token=bot_token, chat_id=chat_id)
+            try:
+                results = await post_rich_message(markdown, bot_token=bot_token, chat_id=chat_id)
+            except RichSendRejected:
+                log.warning("rich post id=%d rejected — falling back to HTML sendMessage", row_id)
+                results = await post_digest(html_fallback, bot_token=bot_token, chat_id=chat_id)
         except PartialDeliveryError as exc:
             # Some chunks were delivered, later chunks failed.
             # Mark as posted to prevent duplicate delivery of early chunks on retry.

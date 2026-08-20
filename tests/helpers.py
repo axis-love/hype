@@ -10,16 +10,21 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-NOW = datetime(2026, 8, 17, 12, 0, 0, tzinfo=timezone.utc)
-
 
 def scored_story(title: str, engagement: float, *, hours_old: float = 1.0) -> dict[str, Any]:
     """Story dict whose score_breakdown persists a known engagement score.
 
     With fresh recency (~1.0), weight 1.0, no bonuses, penalty 1.0 the
     row's current temperature is ≈ engagement * recency.
+
+    published_at is relative to the REAL clock: the production temperature
+    recalc uses wall-clock now, so a frozen date here would decay the rows
+    a little more every real day until they fall below the posting
+    threshold and the tests rot. Tests that need exact temperatures freeze
+    newsbot.jobs.datetime instead (see test_posting_gate).
     """
-    published = (NOW - timedelta(hours=hours_old)).isoformat(timespec="seconds")
+    now = datetime.now(timezone.utc)
+    published = (now - timedelta(hours=hours_old)).isoformat(timespec="seconds")
     return {
         "title": title,
         "url": f"https://example.com/{title.lower().replace(' ', '-')}",
