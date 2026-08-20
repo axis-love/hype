@@ -7,6 +7,7 @@ Covers the admin debug surface: /help grouping, /preview and /recap
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -41,6 +42,18 @@ def _capture_send(handler):
         return True
 
     handler._send = mock_send
+    return calls
+
+
+def _capture_send_rich(handler):
+    """Replace _send_rich with a recorder. Returns the (chat_id, markdown, fallback) list."""
+    calls: list[tuple[int, str, str]] = []
+
+    async def mock_send_rich(chat_id, markdown, html_fallback=""):
+        calls.append((chat_id, markdown, html_fallback))
+        return True
+
+    handler._send_rich = mock_send_rich
     return calls
 
 
@@ -102,18 +115,42 @@ class TestHelpPanel:
 
 class TestPreview:
     @pytest.mark.asyncio
-    async def test_preview_sends_styled_html_to_dm(self):
+    async def test_preview_sends_rich_markdown_to_dm(self):
+        """Preview sends via _send_rich (sendRichMessage), not _send with HTML."""
         async def on_preview():
-            return "<b>Title</b>\n\nBody text."
+            return "## Title\n\nBody text.\n\n[Source: x.io](https://x.io)"
 
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
+        rich_calls = _capture_send_rich(handler)
         await handler._handle(_update(123, "/preview"))
-        # Two messages: the "styling…" ack, then the preview itself.
+        # Ack message via _send, then the preview via _send_rich.
+        assert len(calls) == 1
+        assert "Styling" in calls[0][1]
+        assert len(rich_calls) == 1
+        assert rich_calls[0][0] == 123
+        assert "## Title" in rich_calls[0][1]
+        # HTML fallback should be built.
+        assert rich_calls[0][2]  # non-empty fallback
+
+    @pytest.mark.asyncio
+    async def test_preview_fallback_on_rich_rejected(self):
+        """On RichSendRejected, preview falls back to HTML _send."""
+        async def on_preview():
+            return "## Title\n\nBody."
+
+        handler = _make_handler(on_preview=on_preview)
+        calls = _capture_send(handler)
+        # Make _send_rich raise RichSendRejected by patching post_rich_message.
+        from newsbot.telegram_poster import RichSendRejected
+        async def exploding_rich(*a, **kw):
+            raise RichSendRejected("rejected")
+        with patch("newsbot.bot_commands.post_rich_message", side_effect=exploding_rich):
+            await handler._handle(_update(123, "/preview"))
+        # Ack + HTML fallback send.
         assert len(calls) == 2
-        assert calls[1][1] == "<b>Title</b>\n\nBody text."
-        # Preview is rendered as HTML like a real channel post.
-        assert calls[1][2] == "HTML"
+        assert "Styling" in calls[0][1]
+        assert calls[1][2] == "HTML"  # fallback parse_mode
 
     @pytest.mark.asyncio
     async def test_preview_runtime_error_surfaced(self):
@@ -140,28 +177,31 @@ class TestPreview:
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
         await handler._handle(_update(123, "/preview"))
-        assert any("returned nothing" in c[1] for c in calls)
+        assert any("nothing" in c[1].lower() for c in calls)
 
 
 class TestRecapPreview:
     @pytest.mark.asyncio
-    async def test_recap_sends_input_sheet_then_html_recap(self):
-        """Bare /recap: ack, then input sheet (plain), then recap (HTML)."""
+    async def test_recap_sends_input_sheet_then_rich_recap(self):
+        """Bare /recap: ack, then input sheet (plain), then recap (rich markdown)."""
         async def on_recap_preview():
             return (
                 "Recap input — 1 posts from the last 24h:\n\n1. Big launch\n   AI | hn | 2026-08-16T06:00:00+00:00",
-                "<b>Daily recap</b>\n\nBiggest story first.",
+                "## Daily recap\n\n1. [Big launch](https://t.me/c/1/10)",
             )
 
         handler = _make_handler(on_recap_preview=on_recap_preview)
         calls = _capture_send(handler)
+        rich_calls = _capture_send_rich(handler)
         await handler._handle(_update(123, "/recap"))
-        # Three messages: ack, input sheet, recap.
-        assert len(calls) == 3
+        # Three interactions: ack (_send), sheet (_send), recap (_send_rich).
+        assert len(calls) == 2
+        assert "Writing" in calls[0][1]
         assert "Recap input" in calls[1][1]
         assert calls[1][2] == ""  # input sheet is plain text
-        assert calls[2][1] == "<b>Daily recap</b>\n\nBiggest story first."
-        assert calls[2][2] == "HTML"
+        assert len(rich_calls) == 1
+        assert "## Daily recap" in rich_calls[0][1]
+        assert rich_calls[0][2]  # HTML fallback should be present
 
     @pytest.mark.asyncio
     async def test_recap_prompt_shows_current_prompt(self):

@@ -39,6 +39,7 @@ import httpx
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT
+from newsbot.telegram_poster import post_rich_message, RichSendRejected
 
 log = logging.getLogger(__name__)
 
@@ -108,6 +109,31 @@ class BotCommandHandler:
                 log.warning("bot command reply: invalid JSON response")
                 return False
         return True
+
+    async def _send_rich(self, chat_id: int, markdown: str, html_fallback: str = "") -> bool:
+        """Send a rich-markdown message to a chat via sendRichMessage.
+
+        On RichSendRejected, falls back to _send with the HTML fallback
+        so the chat never gets nothing. Returns True on success.
+        """
+        try:
+            await post_rich_message(
+                markdown,
+                bot_token=self.bot_token,
+                chat_id=str(chat_id),
+            )
+            return True
+        except RichSendRejected:
+            log.warning("rich message rejected for chat %d — falling back to HTML", chat_id)
+            if html_fallback:
+                return await self._send(chat_id, html_fallback, parse_mode="HTML")
+            # No fallback provided — send the raw markdown as plain text.
+            return await self._send(chat_id, markdown)
+        except Exception as exc:
+            log.warning("rich message failed for chat %d: %s", chat_id, redact_exception(exc))
+            if html_fallback:
+                return await self._send(chat_id, html_fallback, parse_mode="HTML")
+            return await self._send(chat_id, markdown)
 
     def _is_admin(self, user_id: int) -> bool:
         return str(user_id) == self.admin_user_id
@@ -270,17 +296,47 @@ class BotCommandHandler:
             return
         await self._send(chat_id, "Styling the hottest store story for preview…")
         try:
-            message = await handler()
+            markdown = await handler()
         except RuntimeError as exc:
             await self._send(chat_id, str(exc))
             return
         except Exception:
             await self._send(chat_id, "Preview failed. Check logs for details.")
             return
-        if not message:
+        if not markdown:
             await self._send(chat_id, "Preview returned nothing — styler may have failed.")
             return
-        await self._send(chat_id, message, parse_mode="HTML")
+        # Send as rich markdown (same renderer + transport as the channel).
+        # The handler returns rich markdown; build an HTML fallback inline.
+        html_fallback = self._build_post_html_fallback(markdown)
+        await self._send_rich(chat_id, markdown, html_fallback)
+
+    def _build_post_html_fallback(self, markdown: str) -> str:
+        """Build a minimal HTML fallback from a render_post markdown string.
+
+        Strips markdown headings (## → <b>), link syntax ([text](url) → <a>),
+        and keeps paragraphs. Simple — only used when sendRichMessage rejects.
+        """
+        import re
+        lines = markdown.split("\n")
+        html_parts: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("## "):
+                html_parts.append(f"<b>{stripped[3:]}</b>")
+            elif stripped.startswith("[") and "](" in stripped:
+                # Convert [text](url) → <a href="url">text</a>
+                html_parts.append(re.sub(
+                    r"\[([^\]]+)\]\(([^)]+)\)",
+                    r'<a href="\2">\1</a>',
+                    stripped,
+                ))
+            else:
+                import html as html_module
+                html_parts.append(html_module.escape(stripped))
+        return "\n".join(html_parts)
 
     async def _cmd_recap(self, chat_id: int, arg: str = "") -> None:
         """Recap commands.
@@ -311,8 +367,35 @@ class BotCommandHandler:
         if not message:
             await self._send(chat_id, "Recap preview returned nothing — summarizer may have failed.")
             return
+        # Input sheet is plain text (transparency aid).
         await self._send(chat_id, sheet)
-        await self._send(chat_id, message, parse_mode="HTML")
+        # Recap is rich markdown — send via sendRichMessage with HTML fallback.
+        html_fallback = self._build_recap_html_fallback(message)
+        await self._send_rich(chat_id, message, html_fallback)
+
+    def _build_recap_html_fallback(self, markdown: str) -> str:
+        """Build a minimal HTML fallback from a render_recap markdown string."""
+        import re
+        lines = markdown.split("\n")
+        html_parts: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("## "):
+                html_parts.append(f"<b>{stripped[3:]}</b>")
+            elif stripped and stripped[0].isdigit() and ". " in stripped:
+                # Ordered list item with links: "1. [title](url) — [domain](url)"
+                converted = re.sub(
+                    r"\[([^\]]+)\]\(([^)]+)\)",
+                    r'<a href="\2">\1</a>',
+                    stripped,
+                )
+                html_parts.append(converted)
+            else:
+                import html as html_module
+                html_parts.append(html_module.escape(stripped))
+        return "\n".join(html_parts)
 
     async def _cmd_setrecap(self, chat_id: int, arg: str) -> None:
         if not arg:

@@ -61,7 +61,7 @@ from newsbot.jobs import (
     _row_to_styler_input,
     format_post_message,
 )
-from newsbot.richmd import render_recap
+from newsbot.richmd import render_post, render_recap
 from newsbot.selection import pick_hottest
 from newsbot.telegram_poster import post_digest, post_rich_message, RichSendRejected
 from newsbot.summarizer import (
@@ -1084,7 +1084,19 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 result = await _run_generation_pipeline(store, cfg)
                 if result is None:
                     return "Dry-run: pipeline produced nothing (empty collection, all seen, or LLM filter empty)."
-                return _format_dry_run_report(result)
+                report = _format_dry_run_report(result)
+                # Append the markdown source for each final item (debugging
+                # the LLM -> render boundary).
+                if result.items:
+                    md_parts = ["", "```markdown"]
+                    for item in result.items:
+                        title = str(item.get("title") or "(untitled)")
+                        url = str(item.get("url") or "")
+                        body = str(item.get("snippet") or item.get("body") or "")[:200]
+                        md_parts.append(render_post(title, body, url))
+                    md_parts.append("```")
+                    report += "\n" + "\n".join(md_parts)
+                return report
             # Returns int from run_generation, but _dry_run returns str.
             # We need to capture the string result before the lock wraps it.
             dry_result: list[str] = []
@@ -1185,7 +1197,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             body = str(styled[0].get("body") or "").strip()
             if not body:
                 raise RuntimeError("styler returned an empty body — check logs")
-            return format_post_message(title, body, row.get("url") or "")
+            return render_post(title, body, row.get("url") or "")
 
         async def on_recap_preview() -> tuple[str, str]:
             """Write the daily recap for a DM preview.
