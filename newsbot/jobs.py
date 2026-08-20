@@ -114,34 +114,17 @@ def format_post_message(title: str, body: str, url: str) -> str:
     return "\n".join(parts)
 
 
-def format_recap_message(
+def _format_recap_html_fallback(
     title: str, items: list[dict[str, Any]], *, chat_id: str = "",
 ) -> str:
-    """Build the Telegram HTML message for the daily recap.
+    """HTML fallback for the daily recap when sendRichMessage is rejected.
 
-    Format (Anton's linked recap):
-        <b>Title summarizing the whole recap</b>
-
-        1. <a href="CHANNEL_POST_URL">Short title</a>
-        One-line summary of the post.
-        <a href="SOURCE_URL">Source: domain.tld</a>
-
-        2. ...
-
-    The renderer owns all layout and links; the LLM only supplies the
-    headline + per-item summaries. Channel-post links come from the
-    message_id persisted at posting time (OQ-2). Items without a
-    message_id (legacy rows) render the title as plain text.
-
-    The message is kept under a single Telegram message budget (~3000
-    chars). If over, summaries are trimmed longest-first; titles and
-    links are always kept.
+    Renders the same title-only list as richmd.render_recap but in HTML:
+    <b>title</b> + numbered <a> lines with channel-post and source links.
+    Kept inline — not worth a separate module for a fallback path.
     """
-    _MAX_MESSAGE_CHARS = 3000
-
-    def render_item(idx: int, item: dict[str, Any]) -> list[str]:
+    def render_item(idx: int, item: dict[str, Any]) -> str:
         item_title = str(item.get("title") or "(untitled)").strip()
-        summary = str(item.get("summary") or "").strip()
         url = str(item.get("url") or "").strip()
         message_id = item.get("message_id")
         heading = f"{idx}. "
@@ -154,38 +137,16 @@ def format_recap_message(
             parts.append(f'{heading}<a href="{safe_link}">{title_escaped}</a>')
         else:
             parts.append(html_module.escape(heading + item_title))
-        if summary:
-            parts.append(html_module.escape(summary))
         if url:
             label = html_module.escape(_source_label(url))
             safe_url = html_module.escape(url, quote=True)
-            parts.append(f'<a href="{safe_url}">Source: {label}</a>')
-        return parts
+            parts.append(f' — <a href="{safe_url}">Source: {label}</a>')
+        return "".join(parts)
 
-    def assemble(all_items: list[dict[str, Any]], include_summaries: bool = True) -> str:
-        lines: list[str] = [f"<b>{html_module.escape(title)}</b>", ""]
-        for idx, item in enumerate(all_items, start=1):
-            if not include_summaries:
-                item = {**item, "summary": ""}
-            lines.extend(render_item(idx, item))
-            lines.append("")
-        return "\n".join(lines).rstrip("\n")
-
-    message = assemble(items)
-
-    if len(message) > _MAX_MESSAGE_CHARS:
-        log.warning(
-            "recap message %d chars exceeds budget %d — trimming summaries",
-            len(message), _MAX_MESSAGE_CHARS,
-        )
-        for i in sorted(range(len(items)), key=lambda i: -len(str(items[i].get("summary") or ""))):
-            trimmed = list(items)
-            trimmed[i] = {**items[i], "summary": ""}
-            message = assemble(trimmed)
-            if len(message) <= _MAX_MESSAGE_CHARS:
-                break
-
-    return message
+    lines = [f"<b>{html_module.escape(title)}</b>", ""]
+    for idx, item in enumerate(items[:30], start=1):
+        lines.append(render_item(idx, item))
+    return "\n".join(lines)
 
 
 class JobCoordinator:

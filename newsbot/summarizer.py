@@ -22,6 +22,7 @@ from typing import Any
 
 from core.text_utils import strip_think
 from newsbot.collectors.base import Candidate
+from newsbot.db import _as_dict
 
 log = logging.getLogger(__name__)
 
@@ -423,22 +424,19 @@ async def llm_daily_summary(
     temperature: float = 0.5,
     max_tokens: int = 4000,
 ) -> dict[str, Any] | None:
-    """Write the daily recap from the posts published in the last 24 hours.
+    """Write the daily recap headline from the posts published in the last 24h.
 
     Each item carries the styled content actually posted: title, category,
     source, posted_at, body (styled body; raw snippet fallback for legacy
-    rows). The application assigns opaque IDs (same binding pattern as
-    llm_filter / llm_style_posts) and does all layout — the model only
-    returns data.
+    rows). The system prompt comes from settings (news.recap_prompt).
 
-    The system prompt comes from settings (news.recap_prompt) and must
-    request STRICT JSON {"title": "...", "items": [{"id","summary"}]}.
+    The LLM returns ONLY a headline for the day — no per-item summaries.
+    Response contract: STRICT JSON {"title": "..."}.
 
-    Returns {"title": str, "items": [{...}]} in the LLM's order
-    (importance), or None on any failure. Each result item carries:
-    id, summary (LLM data) plus title, url, message_id merged from the
-    trusted application item — never from LLM output (same hygiene as
-    llm_style_posts).
+    Returns {"title": str, "items": items} — the items are the same trusted
+    app data passed in (title, url, message_id), so render_recap can build
+    the linked list. The LLM does not control item data or ordering.
+    Returns None on any failure (empty prompt, invalid JSON, missing title).
     """
     if not items:
         return None
@@ -447,12 +445,8 @@ async def llm_daily_summary(
         log.warning("llm_daily_summary called with an empty recap_prompt")
         return None
 
-    # Bind LLM output back to input items by opaque application-owned ID.
-    id_map = _assign_missing_candidate_ids(items)
-
     def item_block(item: dict[str, Any] | Candidate) -> str:
-        cid = item.get("candidate_id", "c000")
-        lines = [f"[{cid}] Title: {item.get('title') or '(untitled)'}"]
+        lines = [f"Title: {item.get('title') or '(untitled)'}"]
         if item.get("category"):
             lines.append(f"   Category: {item['category']}")
         if item.get("source"):
@@ -495,47 +489,8 @@ async def llm_daily_summary(
     if not title:
         log.warning("LLM summarizer returned an empty title")
         return None
-    items_raw = data.get("items")
-    if not isinstance(items_raw, list):
-        log.warning("LLM summarizer JSON has no 'items' list")
-        return None
 
-    # Match LLM items to inputs by opaque ID. Order = LLM's order
-    # (the prompt instructs the model to order by importance).
-    seen_ids: set[str] = set()
-    result_items: list[dict[str, Any]] = []
-    for entry in items_raw:
-        if not isinstance(entry, dict):
-            log.warning("LLM summarizer returned a malformed entry (non-dict)")
-            continue
-        cid = str(entry.get("id") or "").strip()
-        if not cid or cid not in id_map:
-            # Log only the length — the model could embed echoed prompt or
-            # article content in an ID field (same hygiene as llm_filter).
-            log.warning("LLM summarizer returned unknown id (len=%d) — skipping", len(cid))
-            continue
-        if cid in seen_ids:
-            log.warning("LLM summarizer returned duplicate id (len=%d) — skipping", len(cid))
-            continue
-        seen_ids.add(cid)
-        original = id_map[cid]
-        # Title/url always from trusted app data — never from LLM output
-        # (same hygiene as llm_style_posts). message_id passes through for
-        # the recap renderer (None for legacy rows without one).
-        result_items.append({
-            "id": cid,
-            "summary": str(entry.get("summary") or "").strip(),
-            "title": str(original.get("title") or ""),
-            "url": str(original.get("url") or ""),
-            "message_id": original.get("message_id"),
-        })
-
-    omitted_ids = set(id_map.keys()) - seen_ids
-    if omitted_ids:
-        log.warning(
-            "LLM summarizer omitted %d/%d item IDs: %s",
-            len(omitted_ids), len(id_map), ", ".join(sorted(omitted_ids)),
-        )
-
-    log.info("LLM summarizer: %d items in, %d summaries out", len(items), len(result_items))
-    return {"title": title, "items": result_items}
+    log.info("LLM summarizer: %d items in, headline: %s", len(items), title)
+    # Return the headline + the trusted app items for render_recap.
+    # Items are the same dicts passed in (title, url, message_id, etc).
+    return {"title": title, "items": [_as_dict(item) for item in items]}

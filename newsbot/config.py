@@ -96,18 +96,19 @@ DEFAULT_STYLE_PROMPT = (
 
 # Default system prompt for the daily recap (llm_daily_summary). Overridable
 # via SQLite setting news.recap_prompt or the /setrecap bot command.
-# Contract: STRICT JSON {"title": ..., "items": [{"id": ..., "summary": ...}]}.
-# IDs are assigned by the app; the model echoes them back for binding.
-# The model decides ORDER (most important first) — the app preserves it.
+# Contract: STRICT JSON {"title": "..."} — headline only, no per-item summaries.
+# The application owns all layout and links (richmd.render_recap).
+# NOTE: If Anton has a custom /setrecap override from the OQ-1 era (asking
+# for {"title","items":[{"id","summary"}]}), it will override this default
+# until reset via /setrecap default. The new llm_daily_summary ignores the
+# "items" key in the LLM response — a stale prompt that asks for items won't
+# crash, but the extra LLM output is wasted.
 DEFAULT_RECAP_PROMPT = (
-    "You write the daily recap for a Telegram tech-news channel. "
-    "You receive the posts published in the last 24 hours, each tagged with an id. "
-    "Return STRICT JSON: {\"title\": \"...\", \"items\": [{\"id\": \"...\", \"summary\": \"...\"}]}. "
-    "The title is ONE headline summarizing the whole day (short, no hype words). "
-    "Each item carries the 'id' field exactly as given in the input, plus a "
-    "one-line summary (max ~25 words) of what was posted and why it matters. "
-    "Order items by importance — biggest story first. Include every input item "
-    "exactly once. Do NOT invent ids. Do NOT add fields. "
+    "You write the daily recap headline for a Telegram tech-news channel. "
+    "You receive the posts published in the last 24 hours. "
+    "Return STRICT JSON: {\"title\": \"...\"}. "
+    "The title is ONE headline summarizing the whole day (short, no hype words, no emojis). "
+    "Do NOT add an 'items' key. Do NOT add any other fields. "
     "The application renders the final layout — return data only, no formatting."
 )
 

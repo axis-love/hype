@@ -57,12 +57,13 @@ from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_
 from newsbot.jobs import (
     JobCoordinator,
     _env_float,
+    _format_recap_html_fallback,
     _row_to_styler_input,
     format_post_message,
-    format_recap_message,
 )
+from newsbot.richmd import render_recap
 from newsbot.selection import pick_hottest
-from newsbot.telegram_poster import post_digest
+from newsbot.telegram_poster import post_digest, post_rich_message, RichSendRejected
 from newsbot.summarizer import (
     _assign_candidate_ids,
     llm_daily_summary,
@@ -605,25 +606,34 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         log.error("daily summary LLM returned nothing — will retry")
         return 1
 
-    message = format_recap_message(
-        result["title"], result["items"],
-        chat_id=os.getenv("NEWS_CHANNEL_ID", "").strip(),
-    )
-
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+
+    # Build rich markdown recap + HTML fallback for sendRichMessage failure.
+    markdown = render_recap(result["title"], result["items"], chat_id=chat_id)
+    html_fallback = _format_recap_html_fallback(
+        result["title"], result["items"], chat_id=chat_id,
+    )
+
     if not bot_token or not chat_id:
         log.info("dry-run: daily summary to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
-        print(message)
+        print(markdown)
     else:
         try:
-            await post_digest(message, bot_token=bot_token, chat_id=chat_id)
+            await post_rich_message(markdown, bot_token=bot_token, chat_id=chat_id)
+        except RichSendRejected:
+            log.warning("rich recap rejected — falling back to HTML sendMessage")
+            try:
+                await post_digest(html_fallback, bot_token=bot_token, chat_id=chat_id)
+            except Exception as exc:
+                log.error("daily summary HTML fallback also failed — will retry: %s", redact_exception(exc))
+                return 1
         except Exception as exc:
             log.error("daily summary delivery failed — will retry: %s", redact_exception(exc))
             return 1
 
     try:
-        store.add_summary(day, message, os.getenv("LM_MODEL", ""), len(items))
+        store.add_summary(day, markdown, os.getenv("LM_MODEL", ""), len(items))
     except Exception as db_exc:
         # day UNIQUE constraint fires on a re-delivery — not an error for us.
         log.warning("daily summary already recorded for %s: %s", day, redact_exception(db_exc))
@@ -1197,9 +1207,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             )
             if not result:
                 raise RuntimeError("recap LLM returned nothing — check logs")
-            return sheet, format_recap_message(
-                result["title"], result["items"],
-                chat_id=os.getenv("NEWS_CHANNEL_ID", "").strip(),
+            chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+            return sheet, render_recap(
+                result["title"], result["items"], chat_id=chat_id,
             )
 
         bot_handler = BotCommandHandler(

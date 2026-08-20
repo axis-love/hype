@@ -15,6 +15,7 @@ from newsbot.collectors.base import Candidate
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
 from newsbot.main import _run_summary, _scheduler_summary_iteration
+from newsbot.telegram_poster import RichSendRejected
 
 TZ = ZoneInfo("Asia/Bangkok")
 NOW = datetime(2026, 8, 16, 13, 5, tzinfo=TZ)  # just past 13:00
@@ -72,19 +73,20 @@ class TestRunSummary:
 
         captured: dict[str, str] = {}
 
-        async def fake_post_digest(message, **kwargs):
-            captured["message"] = message
+        async def fake_post_rich_message(markdown, **kwargs):
+            captured["markdown"] = markdown
+            return [{"ok": True, "result": {"message_id": 1}}]
 
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "Daily recap",
-                                 "items": [{"id": "c001", "summary": "One-line summary."}]}), \
-             patch("newsbot.main.post_digest", side_effect=fake_post_digest), \
+                                 "items": [{"title": "Big launch today", "url": "https://x.io", "message_id": None}]}), \
+             patch("newsbot.main.post_rich_message", side_effect=fake_post_rich_message), \
              patch("newsbot.main._build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
         assert result == 0
-        assert "Daily recap" in captured["message"]
+        assert "Daily recap" in captured["markdown"]
         recorded = store.get_summary_for_day(DAY)
         assert recorded is not None
         assert recorded["item_count"] == 1
@@ -105,12 +107,16 @@ class TestRunSummary:
         """Delivery error → failure (1), nothing recorded."""
         _seed_posted_row(store)
 
-        async def exploding_post(message, **kwargs):
+        async def exploding_rich(message, **kwargs):
+            raise RichSendRejected("rejected")
+
+        async def exploding_html(message, **kwargs):
             raise RuntimeError("Telegram down")
 
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}), \
-             patch("newsbot.main.post_digest", side_effect=exploding_post), \
+             patch("newsbot.main.post_rich_message", side_effect=exploding_rich), \
+             patch("newsbot.main.post_digest", side_effect=exploding_html), \
              patch("newsbot.main._build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
@@ -126,7 +132,8 @@ class TestRunSummary:
 
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}), \
-             patch("newsbot.main.post_digest", new_callable=AsyncMock), \
+             patch("newsbot.main.post_rich_message", new_callable=AsyncMock,
+                    return_value=[{"ok": True}]), \
              patch("newsbot.main._build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
@@ -155,7 +162,8 @@ class TestSchedulerSummaryIteration:
 
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}), \
-             patch("newsbot.main.post_digest", new_callable=AsyncMock), \
+             patch("newsbot.main.post_rich_message", new_callable=AsyncMock,
+                    return_value=[{"ok": True}]), \
              patch("newsbot.main._build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
@@ -181,7 +189,8 @@ class TestSchedulerSummaryIteration:
 
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}) as mock_llm, \
-             patch("newsbot.main.post_digest", new_callable=AsyncMock), \
+             patch("newsbot.main.post_rich_message", new_callable=AsyncMock,
+                    return_value=[{"ok": True}]), \
              patch("newsbot.main._build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result1 = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
