@@ -506,58 +506,28 @@ async def test_rich_message_retries_on_429():
 
 
 @pytest.mark.asyncio
-async def test_rich_message_fallback_on_400():
-    """400 on first try -> retry with escaped markdown -> still 400 -> RichSendRejected."""
+async def test_rich_message_rejected_on_400():
+    """400 raises RichSendRejected immediately — no transport-level rewriting.
+
+    The caller owns the fallback (HTML rendered from the same data); a
+    re-escaped document would mangle the intended formatting.
+    """
     bad_resp = MagicMock()
     bad_resp.status_code = 400
     bad_resp.text = "Bad Request"
     bad_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
         "400 Bad Request", request=MagicMock(), response=bad_resp))
 
-    bad_resp2 = MagicMock()
-    bad_resp2.status_code = 400
-    bad_resp2.text = "Bad Request"
-    bad_resp2.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
-        "400 Bad Request", request=MagicMock(), response=bad_resp2))
-
     fake_client = AsyncMock()
-    fake_client.post = AsyncMock(side_effect=[bad_resp, bad_resp2])
+    fake_client.post = AsyncMock(return_value=bad_resp)
     fake_client.__aenter__ = AsyncMock(return_value=fake_client)
     fake_client.__aexit__ = AsyncMock(return_value=None)
 
     with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
         with pytest.raises(RichSendRejected):
-            await post_rich_message("## Bad [markdown", bot_token="tok", chat_id="@chan")
+            await post_rich_message("**Bad [markdown", bot_token="tok", chat_id="@chan")
 
-    assert fake_client.post.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_rich_message_400_then_escaped_succeeds():
-    """400 on first try -> retry with escaped markdown -> succeeds."""
-    bad_resp = MagicMock()
-    bad_resp.status_code = 400
-    bad_resp.text = "Bad Request"
-    bad_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
-        "400 Bad Request", request=MagicMock(), response=bad_resp))
-
-    ok_resp = MagicMock()
-    ok_resp.status_code = 200
-    ok_resp.json.return_value = {"ok": True, "result": {"message_id": 42}}
-    ok_resp.raise_for_status = MagicMock()
-
-    fake_client = AsyncMock()
-    fake_client.post = AsyncMock(side_effect=[bad_resp, ok_resp])
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
-
-    with patch("newsbot.telegram_poster.httpx.AsyncClient", return_value=fake_client):
-        results = await post_rich_message("## Text with *stars*", bot_token="tok", chat_id="@chan")
-
-    assert fake_client.post.call_count == 2
-    assert results[0]["ok"] is True
-    second_payload = fake_client.post.call_args_list[1].kwargs["json"]
-    assert "\\*" in second_payload["rich_message"]["markdown"]
+    assert fake_client.post.call_count == 1
 
 
 @pytest.mark.asyncio

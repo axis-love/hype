@@ -6,15 +6,13 @@ sendRichMessage endpoint (Bot API 10.1+).
 
 Three renderers:
   - escape_rich_md(text)     — backslash-escape content segments
-  - render_post(title, body, url)  — single-post markdown (H2 + body + source link)
-  - render_recap(title, items, chat_id) — daily recap (H2 + ordered list of linked titles)
+  - render_post(title, body, url)  — single-post markdown (bold title + body + source link)
+  - render_recap(title, items, chat_id) — daily recap (bold title + ordered list of linked titles)
 
-The escaping semantics differ from telegram_poster._escape_rich_markdown
-in APPLICATION, not in CHARACTER SET: both escape the same special chars,
-but escape_rich_md is applied to individual content segments (titles, labels)
-BEFORE they are placed inside markdown structure (headings, links), while
-_escape_rich_markdown is a transport-level last resort that blindly escapes
-an entire document. The transport helper delegates here for the char set.
+Titles render as **bold**, never as # headings: Telegram clients render
+markdown headings in client-specific document fonts (serif on iOS, UI sans
+on desktop), so headings look different on every device. Bold text uses the
+standard message font everywhere.
 """
 from __future__ import annotations
 
@@ -22,9 +20,17 @@ import logging
 from typing import Any
 from urllib.parse import urlparse
 
-from newsbot.telegram_poster import RICH_MESSAGE_MAX_CHARS
-
 log = logging.getLogger(__name__)
+
+# Probed empirically on 2026-08-18 by sending oversized markdown to
+# Anton's DM via sendRichMessage and binary-searching the accepted length
+# between 4096 and 65536. The API accepted up to 32736 characters; 32800+
+# returned 400. We use 32736 (last accepted) as the safe limit.
+RICH_MESSAGE_MAX_CHARS = 32736
+
+# Hard cap on recap list length — shared by render_recap and the HTML
+# fallback renderer (jobs._format_recap_html_fallback).
+RECAP_MAX_ITEMS = 30
 
 # Characters with special meaning in GFM-flavored rich markdown.
 # Backslash must be escaped first to avoid double-escaping.
@@ -35,13 +41,9 @@ def escape_rich_md(text: str) -> str:
     """Backslash-escape a content segment for safe placement in rich markdown.
 
     Escapes backslash first, then: * _ ~ ` [ ] | > #
-    Applied to titles, labels, and other content BEFORE they are placed
-    inside markdown structure (headings, link text, list items). URLs are
+    Applied to titles, bodies, labels, and other content BEFORE they are
+    placed inside markdown structure (bold, link text, list items). URLs are
     NOT escaped here — they go into link targets as-is (see _safe_url).
-
-    This is the renderer-level escaping. The transport-level
-    _escape_rich_markdown in telegram_poster.py delegates here for the
-    character set but applies it to the whole document as a last resort.
     """
     result = text.replace("\\", "\\\\")
     for char in _RICH_SPECIAL_CHARS:
@@ -93,27 +95,29 @@ def render_post(title: str, body: str, url: str) -> str:
     """Render a single post as rich markdown.
 
     Layout:
-        ## {title}
+        **{title}**
 
         {body paragraphs}
 
         [Source: {domain}]({url})
 
     Body is truncated at a sentence boundary to fit the rich message
-    char budget (RICH_MESSAGE_MAX_CHARS minus title + link overhead).
+    char budget (RICH_MESSAGE_MAX_CHARS minus title + link overhead),
+    then escaped — the styler emits plain text, so any markdown special
+    chars in it are literal content, not formatting.
     """
     escaped_title = escape_rich_md(title) if title else ""
 
-    # Overhead: "## {title}\n\n" + "\n\n[Source: {label}]({url})"
-    # Worst case: ~50 chars for the link line + heading structure.
-    _LINK_OVERHEAD = 100
-    title_block_len = len(f"## {escaped_title}\n\n") if escaped_title else 0
+    # Overhead: "**{title}**\n\n" + "\n\n[Source: {label}]({url})"
+    # plus margin for body escaping (backslashes added by escape_rich_md).
+    _OVERHEAD = 200
+    title_block_len = len(f"**{escaped_title}**\n\n") if escaped_title else 0
     link_block_len = 0
     if url:
         label = _source_label(url)
         link_block_len = len(f"\n\n[Source: {escape_rich_md(label)}]({_safe_url(url)})")
 
-    body_budget = max(100, RICH_MESSAGE_MAX_CHARS - title_block_len - link_block_len - _LINK_OVERHEAD)
+    body_budget = max(100, RICH_MESSAGE_MAX_CHARS - title_block_len - link_block_len - _OVERHEAD)
 
     # Truncate body at a sentence boundary if it exceeds the budget.
     if len(body) > body_budget:
@@ -127,9 +131,9 @@ def render_post(title: str, body: str, url: str) -> str:
 
     parts: list[str] = []
     if escaped_title:
-        parts.append(f"## {escaped_title}")
+        parts.append(f"**{escaped_title}**")
         parts.append("")
-    parts.append(body)
+    parts.append(escape_rich_md(body))
     if url:
         label = escape_rich_md(_source_label(url))
         safe_url = _safe_url(url)
@@ -141,7 +145,7 @@ def render_recap(title: str, items: list[dict[str, Any]], chat_id: str = "") -> 
     """Render the daily recap as rich markdown.
 
     Layout:
-        ## {title}
+        **{title}**
 
         1. [{item title}]({channel post url}) — [{domain}]({source url})
         2. ...
@@ -149,16 +153,14 @@ def render_recap(title: str, items: list[dict[str, Any]], chat_id: str = "") -> 
     Items without message_id (legacy) render the title as plain text
     but still show the source link. No per-item summaries.
 
-    Hard guard: if items > 30, cut at 30 and log a warning.
+    Hard guard: if items > RECAP_MAX_ITEMS, cut and log a warning.
     """
-    _MAX_ITEMS = 30
-
-    if len(items) > _MAX_ITEMS:
-        log.warning("recap has %d items, cutting to %d", len(items), _MAX_ITEMS)
-        items = items[:_MAX_ITEMS]
+    if len(items) > RECAP_MAX_ITEMS:
+        log.warning("recap has %d items, cutting to %d", len(items), RECAP_MAX_ITEMS)
+        items = items[:RECAP_MAX_ITEMS]
 
     escaped_title = escape_rich_md(title)
-    lines = [f"## {escaped_title}", ""]
+    lines = [f"**{escaped_title}**", ""]
 
     for idx, item in enumerate(items, start=1):
         item_title = str(item.get("title") or "(untitled)").strip()

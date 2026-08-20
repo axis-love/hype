@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from core.log_sanitizer import redact_exception, redact_text, redact_url
+from newsbot.richmd import RICH_MESSAGE_MAX_CHARS
 
 log = logging.getLogger(__name__)
 
@@ -267,14 +268,11 @@ async def _send_with_retry(
                     body = r.text or ""
                 except Exception:
                     pass
-                is_parse_error = any(marker in body.lower() for marker in (
-                    "can't parse entities",
-                    "can't parse ent",
-                    "bad request: can't parse",
-                    "entity",
-                    "tag",
-                    "unclosed",
-                ))
+                # Telegram HTML parse failures all say "can't parse ..."
+                # ("can't parse entities", "can't parse message text").
+                # Match narrowly — broad markers like "entity"/"tag" would
+                # also match unrelated 400s and retry them as plain text.
+                is_parse_error = "can't parse" in body.lower()
                 if is_parse_error:
                     log.warning("chunk %d: Telegram 400 parse error; retrying as plain text", chunk_idx)
                     # Strip HTML tags and unescape entities for plain-text fallback.
@@ -361,37 +359,13 @@ async def post_digest(
 
 # --- Rich Messages (Bot API 10.1+) ---------------------------------------
 
-# Probed empirically on 2026-08-18 by sending oversized markdown to
-# Anton's DM (chat_id 60870461) via sendRichMessage and binary-searching
-# the accepted length between 4096 and 65536. The API accepted up to
-# 32736 characters of markdown; 32800+ returned 400.
-# Binary search path: 65536 rejected, 19456 accepted, 32896 rejected,
-# 31936 accepted, 32736 accepted, 32800 rejected.
-# We use 32736 (last accepted) as the safe limit. Leave a 256-char
-# margin for markdown structure overhead (headings, links, etc).
-RICH_MESSAGE_MAX_CHARS = 32736
-
 
 class RichSendRejected(Exception):
-    """Raised when sendRichMessage rejects the markdown after re-escaping.
+    """Raised when sendRichMessage rejects or fails to deliver the markdown.
 
     Callers should catch this to fall back to the HTML sendMessage path
     so the channel never ends up with nothing posted.
     """
-
-
-def _escape_rich_markdown(text: str) -> str:
-    """Backslash-escape an entire document for rich markdown.
-
-    Transport-level last resort: applied to the WHOLE document when
-    the API rejects the original. This is the nuclear option — it
-    destroys intended markdown structure. Delegates to
-    richmd.escape_rich_md for the character set (same chars), applied
-    indiscriminately. Renderer-level escaping (applied to content
-    segments before structure) uses richmd.escape_rich_md directly.
-    """
-    from newsbot.richmd import escape_rich_md
-    return escape_rich_md(text)
 
 
 async def post_rich_message(
@@ -403,14 +377,15 @@ async def post_rich_message(
     """Post a rich-markdown message via Bot API sendRichMessage.
 
     Returns a list with one result dict (rich messages fit in one call
-    — no chunking needed; RICH_MESSAGE_MAX_CHARS is the probed limit).
+    — no chunking needed; richmd.RICH_MESSAGE_MAX_CHARS is the probed limit).
 
     Retries on 429 (capped retry_after) and transient 5xx (bounded to
     MAX_TRANSIENT_RETRIES), reusing _send_with_retry.
 
-    Graceful degradation: on HTTP 400 from the rich call, retries ONCE
-    with re-escaped markdown. If that also fails, raises RichSendRejected
-    so the caller can fall back to the HTML sendMessage path.
+    On rejection (400) or exhausted retries, raises RichSendRejected —
+    the caller falls back to the HTML sendMessage path, which renders
+    from the same source data. No transport-level rewriting of the
+    markdown: a mangled re-escaped document is worse than the fallback.
     """
     if not bot_token:
         raise ValueError("BOT_TOKEN is not set")
@@ -418,11 +393,14 @@ async def post_rich_message(
         raise ValueError("chat_id is not set")
 
     if len(markdown) > RICH_MESSAGE_MAX_CHARS:
+        # Should be unreachable — renderers budget below the limit. Cut at
+        # a newline so we don't sever a link or escape sequence mid-token.
         log.warning(
             "rich message %d chars exceeds probed limit %d — truncating",
             len(markdown), RICH_MESSAGE_MAX_CHARS,
         )
-        markdown = markdown[:RICH_MESSAGE_MAX_CHARS]
+        cut = markdown.rfind("\n", 0, RICH_MESSAGE_MAX_CHARS)
+        markdown = markdown[:cut] if cut > 0 else markdown[:RICH_MESSAGE_MAX_CHARS]
 
     # The URL contains the bot token — never log it directly.
     url = f"{BOT_API_BASE}/bot{bot_token}/sendRichMessage"
@@ -431,34 +409,17 @@ async def post_rich_message(
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
             result = await _send_with_retry(client, url, payload, 0)
-        except httpx.HTTPStatusError:
-            # 400 or other non-transient HTTP error — retry with escaped markdown.
-            log.warning("rich message rejected (HTTP error) — retrying with escaped markdown")
+        except httpx.HTTPStatusError as exc:
+            log.warning("rich message rejected (status=%d) — caller falls back to HTML",
+                        exc.response.status_code)
+            raise RichSendRejected("sendRichMessage rejected the markdown") from exc
         except httpx.HTTPError as exc:
             log.error("rich message transport error: %s", redact_exception(exc))
             raise RichSendRejected("transport error after retries") from exc
-        else:
-            if result is not None:
-                log.info("Posted rich message to %s", chat_id)
-                return [result]
-            # _send_with_retry returned None — exhausted 5xx retries.
-            log.warning("rich message failed after transient retries — retrying with escaped markdown")
 
-        # Retry with escaped markdown (covers both 400 and None paths).
-        escaped = _escape_rich_markdown(markdown)
-        escaped_payload = {"chat_id": chat_id, "rich_message": {"markdown": escaped}}
+    if result is None:
+        # _send_with_retry exhausted transient 5xx retries.
+        raise RichSendRejected("rich message delivery failed after transient retries")
 
-        try:
-            result = await _send_with_retry(client, url, escaped_payload, 0)
-        except httpx.HTTPStatusError:
-            log.error("rich message escaped retry also rejected (HTTP error)")
-            raise RichSendRejected("rich message rejected even after re-escaping — fall back to HTML")
-        except httpx.HTTPError as exc:
-            log.error("rich message escaped retry transport error: %s", redact_exception(exc))
-            raise RichSendRejected("escaped retry transport error") from exc
-
-        if result is not None:
-            log.warning("rich message sent after escaping fallback")
-            return [result]
-
-        raise RichSendRejected("rich message rejected even after re-escaping — fall back to HTML")
+    log.info("Posted rich message to %s", chat_id)
+    return [result]

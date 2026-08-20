@@ -62,8 +62,8 @@ class BotCommandHandler:
         on_scores: Callable[[], Awaitable[str]] | None = None,
         on_summary: Callable[[], Awaitable[None]] | None = None,
         on_store: Callable[[str], Awaitable[str]] | None = None,
-        on_preview: Callable[[], Awaitable[str]] | None = None,
-        on_recap_preview: Callable[[], Awaitable[tuple[str, str]]] | None = None,
+        on_preview: Callable[[], Awaitable[tuple[str, str]]] | None = None,
+        on_recap_preview: Callable[[], Awaitable[tuple[str, str, str]]] | None = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
@@ -296,7 +296,7 @@ class BotCommandHandler:
             return
         await self._send(chat_id, "Styling the hottest store story for preview…")
         try:
-            markdown = await handler()
+            markdown, html_fallback = await handler()
         except RuntimeError as exc:
             await self._send(chat_id, str(exc))
             return
@@ -306,37 +306,9 @@ class BotCommandHandler:
         if not markdown:
             await self._send(chat_id, "Preview returned nothing — styler may have failed.")
             return
-        # Send as rich markdown (same renderer + transport as the channel).
-        # The handler returns rich markdown; build an HTML fallback inline.
-        html_fallback = self._build_post_html_fallback(markdown)
+        # Same renderer + transport as the channel: rich markdown via
+        # sendRichMessage, HTML fallback rendered from the same data.
         await self._send_rich(chat_id, markdown, html_fallback)
-
-    def _build_post_html_fallback(self, markdown: str) -> str:
-        """Build a minimal HTML fallback from a render_post markdown string.
-
-        Strips markdown headings (## → <b>), link syntax ([text](url) → <a>),
-        and keeps paragraphs. Simple — only used when sendRichMessage rejects.
-        """
-        import re
-        lines = markdown.split("\n")
-        html_parts: list[str] = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("## "):
-                html_parts.append(f"<b>{stripped[3:]}</b>")
-            elif stripped.startswith("[") and "](" in stripped:
-                # Convert [text](url) → <a href="url">text</a>
-                html_parts.append(re.sub(
-                    r"\[([^\]]+)\]\(([^)]+)\)",
-                    r'<a href="\2">\1</a>',
-                    stripped,
-                ))
-            else:
-                import html as html_module
-                html_parts.append(html_module.escape(stripped))
-        return "\n".join(html_parts)
 
     async def _cmd_recap(self, chat_id: int, arg: str = "") -> None:
         """Recap commands.
@@ -357,45 +329,20 @@ class BotCommandHandler:
             return
         await self._send(chat_id, "Writing the daily recap preview…")
         try:
-            sheet, message = await handler()
+            sheet, markdown, html_fallback = await handler()
         except RuntimeError as exc:
             await self._send(chat_id, str(exc))
             return
         except Exception:
             await self._send(chat_id, "Recap preview failed. Check logs for details.")
             return
-        if not message:
+        if not markdown:
             await self._send(chat_id, "Recap preview returned nothing — summarizer may have failed.")
             return
         # Input sheet is plain text (transparency aid).
         await self._send(chat_id, sheet)
         # Recap is rich markdown — send via sendRichMessage with HTML fallback.
-        html_fallback = self._build_recap_html_fallback(message)
-        await self._send_rich(chat_id, message, html_fallback)
-
-    def _build_recap_html_fallback(self, markdown: str) -> str:
-        """Build a minimal HTML fallback from a render_recap markdown string."""
-        import re
-        lines = markdown.split("\n")
-        html_parts: list[str] = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("## "):
-                html_parts.append(f"<b>{stripped[3:]}</b>")
-            elif stripped and stripped[0].isdigit() and ". " in stripped:
-                # Ordered list item with links: "1. [title](url) — [domain](url)"
-                converted = re.sub(
-                    r"\[([^\]]+)\]\(([^)]+)\)",
-                    r'<a href="\2">\1</a>',
-                    stripped,
-                )
-                html_parts.append(converted)
-            else:
-                import html as html_module
-                html_parts.append(html_module.escape(stripped))
-        return "\n".join(html_parts)
+        await self._send_rich(chat_id, markdown, html_fallback)
 
     async def _cmd_setrecap(self, chat_id: int, arg: str) -> None:
         if not arg:

@@ -94,8 +94,10 @@ class TestSafeTimeout:
     async def test_rss_timeout_uses_wait_for(self):
         """RSS collector should use async HTTP with timeout, not SIGALRM."""
         import signal
-        # Verify SIGALRM is NOT used by checking that no alarm is set during fetch
-        with patch("signal.alarm") as mock_alarm, \
+        # Verify SIGALRM is NOT used by checking that no alarm is set during
+        # fetch. signal.alarm only exists on POSIX — create it on Windows so
+        # the patch works there too (the assertion is identical either way).
+        with patch.object(signal, "alarm", create=True) as mock_alarm, \
              patch("signal.signal") as mock_signal:
             # Mock httpx to return empty content
             mock_response = MagicMock()
