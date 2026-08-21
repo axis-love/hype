@@ -21,7 +21,7 @@ from core.settings_store import SettingsStore
 from lm_client import LMClient
 from newsbot.config import load_config
 from newsbot.db import NewsStore
-from newsbot.richmd import RECAP_MAX_ITEMS, _build_channel_link, _source_label, render_post
+from newsbot.richmd import RECAP_MAX_ITEMS, _build_channel_link, _source_label, render_post, signature_for
 from newsbot.selection import pick_hottest
 from newsbot.summarizer import llm_style_posts
 from newsbot.telegram_poster import (
@@ -367,7 +367,10 @@ class JobCoordinator:
             "merge_count": row.get("merge_count") or 1,
         }))
 
-        markdown = render_post(styled_title, styled_body, row.get("url") or "")
+        markdown = render_post(
+            styled_title, styled_body, row.get("url") or "",
+            signature=signature_for(os.getenv("NEWS_CHANNEL_ID", "")),
+        )
         html_fallback = format_post_message(styled_title, styled_body, row.get("url") or "")
         return await self._send_and_mark(row_id, markdown, html_fallback)
 

@@ -1,4 +1,10 @@
-"""Tests for newsbot/richmd.py — pure rich markdown renderers."""
+"""Tests for newsbot/richmd.py — pure rich markdown renderers.
+
+Layout revision 2026-08-21: headings used deliberately. Posts render as
+the article layout (H1 title + divider + body + collapsible Source +
+optional signature); recaps render as the index layout (H1 title +
+divider + H4-linked-title bullets + divider + optional signature).
+"""
 from typing import Any
 
 import pytest
@@ -7,6 +13,7 @@ from newsbot.richmd import (
     escape_rich_md,
     render_post,
     render_recap,
+    signature_for,
     _build_channel_link,
     _source_label,
     _safe_url,
@@ -110,32 +117,79 @@ class TestBuildChannelLink:
         assert _build_channel_link("", 42) is None
 
 
-# --- render_post ----------------------------------------------------------
+# --- signature_for --------------------------------------------------------
+
+class TestSignatureFor:
+    def test_username_channel_returns_handle(self):
+        assert signature_for("@cyb3rcr34m") == "@cyb3rcr34m"
+
+    def test_numeric_chat_id_empty(self):
+        assert signature_for("-1001234567890") == ""
+
+    def test_empty(self):
+        assert signature_for("") == ""
+
+    def test_strips_whitespace(self):
+        assert signature_for("  @chan  ") == "@chan"
+
+
+# --- render_post (article layout) -----------------------------------------
 
 class TestRenderPost:
     def test_basic_shape(self):
+        """Exact article layout: H1, divider, body, collapsible source."""
         md = render_post("Big Launch", "Company X released a new product.", "https://example.com/post")
-        assert md.startswith("**Big Launch**")
-        assert "Company X released a new product." in md
-        assert "[Source: example.com](https://example.com/post)" in md
+        expected = (
+            "# Big Launch\n"
+            "\n"
+            "---\n"
+            "\n"
+            "Company X released a new product.\n"
+            "\n"
+            "<details><summary>Source</summary>\n"
+            "\n"
+            "[Source: example.com](https://example.com/post)\n"
+            "</details>"
+        )
+        assert md == expected
 
     def test_title_escaped(self):
         md = render_post("AI *is* great", "Body.", "https://x.io")
-        assert "**AI \\*is\\* great**" in md
+        assert "# AI \\*is\\* great" in md
 
-    def test_no_url(self):
+    def test_title_with_hash_escaped(self):
+        """'#' in a heading title must be escaped so it doesn't nest."""
+        md = render_post("C# 13 ships", "Body.", "")
+        assert "# C\\# 13 ships" in md
+
+    def test_no_url_omits_details_block(self):
         md = render_post("Title", "Body.", "")
+        assert "<details>" not in md
         assert "Source:" not in md
 
+    def test_signature_appended(self):
+        md = render_post("T", "Body.", "https://x.io", signature="@cyb3rcr34m")
+        assert md.endswith("</details>\n\n@cyb3rcr34m")
+
+    def test_empty_signature_no_trailing_blank(self):
+        md = render_post("T", "Body.", "https://x.io", signature="")
+        assert not md.endswith("\n")
+
+    def test_signature_without_url(self):
+        md = render_post("T", "Body.", "", signature="@chan")
+        assert md.endswith("Body.\n\n@chan")
+
     def test_no_title(self):
+        """Empty title: body first, no heading, no divider."""
         md = render_post("", "Body.", "https://x.io")
-        assert not md.startswith("**")
+        assert md.startswith("Body.")
+        assert "---" not in md.split("Body.")[0]
 
     def test_body_truncation_respects_budget(self):
         """Body exceeding the budget is truncated to fit RICH_MESSAGE_MAX_CHARS."""
         from newsbot.richmd import RICH_MESSAGE_MAX_CHARS
         long_body = "This is a sentence. " * (RICH_MESSAGE_MAX_CHARS // 10)
-        md = render_post("T", long_body, "https://example.com/very/long/url")
+        md = render_post("T", long_body, "https://example.com/very/long/url", signature="@chan")
         assert len(md) <= RICH_MESSAGE_MAX_CHARS
         # The body must have been truncated — the full input is much larger.
         assert len(md) < len(long_body)
@@ -150,37 +204,61 @@ class TestRenderPost:
         md = render_post("T", "a *b* _c_ [d] #e", "")
         assert "a \\*b\\* \\_c\\_ \\[d\\] \\#e" in md
 
+    def test_url_with_parens_in_source_link(self):
+        md = render_post("T", "Body.", "https://en.wikipedia.org/wiki/Foo_(bar)")
+        assert "%28" in md
+        assert "%29" in md
 
-# --- render_recap --------------------------------------------------------
+
+# --- render_recap (index layout) -------------------------------------------
 
 class TestRenderRecap:
-    def test_exact_shape_with_links(self):
-        """Snapshot-style exact match for a simple recap."""
+    def test_exact_shape_with_links_and_signature(self):
+        """Snapshot-style exact match: H1, divider, H4 linked bullets, divider, signature."""
         items = [
             {"title": "Story A", "url": "https://a.example.com", "message_id": 10},
             {"title": "Story B", "url": "https://b.example.com", "message_id": 20},
         ]
-        md = render_recap("Day Recap", items, chat_id="@chan")
+        md = render_recap("Day Recap", items, chat_id="@chan", signature="@chan")
         expected = (
-            "**Day Recap**\n"
+            "# Day Recap\n"
             "\n"
-            "1. [Story A](https://t.me/chan/10) — [a.example.com](https://a.example.com)\n"
-            "2. [Story B](https://t.me/chan/20) — [b.example.com](https://b.example.com)"
+            "---\n"
+            "\n"
+            "- #### [Story A](https://t.me/chan/10)\n"
+            "- #### [Story B](https://t.me/chan/20)\n"
+            "\n"
+            "---\n"
+            "\n"
+            "@chan"
         )
         assert md == expected
 
-    def test_legacy_item_plain_title(self):
-        """Item without message_id renders plain title, still shows source link."""
+    def test_no_signature_omits_trailing_divider(self):
+        items = [{"title": "S", "url": "", "message_id": 5}]
+        md = render_recap("R", items, chat_id="@chan")
+        assert md.endswith("- #### [S](https://t.me/chan/5)")
+
+    def test_legacy_item_unlinked_h4_bullet(self):
+        """Item without message_id renders as unlinked H4 bullet, no crash."""
         items = [
             {"title": "Old Story", "url": "https://old.example.com", "message_id": None},
         ]
         md = render_recap("Recap", items, chat_id="@chan")
-        assert "1. Old Story — [old.example.com](https://old.example.com)" in md
+        assert "- #### Old Story" in md
         assert "t.me" not in md
 
-    def test_title_escaped_in_recap(self):
+    def test_no_per_item_source_segments(self):
+        """Approved index shape drops the ' — [domain](url)' segments."""
+        items = [{"title": "S", "url": "https://a.example.com", "message_id": 5}]
+        md = render_recap("R", items, chat_id="@chan")
+        assert "a.example.com" not in md
+        assert " — " not in md
+
+    def test_recap_title_escaped(self):
         items = [{"title": "AI *rocks*", "url": "", "message_id": None}]
         md = render_recap("R", items, chat_id="")
+        assert "# R" in md.split("\n")[0]
         assert "\\*rocks\\*" in md
 
     def test_30_item_guard(self, caplog):
@@ -190,28 +268,16 @@ class TestRenderRecap:
             for i in range(35)
         ]
         md = render_recap("Recap", items, chat_id="")
-        # Count numbered lines (1. through 30.)
-        lines = [l for l in md.split("\n") if l and l[0].isdigit()]
+        # Count H4 bullet lines.
+        lines = [l for l in md.split("\n") if l.startswith("- #### ")]
         assert len(lines) == 30
         assert any("cutting" in r.getMessage() for r in caplog.records)
 
     def test_empty_items(self):
         md = render_recap("Empty Day", [], chat_id="@chan")
-        assert md.strip() == "**Empty Day**"
+        assert md.strip() == "# Empty Day\n\n---"
 
-    def test_numeric_chat_id(self):
+    def test_numeric_chat_id_link(self):
         items = [{"title": "S", "url": "", "message_id": 5}]
         md = render_recap("R", items, chat_id="-1001234567890")
         assert "https://t.me/c/1234567890/5" in md
-
-    def test_no_source_url_when_empty(self):
-        items = [{"title": "No URL", "url": "", "message_id": 5}]
-        md = render_recap("R", items, chat_id="@chan")
-        assert "—" not in md
-        assert "https://t.me/chan/5" in md
-
-    def test_url_with_parens_safe(self):
-        items = [{"title": "Wiki", "url": "https://en.wikipedia.org/wiki/Foo_(bar)", "message_id": 1}]
-        md = render_recap("R", items, chat_id="@chan")
-        assert "%28" in md
-        assert "(" not in md.split("](")[1].split(")")[0]  # parens encoded in URL
