@@ -61,7 +61,7 @@ from newsbot.jobs import (
     _row_to_styler_input,
     format_post_message,
 )
-from newsbot.richmd import render_post, render_recap
+from newsbot.richmd import render_post, render_recap, signature_for
 from newsbot.selection import pick_hottest
 from newsbot.telegram_poster import post_digest, post_rich_message, RichSendRejected
 from newsbot.summarizer import (
@@ -610,7 +610,10 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
     chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
 
     # Build rich markdown recap + HTML fallback for sendRichMessage failure.
-    markdown = render_recap(result["title"], result["items"], chat_id=chat_id)
+    markdown = render_recap(
+        result["title"], result["items"], chat_id=chat_id,
+        signature=signature_for(chat_id),
+    )
     html_fallback = _format_recap_html_fallback(
         result["title"], result["items"], chat_id=chat_id,
     )
@@ -1200,7 +1203,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             if not body:
                 raise RuntimeError("styler returned an empty body — check logs")
             url = row.get("url") or ""
-            return render_post(title, body, url), format_post_message(title, body, url)
+            signature = signature_for(os.getenv("NEWS_CHANNEL_ID", ""))
+            return render_post(title, body, url, signature), format_post_message(title, body, url)
 
         async def on_recap_preview() -> tuple[str, str, str]:
             """Write the daily recap for a DM preview.
@@ -1226,7 +1230,10 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
             return (
                 sheet,
-                render_recap(result["title"], result["items"], chat_id=chat_id),
+                render_recap(
+                    result["title"], result["items"], chat_id=chat_id,
+                    signature=signature_for(chat_id),
+                ),
                 _format_recap_html_fallback(result["title"], result["items"], chat_id=chat_id),
             )
 

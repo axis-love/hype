@@ -4,15 +4,44 @@ Pure functions — no network, no DB. These produce GFM-flavored markdown
 strings that post_rich_message (telegram_poster.py) sends via the
 sendRichMessage endpoint (Bot API 10.1+).
 
-Three renderers:
+Four public renderers:
   - escape_rich_md(text)     — backslash-escape content segments
-  - render_post(title, body, url)  — single-post markdown (bold title + body + source link)
-  - render_recap(title, items, chat_id) — daily recap (bold title + ordered list of linked titles)
+  - signature_for(chat_id)   — "@handle" signature for @-channels, else ""
+  - render_post(title, body, url, signature)  — article layout
+  - render_recap(title, items, chat_id, signature) — index layout
 
-Titles render as **bold**, never as # headings: Telegram clients render
-markdown headings in client-specific document fonts (serif on iOS, UI sans
-on desktop), so headings look different on every device. Bold text uses the
-standard message font everywhere.
+Layout decision (2026-08-21): headings ARE used, deliberately. An earlier
+revision avoided headings because Telegram clients render them in
+client-specific document fonts. Anton probed the actual layouts live via
+sendRichMessage (H1–H6 ladders, dividers, collapsible blocks, H4 link
+lists) and approved the two shapes below — the readability win outweighs
+the font inconsistency. Do not re-reverse this without new live testing.
+
+Post (article layout):
+    # {title}
+
+    ---
+
+    {body}
+
+    <details><summary>Source</summary>
+
+    [Source: {domain}]({url})
+    </details>
+
+    {signature}
+
+Recap (index layout):
+    # {recap title}
+
+    ---
+
+    - #### [{item title}]({channel post url})
+    - ...
+
+    ---
+
+    {signature}
 """
 from __future__ import annotations
 
@@ -42,13 +71,24 @@ def escape_rich_md(text: str) -> str:
 
     Escapes backslash first, then: * _ ~ ` [ ] | > #
     Applied to titles, bodies, labels, and other content BEFORE they are
-    placed inside markdown structure (bold, link text, list items). URLs are
-    NOT escaped here — they go into link targets as-is (see _safe_url).
+    placed inside markdown structure (headings, bold, link text, list
+    items). URLs are NOT escaped here — they go into link targets as-is
+    (see _safe_url).
     """
     result = text.replace("\\", "\\\\")
     for char in _RICH_SPECIAL_CHARS:
         result = result.replace(char, f"\\{char}")
     return result
+
+
+def signature_for(chat_id: str) -> str:
+    """Channel signature appended to posts: the @handle itself.
+
+    Only @username channels get a signature (it doubles as a tappable
+    channel mention). Numeric chat ids have no displayable handle.
+    """
+    chat = chat_id.strip()
+    return chat if chat.startswith("@") else ""
 
 
 def _safe_url(url: str) -> str:
@@ -91,33 +131,50 @@ def _build_channel_link(chat_id: str, message_id: int | None) -> str | None:
     return None
 
 
-def render_post(title: str, body: str, url: str) -> str:
-    """Render a single post as rich markdown.
+def render_post(title: str, body: str, url: str, signature: str = "") -> str:
+    """Render a single post as rich markdown (article layout).
 
     Layout:
-        **{title}**
+        # {title}
+
+        ---
 
         {body paragraphs}
 
+        <details><summary>Source</summary>
+
         [Source: {domain}]({url})
+        </details>
+
+        {signature}
+
+    The <details> block is omitted when url is empty; the signature block
+    is omitted when signature is empty (no trailing blank line either).
 
     Body is truncated at a sentence boundary to fit the rich message
-    char budget (RICH_MESSAGE_MAX_CHARS minus title + link overhead),
-    then escaped — the styler emits plain text, so any markdown special
-    chars in it are literal content, not formatting.
+    char budget (RICH_MESSAGE_MAX_CHARS minus structure overhead), then
+    escaped — the styler emits plain text, so any markdown special chars
+    in it are literal content, not formatting.
     """
     escaped_title = escape_rich_md(title) if title else ""
 
-    # Overhead: "**{title}**\n\n" + "\n\n[Source: {label}]({url})"
-    # plus margin for body escaping (backslashes added by escape_rich_md).
-    _OVERHEAD = 200
-    title_block_len = len(f"**{escaped_title}**\n\n") if escaped_title else 0
+    # Structure overhead: heading + divider when titled, the details
+    # wrapper around the source link, and the signature block.
+    _OVERHEAD = 260
+    title_block_len = len(f"# {escaped_title}\n\n---\n\n") if escaped_title else 0
     link_block_len = 0
     if url:
         label = _source_label(url)
-        link_block_len = len(f"\n\n[Source: {escape_rich_md(label)}]({_safe_url(url)})")
+        link_block_len = len(
+            f"\n\n<details><summary>Source</summary>\n\n"
+            f"[Source: {escape_rich_md(label)}]({_safe_url(url)})\n</details>"
+        )
+    sig_block_len = len(f"\n\n{signature}") if signature else 0
 
-    body_budget = max(100, RICH_MESSAGE_MAX_CHARS - title_block_len - link_block_len - _OVERHEAD)
+    body_budget = max(
+        100,
+        RICH_MESSAGE_MAX_CHARS - title_block_len - link_block_len - sig_block_len - _OVERHEAD,
+    )
 
     # Truncate body at a sentence boundary if it exceeds the budget.
     if len(body) > body_budget:
@@ -131,27 +188,50 @@ def render_post(title: str, body: str, url: str) -> str:
 
     parts: list[str] = []
     if escaped_title:
-        parts.append(f"**{escaped_title}**")
+        parts.append(f"# {escaped_title}")
+        parts.append("")
+        parts.append("---")
         parts.append("")
     parts.append(escape_rich_md(body))
     if url:
         label = escape_rich_md(_source_label(url))
         safe_url = _safe_url(url)
-        parts.append(f"\n[Source: {label}]({safe_url})")
+        parts.append("")
+        parts.append("<details><summary>Source</summary>")
+        parts.append("")
+        parts.append(f"[Source: {label}]({safe_url})")
+        parts.append("</details>")
+    if signature:
+        parts.append("")
+        parts.append(signature)
     return "\n".join(parts)
 
 
-def render_recap(title: str, items: list[dict[str, Any]], chat_id: str = "") -> str:
-    """Render the daily recap as rich markdown.
+def render_recap(
+    title: str,
+    items: list[dict[str, Any]],
+    chat_id: str = "",
+    signature: str = "",
+) -> str:
+    """Render the daily recap as rich markdown (index layout).
 
     Layout:
-        **{title}**
+        # {title}
 
-        1. [{item title}]({channel post url}) — [{domain}]({source url})
-        2. ...
+        ---
 
-    Items without message_id (legacy) render the title as plain text
-    but still show the source link. No per-item summaries.
+        - #### [{item title}]({channel post url})
+        - ...
+
+        ---
+
+        {signature}
+
+    Each item is an H4 bullet whose whole title is a link to the channel
+    post. Items without message_id (legacy) render as unlinked H4 bullets.
+    The trailing divider + signature block is omitted when signature is
+    empty. No per-item source segments (dropped 2026-08-21 — the approved
+    index shape is H4 linked titles only).
 
     Hard guard: if items > RECAP_MAX_ITEMS, cut and log a warning.
     """
@@ -160,29 +240,25 @@ def render_recap(title: str, items: list[dict[str, Any]], chat_id: str = "") -> 
         items = items[:RECAP_MAX_ITEMS]
 
     escaped_title = escape_rich_md(title)
-    lines = [f"**{escaped_title}**", ""]
+    lines = [f"# {escaped_title}", "", "---", ""]
 
-    for idx, item in enumerate(items, start=1):
+    for item in items:
         item_title = str(item.get("title") or "(untitled)").strip()
-        url = str(item.get("url") or "").strip()
         message_id = item.get("message_id")
 
-        escaped_title_seg = escape_rich_md(item_title)
+        escaped_item = escape_rich_md(item_title)
 
-        # Build the title segment: linked if we have a channel link, else plain.
+        # H4 bullet: linked if we have a channel link, else plain.
         link = _build_channel_link(chat_id, message_id)
         if link:
-            title_seg = f"[{escaped_title_seg}]({_safe_url(link)})"
+            lines.append(f"- #### [{escaped_item}]({_safe_url(link)})")
         else:
-            title_seg = escaped_title_seg
+            lines.append(f"- #### {escaped_item}")
 
-        # Source link segment.
-        source_seg = ""
-        if url:
-            label = escape_rich_md(_source_label(url))
-            safe_url = _safe_url(url)
-            source_seg = f" — [{label}]({safe_url})"
-
-        lines.append(f"{idx}. {title_seg}{source_seg}")
+    if signature:
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append(signature)
 
     return "\n".join(lines)

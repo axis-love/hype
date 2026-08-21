@@ -343,9 +343,9 @@ class TestConcurrentGenerationPostingIntegration:
 
         async def slow_post_rich(markdown, **kwargs):
             await asyncio.sleep(0.05)  # Simulate network latency
-            # Extract title from the rich markdown for tracking.
+            # Extract title from the rich markdown for tracking (H1 heading line).
             import re
-            m = re.search(r"\*\*(.*?)\*\*", markdown)
+            m = re.search(r"^# (.*?)$", markdown, re.M)
             if m:
                 delivered_titles.append(m.group(1))
 
@@ -455,7 +455,7 @@ class TestConcurrentGenerationPostingIntegration:
 
         async def tracking_post_rich(markdown, **kwargs):
             import re
-            m = re.search(r"\*\*(.*?)\*\*", markdown)
+            m = re.search(r"^# (.*?)$", markdown, re.M)
             if m:
                 delivered.append(m.group(1))
 
