@@ -12,6 +12,7 @@ import pytest
 from newsbot.richmd import (
     escape_rich_md,
     render_post,
+    render_post_blocks,
     render_recap,
     signature_for,
     _build_channel_link,
@@ -297,3 +298,98 @@ class TestRenderRecap:
         items = [{"title": "S", "url": "", "message_id": 5}]
         md = render_recap("R", items, chat_id="-1001234567890")
         assert "https://t.me/c/1234567890/5" in md
+
+
+# --- render_post_blocks ------------------------------------------------------
+#
+# Blocks layout (Bot API 10.2) — media leads the post. Photos are wrapped
+# in ONE slideshow block (verified live 2026-08-21: separate photo blocks
+# do NOT group; slideshow/collage do; Anton picked slideshow). Videos are
+# separate blocks after the slideshow. Then H1 title, divider, body
+# paragraph, collapsible Source, footer signature.
+
+class TestRenderPostBlocks:
+    PHOTOS = [
+        {"type": "photo", "media": "https://cdn.example.com/a.png"},
+        {"type": "photo", "media": "https://cdn.example.com/b.png"},
+    ]
+    VIDEO = {"type": "video", "media": "https://cdn.example.com/clip.mp4"}
+
+    def test_no_media_text_only(self):
+        """Without media the blocks equal the text-only article layout."""
+        blocks = render_post_blocks("Title", "Body.", "https://ex.com/a",
+                                    signature="@chan")
+        types = [b["type"] for b in blocks]
+        assert types == ["heading", "divider", "paragraph", "details", "footer"]
+        assert blocks[0]["text"] == "Title"
+        assert blocks[0]["size"] == 1
+        assert blocks[2]["text"] == "Body."
+        assert blocks[4]["text"] == "@chan"
+
+    def test_multiple_photos_grouped_in_slideshow_first(self):
+        blocks = render_post_blocks("T", "B", "", media=self.PHOTOS)
+        assert blocks[0]["type"] == "slideshow"
+        inner = blocks[0]["blocks"]
+        assert len(inner) == 2
+        assert all(b["type"] == "photo" for b in inner)
+        assert inner[0]["photo"]["media"] == "https://cdn.example.com/a.png"
+
+    def test_single_photo_no_wrapper(self):
+        blocks = render_post_blocks("T", "B", "", media=[self.PHOTOS[0]])
+        assert blocks[0]["type"] == "photo"
+
+    def test_video_separate_block_after_slideshow(self):
+        blocks = render_post_blocks("T", "B", "",
+                                    media=[*self.PHOTOS, self.VIDEO])
+        # Video block first in array build order... then slideshow inserted
+        # at position 0 — so slideshow leads, video follows.
+        assert blocks[0]["type"] == "slideshow"
+        assert blocks[1]["type"] == "video"
+        assert blocks[1]["video"]["media"] == "https://cdn.example.com/clip.mp4"
+        assert blocks[1]["video"]["supports_streaming"] is True
+
+    def test_media_before_title(self):
+        """The whole point: media blocks come before the heading."""
+        blocks = render_post_blocks("T", "B", "https://ex.com/a",
+                                    media=self.PHOTOS)
+        types = [b["type"] for b in blocks]
+        assert types.index("slideshow") < types.index("heading")
+
+    def test_source_details_with_url_text(self):
+        blocks = render_post_blocks("T", "B", "https://www.ex.com/story")
+        details = next(b for b in blocks if b["type"] == "details")
+        assert details["summary"] == "Source"
+        url_text = details["blocks"][0]["text"]
+        assert url_text["type"] == "url"
+        assert url_text["text"] == "ex.com"  # bare domain label
+        assert url_text["url"] == "https://www.ex.com/story"
+
+    def test_no_url_no_details(self):
+        blocks = render_post_blocks("T", "B", "")
+        assert all(b["type"] != "details" for b in blocks)
+
+    def test_no_signature_no_footer(self):
+        blocks = render_post_blocks("T", "B", "", signature="")
+        assert all(b["type"] != "footer" for b in blocks)
+
+    def test_body_truncated_at_sentence_boundary(self):
+        long_body = ("Sentence one. " * 4000)  # ~56k chars, over budget
+        blocks = render_post_blocks("T", long_body, "")
+        para = next(b for b in blocks if b["type"] == "paragraph")
+        assert len(para["text"]) <= 32736
+        assert para["text"].endswith(".")
+
+    def test_block_text_not_markdown_escaped(self):
+        """Block text entities are plain RichText — no escaping needed."""
+        blocks = render_post_blocks("A *bold* #title", "Body with _stars_", "")
+        assert blocks[0]["text"] == "A *bold* #title"
+        para = next(b for b in blocks if b["type"] == "paragraph")
+        assert para["text"] == "Body with _stars_"
+
+    def test_unknown_media_type_skipped(self):
+        blocks = render_post_blocks("T", "B", "",
+                                    media=[{"type": "audio", "media": "x.mp3"},
+                                           self.PHOTOS[0]])
+        types = [b["type"] for b in blocks]
+        assert "audio" not in types
+        assert "photo" in types

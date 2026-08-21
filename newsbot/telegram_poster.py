@@ -369,12 +369,18 @@ class RichSendRejected(Exception):
 
 
 async def post_rich_message(
-    markdown: str,
+    markdown: str = "",
     *,
     bot_token: str,
     chat_id: str,
+    blocks: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Post a rich-markdown message via Bot API sendRichMessage.
+    """Post a rich message via Bot API sendRichMessage.
+
+    Content is supplied EITHER as *markdown* (the historical path) OR as
+    *blocks* (Bot API 10.2 block entities — used for posts with embedded
+    media, where block order controls media placement). Exactly one of the
+    two must be non-empty; blocks wins if both are provided.
 
     Returns a list with one result dict (rich messages fit in one call
     — no chunking needed; richmd.RICH_MESSAGE_MAX_CHARS is the probed limit).
@@ -392,19 +398,25 @@ async def post_rich_message(
     if not chat_id:
         raise ValueError("chat_id is not set")
 
-    if len(markdown) > RICH_MESSAGE_MAX_CHARS:
-        # Should be unreachable — renderers budget below the limit. Cut at
-        # a newline so we don't sever a link or escape sequence mid-token.
-        log.warning(
-            "rich message %d chars exceeds probed limit %d — truncating",
-            len(markdown), RICH_MESSAGE_MAX_CHARS,
-        )
-        cut = markdown.rfind("\n", 0, RICH_MESSAGE_MAX_CHARS)
-        markdown = markdown[:cut] if cut > 0 else markdown[:RICH_MESSAGE_MAX_CHARS]
+    if blocks:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "rich_message": {"blocks": blocks},
+        }
+    else:
+        if len(markdown) > RICH_MESSAGE_MAX_CHARS:
+            # Should be unreachable — renderers budget below the limit. Cut at
+            # a newline so we don't sever a link or escape sequence mid-token.
+            log.warning(
+                "rich message %d chars exceeds probed limit %d — truncating",
+                len(markdown), RICH_MESSAGE_MAX_CHARS,
+            )
+            cut = markdown.rfind("\n", 0, RICH_MESSAGE_MAX_CHARS)
+            markdown = markdown[:cut] if cut > 0 else markdown[:RICH_MESSAGE_MAX_CHARS]
+        payload = {"chat_id": chat_id, "rich_message": {"markdown": markdown}}
 
     # The URL contains the bot token — never log it directly.
     url = f"{BOT_API_BASE}/bot{bot_token}/sendRichMessage"
-    payload = {"chat_id": chat_id, "rich_message": {"markdown": markdown}}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:

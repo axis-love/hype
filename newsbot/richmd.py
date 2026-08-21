@@ -213,6 +213,100 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
     return "\n".join(parts)
 
 
+def render_post_blocks(
+    title: str,
+    body: str,
+    url: str,
+    signature: str = "",
+    media: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Render a single post as Telegram rich-message BLOCKS (article layout).
+
+    Bot API 10.2 blocks give explicit layout control — the markdown +
+    tg://media path hoists media to the BOTTOM of the message (verified
+    live 2026-08-21), while blocks preserve array order. Media blocks come
+    first so images/video lead the post, grouped at the top:
+
+        [photo blocks]     ← media first, in extraction order
+        [video blocks]
+        heading H1 title
+        divider
+        paragraph body
+        details Source → url text
+        footer signature
+
+    *media* is the output of images.extract_article_media: dicts like
+    {"type": "photo", "media": <url>} or {"type": "video", "media": <url>,
+    "supports_streaming": True}. Empty/None media yields a text-only post.
+
+    Block text is plain RichText strings — NO markdown escaping needed
+    (block text entities are not parsed as markdown). Body is truncated
+    at a sentence boundary to stay under the rich message char budget.
+
+    GROUPING_NOTE: photos are wrapped in ONE slideshow block so Telegram
+    groups them as a swipeable set; videos follow as separate blocks
+    (Anton's call 2026-08-21 after live tests 177–183: collage grouped
+    but the slideshow shape is the approved one). Single photo posts skip
+    the wrapper. Videos are never placed inside the slideshow.
+    """
+    blocks: list[dict[str, Any]] = []
+
+    photo_blocks: list[dict[str, Any]] = []
+    for item in media or []:
+        mtype = item.get("type")
+        media_url = item.get("media")
+        if not media_url:
+            continue
+        if mtype == "photo":
+            photo_blocks.append({"type": "photo",
+                                 "photo": {"type": "photo", "media": media_url}})
+        elif mtype == "video":
+            blocks.append({"type": "video",
+                           "video": {"type": "video", "media": media_url,
+                                     "supports_streaming": True}})
+        else:
+            log.warning("unknown media type in render_post_blocks: %s", mtype)
+
+    if photo_blocks:
+        if len(photo_blocks) == 1:
+            # Single photo: no slideshow wrapper needed (a slideshow of one
+            # renders the same, but the plain block is the simpler shape).
+            blocks.insert(0, photo_blocks[0])
+        else:
+            blocks.insert(0, {"type": "slideshow", "blocks": photo_blocks})
+
+    if title:
+        blocks.append({"type": "heading", "text": title, "size": 1})
+        blocks.append({"type": "divider"})
+
+    # Truncate body to the rich message char budget, same policy as
+    # render_post (structure overhead here is small and fixed).
+    body_budget = max(100, RICH_MESSAGE_MAX_CHARS - 400)
+    if len(body) > body_budget:
+        cut = body.rfind(". ", 0, body_budget)
+        if cut > body_budget // 2:
+            body = body[:cut + 1]
+        else:
+            body = body[:body_budget].rsplit(" ", 1)[0] + "..."
+        log.debug("truncated post body to %d chars for rich blocks", len(body))
+    if body:
+        blocks.append({"type": "paragraph", "text": body})
+
+    if url:
+        blocks.append({
+            "type": "details",
+            "summary": "Source",
+            "blocks": [{"type": "paragraph",
+                        "text": {"type": "url", "text": _source_label(url),
+                                 "url": url}}],
+        })
+
+    if signature:
+        blocks.append({"type": "footer", "text": signature})
+
+    return blocks
+
+
 def render_recap(
     title: str,
     items: list[dict[str, Any]],

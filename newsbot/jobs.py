@@ -21,7 +21,15 @@ from core.settings_store import SettingsStore
 from lm_client import LMClient
 from newsbot.config import load_config
 from newsbot.db import NewsStore
-from newsbot.richmd import RECAP_MAX_ITEMS, _build_channel_link, _source_label, render_post, signature_for
+from newsbot.images import extract_article_media
+from newsbot.richmd import (
+    RECAP_MAX_ITEMS,
+    _build_channel_link,
+    _source_label,
+    render_post,
+    render_post_blocks,
+    signature_for,
+)
 from newsbot.selection import pick_hottest
 from newsbot.summarizer import llm_style_posts
 from newsbot.telegram_poster import (
@@ -372,14 +380,49 @@ class JobCoordinator:
             signature=signature_for(os.getenv("NEWS_CHANNEL_ID", "")),
         )
         html_fallback = format_post_message(styled_title, styled_body, row.get("url") or "")
-        return await self._send_and_mark(row_id, markdown, html_fallback)
 
-    async def _send_and_mark(self, row_id: int, markdown: str, html_fallback: str) -> int:
-        """Deliver a post (rich markdown, HTML fallback) and mark it posted.
+        # Extract article media (images/video) at posting time and switch to
+        # the blocks layout when any was found — Bot API 10.2 blocks preserve
+        # array order, so media leads the post at the top (the markdown +
+        # tg://media path hoists media to the bottom; verified 2026-08-21).
+        # Extraction never raises and never blocks posting: on any failure it
+        # returns [] and the text-only markdown path is used unchanged.
+        try:
+            media = await asyncio.to_thread(
+                extract_article_media, row.get("url") or ""
+            )
+        except Exception as exc:  # defensive — extractor is exception-safe
+            log.warning("media extraction raised for id=%d: %s",
+                        row_id, redact_exception(exc))
+            media = []
+
+        blocks = None
+        if media:
+            blocks = render_post_blocks(
+                styled_title, styled_body, row.get("url") or "",
+                signature=signature_for(os.getenv("NEWS_CHANNEL_ID", "")),
+                media=media,
+            )
+            log.info("post id=%d carries %d media item(s)", row_id, len(media))
+
+        return await self._send_and_mark(row_id, markdown, html_fallback, blocks=blocks)
+
+    async def _send_and_mark(
+        self,
+        row_id: int,
+        markdown: str,
+        html_fallback: str,
+        *,
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Deliver a post (rich markdown/blocks, HTML fallback) and mark it posted.
 
         Delivery goes through sendRichMessage — the exact renderer and
         transport /preview uses — and falls back to the HTML sendMessage
-        path on RichSendRejected. Dry-run (no BOT_TOKEN/NEWS_CHANNEL_ID)
+        path on RichSendRejected. When *blocks* is given (post has embedded
+        media), it is preferred over *markdown*; if the blocks send is
+        rejected, delivery retries once with the plain markdown, then falls
+        back to the HTML sendMessage path. Dry-run (no BOT_TOKEN/NEWS_CHANNEL_ID)
         prints the markdown to stdout. On success the Telegram message_id
         is captured from the response and persisted via mark_posted for
         channel-post linking (OQ-2).
@@ -402,7 +445,22 @@ class JobCoordinator:
 
         try:
             try:
-                results = await post_rich_message(markdown, bot_token=bot_token, chat_id=chat_id)
+                if blocks:
+                    try:
+                        results = await post_rich_message(
+                            bot_token=bot_token, chat_id=chat_id, blocks=blocks,
+                        )
+                    except RichSendRejected:
+                        # Blocks send rejected (e.g. a media URL Telegram
+                        # couldn't fetch) — retry once with the plain markdown
+                        # so the post still gets its text out before the
+                        # final HTML fallback.
+                        log.warning("blocks post id=%d rejected — retrying as plain markdown", row_id)
+                        results = await post_rich_message(
+                            markdown, bot_token=bot_token, chat_id=chat_id,
+                        )
+                else:
+                    results = await post_rich_message(markdown, bot_token=bot_token, chat_id=chat_id)
             except RichSendRejected:
                 log.warning("rich post id=%d rejected — falling back to HTML sendMessage", row_id)
                 results = await post_digest(html_fallback, bot_token=bot_token, chat_id=chat_id)
