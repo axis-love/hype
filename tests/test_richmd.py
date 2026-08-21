@@ -137,10 +137,10 @@ class TestSignatureFor:
 
 class TestRenderPost:
     def test_basic_shape(self):
-        """Exact article layout: leading blank, H1, divider, body, collapsible source."""
+        """Exact article layout: H1, divider, body, collapsible source. No top margin."""
         md = render_post("Big Launch", "Company X released a new product.", "https://example.com/post")
         expected = (
-            "\n# Big Launch\n"
+            "# Big Launch\n"
             "\n"
             "---\n"
             "\n"
@@ -155,7 +155,7 @@ class TestRenderPost:
 
     def test_title_escaped(self):
         md = render_post("AI *is* great", "Body.", "https://x.io")
-        assert "\n# AI \\*is\\* great" in md
+        assert md.startswith("# AI \\*is\\* great\n")
 
     def test_title_with_hash_escaped(self):
         """'#' in a heading title must be escaped so it doesn't nest."""
@@ -168,10 +168,10 @@ class TestRenderPost:
         assert "[blog.example.com](https://blog.example.com/post)" in md
         assert "Source: " not in md
 
-    def test_leading_blank_line_present(self):
-        """Title gets breathing room from the bubble's top border."""
+    def test_no_top_margin(self):
+        """Message starts directly with the H1 — margin attempts rejected (2026-08-21)."""
         md = render_post("T", "Body.", "")
-        assert md.startswith("\n# ")
+        assert md.startswith("# ")
 
     def test_no_url_omits_details_block(self):
         md = render_post("Title", "Body.", "")
@@ -232,7 +232,7 @@ class TestRenderRecap:
         ]
         md = render_recap("Day Recap", items, chat_id="@chan", signature="@chan")
         expected = (
-            "\n# Day Recap\n"
+            "# Day Recap\n"
             "\n"
             "---\n"
             "\n"
@@ -250,10 +250,10 @@ class TestRenderRecap:
         md = render_recap("R", items, chat_id="@chan")
         assert md.endswith("- #### [S](https://t.me/chan/5)")
 
-    def test_leading_blank_line_present(self):
-        """Recap title gets breathing room from the bubble's top border."""
+    def test_no_top_margin(self):
+        """Recap starts directly with the H1 — margin attempts rejected (2026-08-21)."""
         md = render_recap("R", [], chat_id="")
-        assert md.startswith("\n# ")
+        assert md.startswith("# ")
 
     def test_legacy_item_unlinked_h4_bullet(self):
         """Item without message_id renders as unlinked H4 bullet, no crash."""

@@ -148,12 +148,14 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
 
         {signature}
 
-    A leading blank line gives the title breathing room from the message
-    bubble's top border (added 2026-08-21 — Anton flagged the H1 hugging
-    the top edge). The <details> block is omitted when url is empty; the
-    signature block is omitted when signature is empty (no trailing blank
-    line either). The link text is the bare domain — "Source:" was
-    redundant with the collapsible's summary label.
+    Top margin: none. A leading blank line is stripped by the rich
+    renderer (verified live 2026-08-21), and a leading divider was tried
+    as a limiter line and rejected by Anton as looking awful. The H1
+    starts the message — that's the approved look. Do not retry margins
+    without new live testing. The <details> block is omitted when url is
+    empty; the signature block is omitted when signature is empty (no
+    trailing blank line either). The link text is the bare domain —
+    "Source:" was redundant with the collapsible's summary label.
 
     Body is truncated at a sentence boundary to fit the rich message
     char budget (RICH_MESSAGE_MAX_CHARS minus structure overhead), then
@@ -165,7 +167,7 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
     # Structure overhead: heading + divider when titled, the details
     # wrapper around the source link, and the signature block.
     _OVERHEAD = 260
-    title_block_len = len(f"\n# {escaped_title}\n\n---\n\n") if escaped_title else 0
+    title_block_len = len(f"# {escaped_title}\n\n---\n\n") if escaped_title else 0
     link_block_len = 0
     if url:
         label = _source_label(url)
@@ -192,7 +194,6 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
 
     parts: list[str] = []
     if escaped_title:
-        parts.append("")  # breathing room under the bubble's top border
         parts.append(f"# {escaped_title}")
         parts.append("")
         parts.append("---")
@@ -245,8 +246,7 @@ def render_recap(
         items = items[:RECAP_MAX_ITEMS]
 
     escaped_title = escape_rich_md(title)
-    # Leading blank line: breathing room under the bubble's top border.
-    lines = ["", f"# {escaped_title}", "", "---", ""]
+    lines = [f"# {escaped_title}", "", "---", ""]
 
     for item in items:
         item_title = str(item.get("title") or "(untitled)").strip()
