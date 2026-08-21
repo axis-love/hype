@@ -26,7 +26,7 @@ Post (article layout):
 
     <details><summary>Source</summary>
 
-    [Source: {domain}]({url})
+    [{domain}]({url})
     </details>
 
     {signature}
@@ -143,13 +143,17 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
 
         <details><summary>Source</summary>
 
-        [Source: {domain}]({url})
+        [{domain}]({url})
         </details>
 
         {signature}
 
-    The <details> block is omitted when url is empty; the signature block
-    is omitted when signature is empty (no trailing blank line either).
+    A leading blank line gives the title breathing room from the message
+    bubble's top border (added 2026-08-21 — Anton flagged the H1 hugging
+    the top edge). The <details> block is omitted when url is empty; the
+    signature block is omitted when signature is empty (no trailing blank
+    line either). The link text is the bare domain — "Source:" was
+    redundant with the collapsible's summary label.
 
     Body is truncated at a sentence boundary to fit the rich message
     char budget (RICH_MESSAGE_MAX_CHARS minus structure overhead), then
@@ -161,13 +165,13 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
     # Structure overhead: heading + divider when titled, the details
     # wrapper around the source link, and the signature block.
     _OVERHEAD = 260
-    title_block_len = len(f"# {escaped_title}\n\n---\n\n") if escaped_title else 0
+    title_block_len = len(f"\n# {escaped_title}\n\n---\n\n") if escaped_title else 0
     link_block_len = 0
     if url:
         label = _source_label(url)
         link_block_len = len(
             f"\n\n<details><summary>Source</summary>\n\n"
-            f"[Source: {escape_rich_md(label)}]({_safe_url(url)})\n</details>"
+            f"[{escape_rich_md(label)}]({_safe_url(url)})\n</details>"
         )
     sig_block_len = len(f"\n\n{signature}") if signature else 0
 
@@ -188,6 +192,7 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
 
     parts: list[str] = []
     if escaped_title:
+        parts.append("")  # breathing room under the bubble's top border
         parts.append(f"# {escaped_title}")
         parts.append("")
         parts.append("---")
@@ -199,7 +204,7 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
         parts.append("")
         parts.append("<details><summary>Source</summary>")
         parts.append("")
-        parts.append(f"[Source: {label}]({safe_url})")
+        parts.append(f"[{label}]({safe_url})")
         parts.append("</details>")
     if signature:
         parts.append("")
@@ -240,7 +245,8 @@ def render_recap(
         items = items[:RECAP_MAX_ITEMS]
 
     escaped_title = escape_rich_md(title)
-    lines = [f"# {escaped_title}", "", "---", ""]
+    # Leading blank line: breathing room under the bubble's top border.
+    lines = ["", f"# {escaped_title}", "", "---", ""]
 
     for item in items:
         item_title = str(item.get("title") or "(untitled)").strip()

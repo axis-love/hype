@@ -137,10 +137,10 @@ class TestSignatureFor:
 
 class TestRenderPost:
     def test_basic_shape(self):
-        """Exact article layout: H1, divider, body, collapsible source."""
+        """Exact article layout: leading blank, H1, divider, body, collapsible source."""
         md = render_post("Big Launch", "Company X released a new product.", "https://example.com/post")
         expected = (
-            "# Big Launch\n"
+            "\n# Big Launch\n"
             "\n"
             "---\n"
             "\n"
@@ -148,19 +148,30 @@ class TestRenderPost:
             "\n"
             "<details><summary>Source</summary>\n"
             "\n"
-            "[Source: example.com](https://example.com/post)\n"
+            "[example.com](https://example.com/post)\n"
             "</details>"
         )
         assert md == expected
 
     def test_title_escaped(self):
         md = render_post("AI *is* great", "Body.", "https://x.io")
-        assert "# AI \\*is\\* great" in md
+        assert "\n# AI \\*is\\* great" in md
 
     def test_title_with_hash_escaped(self):
         """'#' in a heading title must be escaped so it doesn't nest."""
         md = render_post("C# 13 ships", "Body.", "")
         assert "# C\\# 13 ships" in md
+
+    def test_source_link_has_no_source_prefix(self):
+        """Link text is the bare domain — collapsible summary already says Source."""
+        md = render_post("T", "Body.", "https://blog.example.com/post")
+        assert "[blog.example.com](https://blog.example.com/post)" in md
+        assert "Source: " not in md
+
+    def test_leading_blank_line_present(self):
+        """Title gets breathing room from the bubble's top border."""
+        md = render_post("T", "Body.", "")
+        assert md.startswith("\n# ")
 
     def test_no_url_omits_details_block(self):
         md = render_post("Title", "Body.", "")
@@ -221,7 +232,7 @@ class TestRenderRecap:
         ]
         md = render_recap("Day Recap", items, chat_id="@chan", signature="@chan")
         expected = (
-            "# Day Recap\n"
+            "\n# Day Recap\n"
             "\n"
             "---\n"
             "\n"
@@ -238,6 +249,11 @@ class TestRenderRecap:
         items = [{"title": "S", "url": "", "message_id": 5}]
         md = render_recap("R", items, chat_id="@chan")
         assert md.endswith("- #### [S](https://t.me/chan/5)")
+
+    def test_leading_blank_line_present(self):
+        """Recap title gets breathing room from the bubble's top border."""
+        md = render_recap("R", [], chat_id="")
+        assert md.startswith("\n# ")
 
     def test_legacy_item_unlinked_h4_bullet(self):
         """Item without message_id renders as unlinked H4 bullet, no crash."""
@@ -258,7 +274,7 @@ class TestRenderRecap:
     def test_recap_title_escaped(self):
         items = [{"title": "AI *rocks*", "url": "", "message_id": None}]
         md = render_recap("R", items, chat_id="")
-        assert "# R" in md.split("\n")[0]
+        assert "# R" in md
         assert "\\*rocks\\*" in md
 
     def test_30_item_guard(self, caplog):
