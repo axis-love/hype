@@ -61,7 +61,8 @@ from newsbot.jobs import (
     _row_to_styler_input,
     format_post_message,
 )
-from newsbot.richmd import render_post, render_recap, signature_for
+from newsbot.images import extract_article_media
+from newsbot.richmd import render_post, render_post_blocks, render_recap, signature_for
 from newsbot.selection import pick_hottest
 from newsbot.telegram_poster import post_digest, post_rich_message, RichSendRejected
 from newsbot.summarizer import (
@@ -1173,13 +1174,16 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             if result == 1:
                 raise RuntimeError("daily recap failed — check logs for details")
 
-        async def on_preview() -> tuple[str, str]:
+        async def on_preview() -> tuple[str, str, list[dict[str, Any]] | None]:
             """Style the hottest store story for a DM preview.
 
             Read-only: no DB writes, no delivery, no slot consumed. The
             scheduled poster will style the same row again at post time.
-            Returns (rich_markdown, html_fallback) — both rendered from
-            the same styled data, mirroring the channel posting path.
+            Returns (rich_markdown, html_fallback, blocks) — markdown and
+            fallback render from the same styled data; *blocks* is the
+            media-bearing layout (photo slideshow + video blocks first)
+            when the article yields extractable media, else None. Preview
+            mirrors the channel posting path one-to-one (jobs.py).
             """
             cfg = load_config(settings)
             result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, cfg)
@@ -1204,7 +1208,23 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
                 raise RuntimeError("styler returned an empty body — check logs")
             url = row.get("url") or ""
             signature = signature_for(os.getenv("NEWS_CHANNEL_ID", ""))
-            return render_post(title, body, url, signature), format_post_message(title, body, url)
+            markdown = render_post(title, body, url, signature)
+
+            # Same media extraction as the scheduled posting path: hero
+            # tags + inline images/video, Telegram caps enforced, never
+            # raises (returns [] on any failure).
+            try:
+                media = await asyncio.to_thread(extract_article_media, url)
+            except Exception as exc:  # defensive — extractor is exception-safe
+                log.warning("preview media extraction raised: %s", redact_exception(exc))
+                media = []
+            blocks = None
+            if media:
+                blocks = render_post_blocks(
+                    title, body, url, signature=signature, media=media,
+                )
+                log.info("preview carries %d media item(s)", len(media))
+            return markdown, format_post_message(title, body, url), blocks
 
         async def on_recap_preview() -> tuple[str, str, str]:
             """Write the daily recap for a DM preview.

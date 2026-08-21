@@ -62,7 +62,7 @@ class BotCommandHandler:
         on_scores: Callable[[], Awaitable[str]] | None = None,
         on_summary: Callable[[], Awaitable[None]] | None = None,
         on_store: Callable[[str], Awaitable[str]] | None = None,
-        on_preview: Callable[[], Awaitable[tuple[str, str]]] | None = None,
+        on_preview: Callable[[], Awaitable[tuple[str, str, list[dict[str, Any]] | None]]] | None = None,
         on_recap_preview: Callable[[], Awaitable[tuple[str, str, str]]] | None = None,
     ) -> None:
         self.bot_token = bot_token
@@ -110,25 +110,50 @@ class BotCommandHandler:
                 return False
         return True
 
-    async def _send_rich(self, chat_id: int, markdown: str, html_fallback: str = "") -> bool:
+    async def _send_rich(
+        self,
+        chat_id: int,
+        markdown: str,
+        html_fallback: str = "",
+        blocks: list[dict[str, Any]] | None = None,
+    ) -> bool:
         """Send a rich-markdown message to a chat via sendRichMessage.
 
-        On RichSendRejected, falls back to _send with the HTML fallback
-        so the chat never gets nothing. Returns True on success.
+        Mirrors the channel posting chain (jobs._send_and_mark): when
+        *blocks* is given (post carries extracted media), it is tried
+        first; on RichSendRejected the plain markdown is retried once,
+        then the HTML sendMessage fallback. Without blocks, markdown
+        goes straight out. Returns True on success.
         """
         try:
-            await post_rich_message(
-                markdown,
-                bot_token=self.bot_token,
-                chat_id=str(chat_id),
-            )
-            return True
-        except RichSendRejected:
-            log.warning("rich message rejected for chat %d — falling back to HTML", chat_id)
-            if html_fallback:
-                return await self._send(chat_id, html_fallback, parse_mode="HTML")
-            # No fallback provided — send the raw markdown as plain text.
-            return await self._send(chat_id, markdown)
+            try:
+                if blocks:
+                    try:
+                        await post_rich_message(
+                            bot_token=self.bot_token,
+                            chat_id=str(chat_id),
+                            blocks=blocks,
+                        )
+                    except RichSendRejected:
+                        log.warning("blocks rejected for chat %d — retrying as plain markdown", chat_id)
+                        await post_rich_message(
+                            markdown,
+                            bot_token=self.bot_token,
+                            chat_id=str(chat_id),
+                        )
+                else:
+                    await post_rich_message(
+                        markdown,
+                        bot_token=self.bot_token,
+                        chat_id=str(chat_id),
+                    )
+                return True
+            except RichSendRejected:
+                log.warning("rich message rejected for chat %d — falling back to HTML", chat_id)
+                if html_fallback:
+                    return await self._send(chat_id, html_fallback, parse_mode="HTML")
+                # No fallback provided — send the raw markdown as plain text.
+                return await self._send(chat_id, markdown)
         except Exception as exc:
             log.warning("rich message failed for chat %d: %s", chat_id, redact_exception(exc))
             if html_fallback:
@@ -296,7 +321,7 @@ class BotCommandHandler:
             return
         await self._send(chat_id, "Styling the hottest store story for preview…")
         try:
-            markdown, html_fallback = await handler()
+            markdown, html_fallback, blocks = await handler()
         except RuntimeError as exc:
             await self._send(chat_id, str(exc))
             return
@@ -306,9 +331,10 @@ class BotCommandHandler:
         if not markdown:
             await self._send(chat_id, "Preview returned nothing — styler may have failed.")
             return
-        # Same renderer + transport as the channel: rich markdown via
-        # sendRichMessage, HTML fallback rendered from the same data.
-        await self._send_rich(chat_id, markdown, html_fallback)
+        # Same renderer + transport as the channel: rich blocks (when the
+        # story carries extracted media) / markdown via sendRichMessage,
+        # HTML fallback rendered from the same data.
+        await self._send_rich(chat_id, markdown, html_fallback, blocks=blocks)
 
     async def _cmd_recap(self, chat_id: int, arg: str = "") -> None:
         """Recap commands.
