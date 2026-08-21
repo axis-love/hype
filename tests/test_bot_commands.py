@@ -46,11 +46,11 @@ def _capture_send(handler):
 
 
 def _capture_send_rich(handler):
-    """Replace _send_rich with a recorder. Returns the (chat_id, markdown, fallback) list."""
-    calls: list[tuple[int, str, str]] = []
+    """Replace _send_rich with a recorder. Returns the (chat_id, markdown, fallback, blocks) list."""
+    calls: list[tuple[int, str, str, object]] = []
 
-    async def mock_send_rich(chat_id, markdown, html_fallback=""):
-        calls.append((chat_id, markdown, html_fallback))
+    async def mock_send_rich(chat_id, markdown, html_fallback="", blocks=None):
+        calls.append((chat_id, markdown, html_fallback, blocks))
         return True
 
     handler._send_rich = mock_send_rich
@@ -121,6 +121,7 @@ class TestPreview:
             return (
                 "**Title**\n\nBody text.\n\n[Source: x.io](https://x.io)",
                 '<b>Title</b>\n\nBody text.\n<a href="https://x.io">Source: x.io</a>',
+                None,
             )
 
         handler = _make_handler(on_preview=on_preview)
@@ -135,12 +136,28 @@ class TestPreview:
         assert "**Title**" in rich_calls[0][1]
         # HTML fallback comes from the handler, rendered from the same data.
         assert "<b>Title</b>" in rich_calls[0][2]
+        # No media on this story — blocks must be None (markdown path).
+        assert rich_calls[0][3] is None
+
+    @pytest.mark.asyncio
+    async def test_preview_blocks_passed_through(self):
+        """When the story carries media, the blocks layout reaches _send_rich."""
+        blocks = [{"type": "inputRichBlockPhoto"}]
+
+        async def on_preview():
+            return "**Title**\n\nBody.", "<b>Title</b>\n\nBody.", blocks
+
+        handler = _make_handler(on_preview=on_preview)
+        rich_calls = _capture_send_rich(handler)
+        await handler._handle(_update(123, "/preview"))
+        assert len(rich_calls) == 1
+        assert rich_calls[0][3] is blocks
 
     @pytest.mark.asyncio
     async def test_preview_fallback_on_rich_rejected(self):
         """On RichSendRejected, preview falls back to HTML _send."""
         async def on_preview():
-            return "**Title**\n\nBody.", "<b>Title</b>\n\nBody."
+            return "**Title**\n\nBody.", "<b>Title</b>\n\nBody.", None
 
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
@@ -175,7 +192,7 @@ class TestPreview:
     @pytest.mark.asyncio
     async def test_preview_empty_result(self):
         async def on_preview():
-            return "", ""
+            return "", "", None
 
         handler = _make_handler(on_preview=on_preview)
         calls = _capture_send(handler)
