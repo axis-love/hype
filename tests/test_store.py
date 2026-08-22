@@ -28,6 +28,7 @@ def _bd(**overrides) -> dict:
         "crosspost_bonus": 0.0,
         "penalty": 1.0,
         "matched_topics": ["ai"],
+        "origin_topic": "ai",
         "scored_at": "2026-08-16T05:00:00+00:00",
         "lookback_hours": 48.0,
         "source": "hn",
@@ -90,7 +91,7 @@ class TestMigration4:
         row = store._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         ).fetchone()
-        assert row["version"] == 5
+        assert row["version"] == 6
 
 
 # --- add_stories_to_store -------------------------------------------------
@@ -138,6 +139,7 @@ class TestAddStoriesToStore:
         assert row["reposts"] == bd["reposts"]
         assert row["crosspost_count"] == bd["crosspost_count"]
         assert json.loads(row["matched_topics"]) == ["ai"]
+        assert row["origin_topic"] == bd["origin_topic"]
         assert row["scored_at"] == bd["scored_at"]
 
     def test_raw_json_string_passthrough(self, store):
@@ -292,6 +294,22 @@ class TestMergeIntoStoreRow:
         store.merge_into_store_row(rid, _story(), "https://c.example.com/2")
         row = store._conn.execute("SELECT merged_urls FROM pending_posts WHERE id=?", (rid,)).fetchone()
         assert json.loads(row["merged_urls"]) == ["https://b.example.com/1", "https://c.example.com/2"]
+
+    def test_merge_fills_null_origin_topic_from_candidate(self, store):
+        """Stored row with NULL origin_topic picks up the candidate's pack."""
+        rid = self._seed_scored_row(store, origin_topic=None)
+        candidate = _story(origin_topic="gaming")
+        store.merge_into_store_row(rid, candidate, "https://b.example.com/1")
+        row = store._conn.execute("SELECT origin_topic FROM pending_posts WHERE id=?", (rid,)).fetchone()
+        assert row["origin_topic"] == "gaming"
+
+    def test_merge_keeps_stored_origin_topic_when_set(self, store):
+        """Stored origin_topic wins — the pack of first surfacing is preserved."""
+        rid = self._seed_scored_row(store, origin_topic="ai")
+        candidate = _story(origin_topic="gaming")
+        store.merge_into_store_row(rid, candidate, "https://b.example.com/1")
+        row = store._conn.execute("SELECT origin_topic FROM pending_posts WHERE id=?", (rid,)).fetchone()
+        assert row["origin_topic"] == "ai"
 
     def test_merge_refreshes_components_from_candidate_breakdown(self, store):
         rid = self._seed_scored_row(

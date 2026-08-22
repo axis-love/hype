@@ -563,15 +563,17 @@ def test_trend_tokens_drops_stopwords():
 
 
 def test_trends_containment_matches_all_tokens():
-    """Trend 'GTA 6 leak' matches article 'GTA 6 gameplay leaks online ahead of…'."""
+    """Trend 'GTA 6 leak' matches an article containing all trend tokens
+    as whole words. (Token-set containment is whole-token: 'leak' does
+    NOT match 'leaks' — titles must carry the exact token.)"""
     trends_item = new_candidate(
-        title="GTA 6 gameplay leaks online ahead of release",
+        title="GTA 6 leak confirmed ahead of release",
         url="https://ign.com/gta6",
         source="trends",
         source_name="trends/GTA 6 leak",
     )
     article_item = new_candidate(
-        title="GTA 6 gameplay leaks online ahead of release",
+        title="GTA 6 leak confirmed: gameplay footage online ahead of release",
         url="https://ign.com/gta6-article",
         source="rss",
         source_name="IGN",
@@ -598,6 +600,67 @@ def test_trends_containment_does_not_match_partial():
     # "gta" is in the title, but "6" is not (it has "5"), and "leak" is there.
     # Not ALL tokens present → no match.
     assert _trends_containment_match(trends_item, article_item) is False
+
+
+def test_trends_containment_rejects_substring_digit_in_year():
+    """Regression: substring matching made "6" match inside "2026".
+    Trend 'GTA 6 leak' must NOT merge with an article about 2026 that
+    mentions gta/leak but not the standalone token '6'."""
+    trends_item = new_candidate(
+        title="placeholder",
+        url="https://trends.google.com/x",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+    )
+    article_item = new_candidate(
+        title="GTA leak: biggest 2026 release news",
+        url="https://kotaku.com/gta-2026",
+        source="rss",
+        source_name="Kotaku",
+    )
+    # Old substring code: "gta" in title ✓, "6" in "2026" ✓, "leak" in title ✓
+    # → false merge. Token-set containment requires whole token "6".
+    assert _trends_containment_match(trends_item, article_item) is False
+
+
+def test_trends_containment_rejects_substring_word_inside_word():
+    """Regression: substring matching made "ai" match inside "maintain".
+    Trend 'AI agents' must NOT merge with an article about maintaining
+    agents where 'ai' only appears embedded in another word."""
+    trends_item = new_candidate(
+        title="placeholder",
+        url="https://trends.google.com/y",
+        source="trends",
+        source_name="trends/AI agents",
+    )
+    article_item = new_candidate(
+        title="How to maintain agents in production",
+        url="https://blog.example.com/maintain-agents",
+        source="rss",
+        source_name="Tech Blog",
+    )
+    # Old substring code: "ai" in "maintain" ✓, "agents" in title ✓
+    # → false merge. Token-set containment requires whole token "ai".
+    assert _trends_containment_match(trends_item, article_item) is False
+
+
+def test_trends_containment_matches_with_extra_words():
+    """Token-set containment still matches when the other title has
+    additional words around the trend tokens."""
+    trends_item = new_candidate(
+        title="placeholder",
+        url="https://trends.google.com/z",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+    )
+    article_item = new_candidate(
+        title="Massive GTA 6 leak: everything we know about the 2026 launch",
+        url="https://ign.com/gta6-everything",
+        source="rss",
+        source_name="IGN",
+    )
+    # All of gta/6/leak appear as whole tokens → match.
+    assert _trends_containment_match(trends_item, article_item) is True
 
 
 def test_trends_containment_requires_min_2_tokens():

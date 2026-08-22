@@ -237,6 +237,56 @@ class TestScoringChanges:
         bd = score_breakdown(item, cfg)
         assert bd["origin_topic"] == "gaming"
 
+    def test_research_keywords_no_longer_mislabel_science_as_ai(self):
+        """H-2 review case: r/science 'Study finds GPU leak' was labelled ai
+        because the ai pack held research/paper/study/benchmark words.
+        Those words now live in new_research; the ai pack must not match."""
+        derived = derive_config(DEFAULT_TOPIC_PACKS)
+        cfg = self._cfg(
+            topic_boost=dict(derived["topic_boost"]),
+            topic_keywords=dict(derived["topic_keywords"]),
+            source_topic_map=dict(derived["source_topic_map"]),
+        )
+        item = {
+            "title": "Study finds GPU leak",
+            "source": "reddit",
+            "source_name": "r/science",
+            "url": "http://x.com",
+        }
+        bd = score_breakdown(item, cfg)
+        assert "ai" not in bd["matched_topics"]
+        assert bd["origin_topic"] == "science"
+        assert "science" in bd["matched_topics"]
+
+    def test_new_research_has_keywords_and_hf_source_mapping(self):
+        """new_research owns the research keywords and the HF Papers
+        source_name, so its boost 20 can actually fire."""
+        derived = derive_config(DEFAULT_TOPIC_PACKS)
+        assert "new_research" in derived["topic_keywords"]
+        assert "arxiv" in derived["topic_keywords"]["new_research"]
+        assert derived["source_topic_map"].get("Hugging Face Papers") == "new_research"
+        assert derived["topic_boost"].get("new_research") == 20
+
+    def test_hf_papers_origin_topic_fires_without_keywords(self):
+        """An HF Papers item with a keyword-free title still gets
+        origin_topic=new_research and its boost via source_names mapping."""
+        derived = derive_config(DEFAULT_TOPIC_PACKS)
+        cfg = self._cfg(
+            topic_boost=dict(derived["topic_boost"]),
+            topic_keywords=dict(derived["topic_keywords"]),
+            source_topic_map=dict(derived["source_topic_map"]),
+        )
+        item = {
+            "title": "Diffusion transformers at scale",
+            "source": "huggingface_papers",
+            "source_name": "Hugging Face Papers",
+            "url": "https://huggingface.co/papers/2608.00001",
+        }
+        bd = score_breakdown(item, cfg)
+        assert bd["origin_topic"] == "new_research"
+        assert bd["topic_bonus"] == 20
+        assert "new_research" in bd["matched_topics"]
+
 
 # --- load_config integration tests --------------------------------------
 

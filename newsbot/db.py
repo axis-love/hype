@@ -225,6 +225,20 @@ def _migration_5(cur: sqlite3.Cursor) -> None:
     cur.execute("ALTER TABLE pending_posts ADD COLUMN message_id INTEGER")
 
 
+@_migration(6, "Add origin_topic to pending_posts (topic-pack acceptance criteria)")
+def _migration_6(cur: sqlite3.Cursor) -> None:
+    """Add origin_topic column to pending_posts.
+
+    The topic pack whose source first surfaced the story (e.g. the pack
+    the Reddit subreddit or RSS feed belongs to). matched_topics already
+    stores every pack that matched; origin_topic pins the pack of
+    origin so /scores can show where a story came from and the week
+    watch (H-6) can attribute candidates to packs. Existing rows get
+    NULL (legacy).
+    """
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN origin_topic TEXT")
+
+
 class NewsStore:
     """CRUD wrapper for news-bot tables."""
 
@@ -524,6 +538,7 @@ class NewsStore:
                     bd.get("crosspost_bonus"),
                     json.dumps(bd.get("matched_topics") or []) if bd else None,
                     bd.get("scored_at"),
+                    bd.get("origin_topic"),
                 ))
             if post_rows:
                 cur.executemany(
@@ -535,8 +550,8 @@ class NewsStore:
                         crosspost_count, penalty, lookback_hours,
                         score_at_queue, engagement_score, recency_at_queue,
                         source_weight, topic_bonus, crosspost_bonus,
-                        matched_topics, scored_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        matched_topics, scored_at, origin_topic
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     post_rows,
                 )
@@ -573,7 +588,7 @@ class NewsStore:
         "crosspost_count, penalty, lookback_hours, "
         "score_at_queue, engagement_score, recency_at_queue, "
         "source_weight, topic_bonus, crosspost_bonus, "
-        "matched_topics, scored_at, merge_count, merged_urls, "
+        "matched_topics, scored_at, origin_topic, merge_count, merged_urls, "
         "styled_at, message_id"
     )
 
@@ -672,6 +687,10 @@ class NewsStore:
             + float(topic_bonus_v or 0) + float(crosspost_bonus or 0)
         ) * penalty_v
 
+        # Fill origin_topic if the stored row has none (the candidate's
+        # source may be pack-attributable when the original wasn't).
+        origin_topic = row["origin_topic"] or bd.get("origin_topic")
+
         self._conn.execute(
             """
             UPDATE pending_posts SET
@@ -682,7 +701,8 @@ class NewsStore:
                 engagement_score = ?,
                 source_weight = ?, topic_bonus = ?, crosspost_bonus = ?,
                 penalty = ?, lookback_hours = ?,
-                score_at_queue = ?
+                score_at_queue = ?,
+                origin_topic = ?
             WHERE id = ?
             """,
             (
@@ -693,6 +713,7 @@ class NewsStore:
                 source_weight, topic_bonus_v, crosspost_bonus,
                 penalty, lookback_hours,
                 score_at_queue,
+                origin_topic,
                 row_id,
             ),
         )
