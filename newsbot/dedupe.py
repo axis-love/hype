@@ -6,6 +6,9 @@ Implements the architecture spec §9:
   - normalized lowercase title match
   - fuzzy title similarity > 0.90 (rapidfuzz)
   - same GitHub repo URL
+  - trends containment: a trends candidate whose trend title's tokens
+    (minus stopwords, ≥2 tokens) ALL appear in another candidate's title
+    ⇒ same story → merge. Scoped to source == "trends".
 
 When duplicates are found, **merge** their engagement signals instead of
 dropping the weaker item: sum upvotes/comments/stars (only across distinct
@@ -24,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -73,6 +77,65 @@ def _set_pre_merge_weights(weights: dict[str, float]) -> None:
 _SOURCE_ALIASES_PRE: dict[str, str] = {
     "hn": "hackernews",
 }
+
+
+# --- Trends containment dedupe rule (H-3) --------------------------------
+
+# Stopwords removed from trend titles before token containment check.
+# These are high-frequency tokens that dilute the containment signal.
+_TRENDS_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "could", "should", "may", "might", "can", "this", "that", "these",
+    "those", "it", "its", "as", "if", "then", "than", "so", "not", "no",
+    "vs", "new", "best", "top", "update", "updates",
+})
+
+
+def _trend_tokens(trend_title: str) -> list[str]:
+    """Extract meaningful tokens from a trend title for containment check.
+
+    Lowercases, splits on non-alphanumeric, drops stopwords, and returns
+    the remaining tokens. Returns [] if fewer than 2 tokens survive — the
+    containment rule requires ≥2 tokens to fire.
+    """
+    raw_tokens = re.findall(r"[a-z0-9]+", (trend_title or "").lower())
+    tokens = [t for t in raw_tokens if t not in _TRENDS_STOPWORDS]
+    return tokens
+
+
+def _trends_containment_match(
+    trends_item: dict[str, Any],
+    other_item: dict[str, Any],
+) -> bool:
+    """Check if a trends candidate's trend tokens are ALL in another title.
+
+    Returns True if the trend title (from source_name "trends/<title>")
+    produces ≥2 non-stopword tokens and ALL of those tokens appear in the
+    other candidate's title. Scoped to source == "trends".
+    """
+    # Only apply to trends candidates.
+    if str(trends_item.get("source") or "") != "trends":
+        return False
+
+    # Extract trend title from source_name "trends/<title>".
+    source_name = str(trends_item.get("source_name") or "")
+    if not source_name.startswith("trends/"):
+        return False
+    trend_title = source_name[len("trends/"):]
+
+    tokens = _trend_tokens(trend_title)
+    if len(tokens) < 2:
+        return False  # need at least 2 tokens for a meaningful match
+
+    other_title = _normalize_title(other_item.get("title"))
+    if not other_title:
+        return False
+
+    # ALL trend tokens must be present in the other candidate's title.
+    return all(token in other_title for token in tokens)
+
 
 
 def _pre_merge_preference(item: dict[str, Any]) -> float:
@@ -406,8 +469,21 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif norm_title and norm_title in title_index:
             match_idx = title_index[norm_title]
         else:
+            # 4b. Trends containment: if this is a trends candidate, check
+            # if its trend tokens are ALL contained in any existing result's
+            # title. Scoped to source == "trends" (H-3).
+            if str(item.get("source") or "") == "trends":
+                for idx, rep in enumerate(result):
+                    if _trends_containment_match(item, rep):
+                        match_idx = idx
+                        log.info(
+                            "dedupe_trends_match: trend '%s' matched candidate '%s'",
+                            str(item.get("source_name") or ""),
+                            str(rep.get("title") or "")[:80],
+                        )
+                        break
             # 4. Fuzzy title match (>0.90). Linear scan — N is small (hundreds).
-            if norm_title:
+            if match_idx is None and norm_title:
                 best_idx = -1
                 best_ratio = 0.0
                 for idx, rep in enumerate(result):

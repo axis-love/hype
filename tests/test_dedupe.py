@@ -536,3 +536,167 @@ def test_match_store_first_match_wins_by_check_order():
         source="hn", source_name="HN",
     )
     assert match_candidate_to_store(candidate, [row1, row2]) is row2
+
+
+# --- Trends containment dedupe rule (H-3) --------------------------------
+
+from newsbot.dedupe import _trend_tokens, _trends_containment_match
+
+
+def test_trend_tokens_strips_stopwords():
+    """Stopwords are removed; remaining tokens returned."""
+    tokens = _trend_tokens("GTA 6 leak")
+    assert "gta" in tokens
+    assert "6" in tokens
+    assert "leak" in tokens
+    assert len(tokens) == 3
+
+
+def test_trend_tokens_drops_stopwords():
+    """High-frequency tokens are dropped."""
+    tokens = _trend_tokens("the best new game")
+    # "the", "best", "new" are stopwords
+    assert "game" in tokens
+    assert "the" not in tokens
+    assert "best" not in tokens
+    assert "new" not in tokens
+
+
+def test_trends_containment_matches_all_tokens():
+    """Trend 'GTA 6 leak' matches article 'GTA 6 gameplay leaks online ahead of…'."""
+    trends_item = new_candidate(
+        title="GTA 6 gameplay leaks online ahead of release",
+        url="https://ign.com/gta6",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+    )
+    article_item = new_candidate(
+        title="GTA 6 gameplay leaks online ahead of release",
+        url="https://ign.com/gta6-article",
+        source="rss",
+        source_name="IGN",
+    )
+    assert _trends_containment_match(trends_item, article_item) is True
+
+
+def test_trends_containment_does_not_match_partial():
+    """Trend 'GTA 6 leak' does NOT match 'Leak in GTA 5 RP server' —
+    not ALL trend tokens present (6 is missing, leak alone is <2 tokens after
+    normalization but the key is 'gta', '6', 'leak' and 5≠6)."""
+    trends_item = new_candidate(
+        title="Leak in GTA 5 RP server",
+        url="https://reddit.com/gta5rp",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+    )
+    article_item = new_candidate(
+        title="Leak in GTA 5 RP server",
+        url="https://reddit.com/gta5rp",
+        source="reddit",
+        source_name="r/gaming",
+    )
+    # "gta" is in the title, but "6" is not (it has "5"), and "leak" is there.
+    # Not ALL tokens present → no match.
+    assert _trends_containment_match(trends_item, article_item) is False
+
+
+def test_trends_containment_requires_min_2_tokens():
+    """A single-token trend title (<2 after stopword removal) never matches."""
+    trends_item = new_candidate(
+        title="Some article",
+        url="https://x.com",
+        source="trends",
+        source_name="trends/AI",  # 1 token
+    )
+    article_item = new_candidate(
+        title="AI breakthrough",
+        url="https://y.com",
+        source="hn",
+        source_name="Hacker News",
+    )
+    assert _trends_containment_match(trends_item, article_item) is False
+
+
+def test_trends_containment_not_scoped_to_non_trends():
+    """A non-trends candidate never triggers the containment rule."""
+    item = new_candidate(
+        title="GTA 6 leak",
+        url="https://x.com",
+        source="rss",
+        source_name="trends/GTA 6 leak",  # has trends/ prefix but source != trends
+    )
+    other = new_candidate(
+        title="GTA 6 leak confirmed",
+        url="https://y.com",
+        source="hn",
+        source_name="HN",
+    )
+    assert _trends_containment_match(item, other) is False
+
+
+def test_trends_containment_dedupe_merges():
+    """dedupe_and_merge merges a trends candidate with a matching article."""
+    trends = new_candidate(
+        title="GTA 6 gameplay leaks online ahead of release",
+        url="https://trends.google.com/abc",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+        reposts=1000,
+    )
+    article = new_candidate(
+        title="GTA 6 gameplay leaks online ahead of release",
+        url="https://ign.com/articles/gta6",
+        source="rss",
+        source_name="IGN",
+        upvotes=50,
+    )
+    # Put the article first, then the trends candidate.
+    out = dedupe_and_merge([article, trends])
+    assert len(out) == 1
+    merged = out[0]
+    # crosspost = 2 (trends + rss), reposts carried in, upvotes summed.
+    assert merged["crosspost_count"] == 2
+    assert merged["reposts"] == 1000
+    assert merged["upvotes"] == 50
+
+
+def test_trends_containment_dedupe_does_not_merge_partial():
+    """dedupe_and_merge does NOT merge trends 'GTA 6 leak' with 'Leak in GTA 5 RP'."""
+    trends = new_candidate(
+        title="Leak in GTA 5 RP server",
+        url="https://trends.google.com/abc",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+        reposts=200,
+    )
+    article = new_candidate(
+        title="Leak in GTA 5 RP server",
+        url="https://reddit.com/r/gaming/comments/x/gta5rp",
+        source="reddit",
+        source_name="r/gaming",
+        upvotes=100,
+    )
+    # URL and title match exactly → they WILL merge (title match, not trends containment).
+    # But the trends containment rule itself should not fire.
+    # Let's test with different URLs so only the trends rule is the candidate path:
+    trends2 = new_candidate(
+        title="Leak in GTA 5 RP server",
+        url="https://trends.google.com/def",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+        reposts=200,
+    )
+    article2 = new_candidate(
+        title="GTA 5 RP server has a leak",
+        url="https://reddit.com/r/gaming/comments/y/gta5rp2",
+        source="reddit",
+        source_name="r/gaming",
+        upvotes=100,
+    )
+    out = dedupe_and_merge([article2, trends2])
+    # trends2's title is "Leak in GTA 5 RP server" which is different from
+    # article2's title "GTA 5 RP server has a leak" — no exact/fuzzy match.
+    # The trends containment check: tokens from "GTA 6 leak" are [gta, 6, leak].
+    # "gta 5 rp server has a leak" contains "gta" and "leak" but NOT "6".
+    # So no match → 2 separate items.
+    assert len(out) == 2

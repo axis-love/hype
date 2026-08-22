@@ -707,3 +707,220 @@ def test_candidate_through_summarizer_payload():
     assert restored.candidate_id == "test_001"
     assert restored.importance == 8
     assert restored.reason == "Major breakthrough"
+
+
+# --- Google Trends collector (H-3) -------------------------------------
+
+from newsbot.collectors import trends as trends_collector
+
+
+def _trends_rss_item(
+    title: str = "marcus rashford",
+    traffic: str = "200+",
+    news_title: str | None = None,
+    news_url: str | None = None,
+    news_source: str = "The Sun",
+    published: str = "Sat, 22 Aug 2026 05:00:00 -0700",
+) -> dict[str, Any]:
+    """Create a fake feedparser entry as returned by Google Trends RSS."""
+    if news_title is None:
+        news_title = f"Article about {title}"
+    if news_url is None:
+        news_url = f"https://example.com/{title.replace(' ', '-')}"
+    return {
+        "title": title,
+        "ht_approx_traffic": traffic,
+        "published": published,
+        "ht_news_item_title": news_title,
+        "ht_news_item_url": news_url,
+        "ht_news_item_source": news_source,
+    }
+
+
+def _trends_parsed_feed(entries: list[dict[str, Any]]) -> MagicMock:
+    """Create a fake feedparser.ParseResult for Trends RSS."""
+    feed = MagicMock()
+    feed.entries = entries
+    return feed
+
+
+@pytest.mark.asyncio
+async def test_trends_collect_captures_traffic_and_news():
+    """Trends RSS → candidates with correct traffic→reposts mapping."""
+    entry = _trends_rss_item(
+        title="GTA 6 leak",
+        traffic="200+",
+        news_title="GTA 6 gameplay leaks online ahead of release",
+        news_url="https://www.ign.com/articles/gta-6-leak",
+    )
+    parsed = _trends_parsed_feed([entry])
+
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.trends.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.trends.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
+            items = await trends_collector.collect({"geos": ["US"], "limit": 3})
+
+    assert len(items) == 1
+    assert items[0]["source"] == "trends"
+    assert items[0]["source_name"] == "trends/GTA 6 leak"
+    assert items[0]["title"] == "GTA 6 gameplay leaks online ahead of release"
+    assert items[0]["url"] == "https://www.ign.com/articles/gta-6-leak"
+    assert items[0]["reposts"] == 200  # 200+ → 200
+
+
+@pytest.mark.asyncio
+async def test_trends_traffic_mapping_all_values():
+    """All traffic string values map to correct reposts."""
+    test_cases = [
+        ("200+", 200), ("500+", 500), ("1000+", 1000),
+        ("2000+", 2000), ("5000+", 5000), ("10000+", 10000),
+        ("Breakout", 5000), ("breakout", 5000),
+        ("", 0), (None, 0), ("unknown", 0),
+    ]
+    for traffic, expected in test_cases:
+        assert trends_collector._traffic_to_reposts(traffic) == expected
+
+
+@pytest.mark.asyncio
+async def test_trends_multiple_news_items_capped_at_3():
+    """Each trend produces at most 3 candidates (one per news link)."""
+    entry = {
+        "title": "trending topic",
+        "ht_approx_traffic": "1000+",
+        "ht_news_item_title": [
+            "News 1", "News 2", "News 3", "News 4",
+        ],
+        "ht_news_item_url": [
+            "https://a.com/1", "https://b.com/2",
+            "https://c.com/3", "https://d.com/4",
+        ],
+        "ht_news_item_source": ["A", "B", "C", "D"],
+        "published": "Sat, 22 Aug 2026 05:00:00 -0700",
+    }
+    parsed = _trends_parsed_feed([entry])
+
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.trends.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.trends.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
+            items = await trends_collector.collect({"geos": ["US"], "limit": 3})
+
+    assert len(items) == 3  # capped at 3
+    assert items[0]["title"] == "News 1"
+    assert items[2]["title"] == "News 3"
+
+
+@pytest.mark.asyncio
+async def test_trends_empty_feed():
+    """Empty RSS feed should return empty list."""
+    parsed = _trends_parsed_feed([])
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.trends.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.trends.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
+            items = await trends_collector.collect({"geos": ["US"]})
+
+    assert items == []
+
+
+@pytest.mark.asyncio
+async def test_trends_empty_geos_returns_empty():
+    """Empty geos list -> [] and no network activity."""
+    items = await trends_collector.collect({"geos": []})
+    assert items == []
+
+
+@pytest.mark.asyncio
+async def test_trends_multiple_geos():
+    """Multiple geos produce multiple fetches."""
+    parsed = _trends_parsed_feed([])
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.trends.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.trends.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
+            await trends_collector.collect({"geos": ["US", "GB", "JP"]})
+
+    assert mock_client.get.call_count == 3
+    urls = [call.args[0] for call in mock_client.get.call_args_list]
+    assert "geo=US" in urls[0]
+    assert "geo=GB" in urls[1]
+    assert "geo=JP" in urls[2]
+
+
+@pytest.mark.asyncio
+async def test_trends_collect_returns_candidate_instances():
+    """Trends collector should return Candidate instances."""
+    entry = _trends_rss_item()
+    parsed = _trends_parsed_feed([entry])
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.trends.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.trends.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
+            items = await trends_collector.collect({"geos": ["US"]})
+
+    from newsbot.collectors.base import Candidate
+    assert len(items) == 1
+    assert isinstance(items[0], Candidate)
+    assert items[0].source == "trends"
+
+
+@pytest.mark.asyncio
+async def test_trends_raw_json_has_trend_title():
+    """raw_json stores trend_title and traffic for dedupe/audit."""
+    entry = _trends_rss_item(title="GTA 6", traffic="Breakout")
+    parsed = _trends_parsed_feed([entry])
+    mock_response = MagicMock()
+    mock_response.content = b"<rss>mock</rss>"
+    mock_response.status_code = 200
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("newsbot.collectors.trends.httpx.AsyncClient", return_value=mock_client):
+        with patch("newsbot.collectors.trends.feedparser") as mock_fp:
+            mock_fp.parse = MagicMock(return_value=parsed)
+            items = await trends_collector.collect({"geos": ["US"]})
+
+    assert len(items) == 1
+    rj = items[0]["raw_json"]
+    assert rj["trend_title"] == "GTA 6"
+    assert rj["traffic"] == "Breakout"
+    assert rj["geo"] == "US"
