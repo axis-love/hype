@@ -51,7 +51,9 @@ _TRAFFIC_MAP: dict[str, int] = {
     "100000+": 100000,
     "500000+": 500000,
     "1000000+": 1000000,
-    "breakout": 5000,
+    # Breakout is Google's strongest signal (>5000% search growth) and
+    # comes with no number, so it sits at the top of the scale.
+    "breakout": 1000000,
 }
 
 

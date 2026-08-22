@@ -174,6 +174,9 @@ class TestExtractArticleMedia:
         def factory(**kwargs):
             return _FakeClient(html, images=images, videos=videos)
         monkeypatch.setattr("newsbot.images.httpx.Client", factory)
+        # The fixture PNG is 1x1; with Pillow installed the dimension gate
+        # would reject it. Dimensions are not what these tests exercise.
+        monkeypatch.setattr("newsbot.images._image_dims", lambda data: (800, 600))
 
     def test_dedupe_same_path_different_params(self, monkeypatch):
         """hero.png and hero.png?w=800 are ONE image; logo filtered out."""

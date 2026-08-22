@@ -564,8 +564,7 @@ def test_trend_tokens_drops_stopwords():
 
 def test_trends_containment_matches_all_tokens():
     """Trend 'GTA 6 leak' matches an article containing all trend tokens
-    as whole words. (Token-set containment is whole-token: 'leak' does
-    NOT match 'leaks' — titles must carry the exact token.)"""
+    as whole words."""
     trends_item = new_candidate(
         title="GTA 6 leak confirmed ahead of release",
         url="https://ign.com/gta6",
@@ -695,6 +694,72 @@ def test_trends_containment_not_scoped_to_non_trends():
         source_name="HN",
     )
     assert _trends_containment_match(item, other) is False
+
+
+def test_trends_containment_matches_inflected_token():
+    """Headlines inflect: trend 'GTA 6 leak' must match 'GTA 6 gameplay
+    leaks online…' (the plan's acceptance example). Prefix matching only
+    applies to tokens of 4+ chars, so '6' and 'ai' stay exact."""
+    trends_item = new_candidate(
+        title="GTA 6 leak",
+        url="https://trends.google.com/abc",
+        source="trends",
+        source_name="trends/GTA 6 leak",
+    )
+    assert _trends_containment_match(trends_item, new_candidate(
+        title="GTA 6 gameplay leaks online ahead of launch",
+        url="https://ign.com/gta6-leaks",
+        source="rss",
+        source_name="IGN",
+    )) is True
+    assert _trends_containment_match(trends_item, new_candidate(
+        title="GTA 6 footage leaked, Rockstar responds",
+        url="https://ign.com/gta6-leaked",
+        source="rss",
+        source_name="IGN",
+    )) is True
+    # Short tokens never prefix-match: '6' must not match '60fps'.
+    assert _trends_containment_match(trends_item, new_candidate(
+        title="GTA 60fps leak patch",
+        url="https://ign.com/gta-60fps",
+        source="rss",
+        source_name="IGN",
+    )) is False
+
+
+def test_reddit_link_post_merges_with_linked_article():
+    """A Reddit link post carries the article in raw_json.external_url;
+    it must merge with the RSS item for that article even when the
+    titles differ."""
+    article = new_candidate(
+        title="GTA 6 gameplay footage leaks online ahead of launch",
+        url="https://www.ign.com/articles/gta-6-leak?utm_source=rss",
+        source="rss",
+        source_name="IGN",
+    )
+    reddit_post = new_candidate(
+        title="Holy cow, GTA 6 just leaked",
+        url="https://www.reddit.com/r/gaming/comments/abc/holy_cow/",
+        source="reddit",
+        source_name="r/gaming",
+        upvotes=22000,
+        comments=1100,
+        raw_json={"external_url": "https://www.ign.com/articles/gta-6-leak"},
+    )
+    out = dedupe_and_merge([article, reddit_post])
+    assert len(out) == 1
+    assert out[0]["crosspost_count"] == 2
+    assert out[0]["upvotes"] == 22000
+
+    # Self-posts point at themselves — no spurious merges, no crash.
+    self_post = new_candidate(
+        title="Weekly discussion thread",
+        url="https://www.reddit.com/r/gaming/comments/def/weekly/",
+        source="reddit",
+        source_name="r/gaming",
+        raw_json={"external_url": "https://www.reddit.com/r/gaming/comments/def/weekly/"},
+    )
+    assert len(dedupe_and_merge([article, self_post])) == 2
 
 
 def test_trends_containment_dedupe_merges():

@@ -138,8 +138,19 @@ def _trends_containment_match(
         return False
 
     # ALL trend tokens must appear as whole tokens in the other title.
+    # Headlines inflect ("leak" → "leaks"/"leaked"), so a trend token of
+    # 4+ chars also matches a title token it prefixes. Short tokens and
+    # digits stay exact — that is what keeps "6" off "2026" and "ai" off
+    # "maintain".
     other_tokens = set(re.findall(r"[a-z0-9]+", other_title.lower()))
-    return set(tokens) <= other_tokens
+    return all(_trend_token_present(token, other_tokens) for token in tokens)
+
+
+def _trend_token_present(token: str, other_tokens: set[str]) -> bool:
+    """Whole-token match, with prefix matching for tokens of 4+ chars."""
+    if token in other_tokens:
+        return True
+    return len(token) >= 4 and any(other.startswith(token) for other in other_tokens)
 
 
 
@@ -235,6 +246,23 @@ def _canonical_url(url: Any) -> str:
 
 def _normalize_title(title: Any) -> str:
     return " ".join(str(title or "").lower().split())
+
+
+def _external_url_key(item: dict[str, Any]) -> str:
+    """Canonical key of the link a post points at (raw_json.external_url).
+
+    Reddit link posts carry the permalink as ``url`` and the linked
+    article in ``raw_json.external_url``. Self-posts point at
+    themselves, which canonicalizes to the permalink — harmless, the key
+    already exists. Returns "" when there is no usable external link.
+    """
+    raw_json = item.get("raw_json")
+    if not isinstance(raw_json, dict):
+        return ""
+    external = str(raw_json.get("external_url") or "").strip()
+    if not external.startswith(("http://", "https://")):
+        return ""
+    return _canonical_url(external)
 
 
 def _github_repo_key(item: dict[str, Any]) -> str:
@@ -459,6 +487,7 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     for item in items:
         canon = _canonical_url(item.get("url"))
+        external = _external_url_key(item)
         norm_title = _normalize_title(item.get("title"))
         gh_key = _github_repo_key(item)
 
@@ -467,9 +496,13 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # 1. GitHub repo full_name (strongest for GitHub items).
         if gh_key and gh_key in gh_index:
             match_idx = gh_index[gh_key]
-        # 2. Canonical URL.
+        # 2. Canonical URL — the item's own URL, or the article a Reddit
+        #    link post points at (so a Reddit post about the IGN story
+        #    merges with the IGN RSS item instead of relying on titles).
         elif canon and canon in url_index:
             match_idx = url_index[canon]
+        elif external and external in url_index:
+            match_idx = url_index[external]
         # 3. Exact normalized title.
         elif norm_title and norm_title in title_index:
             match_idx = title_index[norm_title]
@@ -509,6 +542,8 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             idx = len(result) - 1
             if canon:
                 url_index[canon] = idx
+            if external:
+                url_index[external] = idx
             if norm_title:
                 title_index[norm_title] = idx
             if gh_key:
@@ -522,6 +557,8 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # splitting into separate groups.
             if canon:
                 url_index[canon] = match_idx
+            if external:
+                url_index[external] = match_idx
             if norm_title:
                 title_index[norm_title] = match_idx
             if gh_key:

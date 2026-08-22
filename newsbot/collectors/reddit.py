@@ -52,7 +52,8 @@ log = logging.getLogger(__name__)
 
 # Devvit CLI's public client id — there is no secret (Responsible Builder
 # Policy killed self-service script apps; Anton registered a Devvit app).
-_REDDIT_CLIENT_ID = "TWTsqXa53CexlrYGBWaesQ"
+# REDDIT_CLIENT_ID overrides it so a rotation is a config change, not a deploy.
+_REDDIT_CLIENT_ID = os.environ.get("REDDIT_CLIENT_ID", "").strip() or "TWTsqXa53CexlrYGBWaesQ"
 
 # User-Agent for the token endpoint (must match what Devvit CLI uses).
 _REDDIT_TOKEN_USER_AGENT = "devvit-cli"
