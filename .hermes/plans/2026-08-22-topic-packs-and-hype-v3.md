@@ -185,3 +185,26 @@ tuning can't regress silently.
 
 Credentials needed from Anton before H-1: Reddit script app `client_id` + `client_secret`
 (reddit.com/prefs/apps). Nothing else — Trends RSS is keyless.
+
+## Addendum 2026-08-22: Reddit auth — Devvit token, not script app
+
+Self-service script-app creation is dead (Responsible Builder Policy; `prefs/apps` is
+gated). Anton registered a **Devvit app** (`cybercream-hypebot`) instead. Verified
+working from the hype host the same day:
+
+- **API calls:** `Bearer <access_token>` against `oauth.reddit.com`. Batched
+  `/r/a+b+c/hot.json?limit=N&raw_json=1` returns full `score`, `num_comments`,
+  `subreddit`, `preview`, `over_18`, `is_self`, `permalink`, `url`. Real counts confirmed
+  (e.g. score 21,675 / 1,113 comments on r/gaming).
+- **Token:** Devvit-issued permanent user token, stored base64-JSON at `~/.devvit/token`
+  (keys: `refreshToken`, `accessToken`, `expiresAt`, `scope`, `tokenType`). Access token
+  is a JWT, TTL 86400 s, scope `*`, tied to Anton's account.
+- **Refresh (verified):** `POST https://www.reddit.com/api/v1/access_token` with
+  `grant_type=refresh_token`, `Authorization: Basic base64("TWTsqXa53CexlrYGBWaesQ:")`
+  (Devvit CLI's public copy-paste client id — no secret), `User-Agent: devvit-cli`.
+  Refresh token is permanent and non-rotating; access TTL 86400 s.
+
+**Change to §3 (Reddit via JSON API):** no `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`.
+The collector takes `REDDIT_REFRESH_TOKEN` env, gets/refreshes the access token itself
+using the public client id above, caches for TTL, refreshes on 401. Everything else in
+§3 (batching, sequential groups + delay, retry-once-on-429, field mapping) stands.
