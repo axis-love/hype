@@ -50,7 +50,7 @@ class TestTopicMatching:
         """Multi-word phrases like 'language model' should use substring matching."""
         item = {"title": "New language model architecture", "snippet": "", "raw_text": ""}
         bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
-        assert bonus >= DEFAULT_TOPIC_BOOST["llm"]
+        assert bonus >= DEFAULT_TOPIC_BOOST["ai"]
 
     def test_long_keyword_substring_match(self):
         """Long keywords (>4 chars) should use substring matching."""
@@ -267,8 +267,8 @@ class TestTopicMatchingBoundary:
         """'unity' should NOT match 'community'."""
         item = {"title": "Community platform launches", "snippet": "", "raw_text": ""}
         bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
-        # Should NOT get the 'unity' boost
-        assert bonus < DEFAULT_TOPIC_BOOST["unity"]
+        # Should NOT get the 'gamedev' boost (unity is a gamedev keyword now)
+        assert bonus < DEFAULT_TOPIC_BOOST["gamedev"]
 
     def test_ar_does_not_match_article(self):
         """'ar' should NOT match 'article'."""
@@ -280,7 +280,7 @@ class TestTopicMatchingBoundary:
         """'Unity' as a standalone word should match."""
         item = {"title": "Unity 6 released", "snippet": "", "raw_text": ""}
         bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
-        assert bonus >= DEFAULT_TOPIC_BOOST["unity"]
+        assert bonus >= DEFAULT_TOPIC_BOOST["gamedev"]
 
     def test_long_single_word_boundary(self):
         """Longer single words like 'robot' should use word-boundary too."""
@@ -293,7 +293,7 @@ class TestTopicMatchingBoundary:
         """Multi-word phrases should still use substring matching."""
         item = {"title": "New language model architecture", "snippet": "", "raw_text": ""}
         bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
-        assert bonus >= DEFAULT_TOPIC_BOOST["llm"]
+        assert bonus >= DEFAULT_TOPIC_BOOST["ai"]
 
 
 class TestNestedListValidation:

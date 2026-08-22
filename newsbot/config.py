@@ -13,6 +13,12 @@ import math
 from typing import Any
 
 from core.settings_store import SettingsStore
+from newsbot.topics import (
+    DEFAULT_TOPIC_PACKS,
+    derive_config as _derive_topic_config,
+    merge_packs as _merge_topic_packs,
+    validate_topic_overrides as _validate_topic_overrides,
+)
 
 
 # --- Defaults (from the concept doc §8) -------------------------------
@@ -20,7 +26,7 @@ from core.settings_store import SettingsStore
 DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "hackernews": 1.2,
     "hn": 1.2,  # alias — HN collector uses "hn" as source
-    "reddit": 1.0,
+    "reddit": 0.8,  # real counts now; start lower than HN
     "github": 1.1,
     "producthunt": 0.8,
     "huggingface_papers": 1.2,
@@ -35,37 +41,14 @@ _SOURCE_ALIASES: dict[str, str] = {
     "hn": "hackernews",
 }
 
-DEFAULT_TOPIC_BOOST: dict[str, int] = {
-    "ai": 20,
-    "llm": 20,
-    "local_llm": 25,
-    "coding_agents": 25,
-    "gamedev": 15,
-    "unity": 12,
-    "unreal": 12,
-    "godot": 12,
-    "vr_ar": 18,
-    "robotics": 18,
-    "github_trending": 15,
-    "new_research": 20,
-}
+# --- Topic packs (derived from DEFAULT_TOPIC_PACKS) -------------------
 
-# Topic keyword → boost-key mapping. Title/snippet containing any keyword
-# triggers the boost.
-TOPIC_KEYWORDS: dict[str, list[str]] = {
-    "ai": ["ai", "artificial intelligence", "machine learning", "ml", "gpt", "claude", "gemini", "llama"],
-    "llm": ["llm", "language model", "transformer", "inference", "quantize", "quantized", "quantization", "fine-tune", "fine tune"],
-    "local_llm": ["local llm", "ollama", "llama.cpp", "lm studio", "gguf", "exllama", "vllm"],
-    "coding_agents": ["coding agent", "code agent", "dev agent", "copilot", "cursor", "aider", "agentic"],
-    "gamedev": ["game dev", "gamedev", "game engine", "unity3d", "unreal engine", "godot"],
-    "unity": ["unity", "unity3d", "unityengine"],
-    "unreal": ["unreal", "ue5", "unrealengine"],
-    "godot": ["godot", "gdscript"],
-    "vr_ar": ["vr", "ar", "xr", "vr/ar", "virtual reality", "augmented reality", "metaverse", "webxr", "vision pro"],
-    "robotics": ["robotics", "robot", "humanoid", "actuator", "ros2", "ros 2", "drone"],
-    "github_trending": ["trending", "stars", "github"],
-    "new_research": ["research", "paper", "arxiv", "breakthrough", "benchmark", "study"],
-}
+# Backward-compat: DEFAULT_TOPIC_BOOST and TOPIC_KEYWORDS are derived
+# from the topic packs so existing imports keep working. The pack table
+# in newsbot/topics.py is the source of truth.
+_DERIVED = _derive_topic_config(DEFAULT_TOPIC_PACKS)
+DEFAULT_TOPIC_BOOST: dict[str, int] = _DERIVED["topic_boost"]
+TOPIC_KEYWORDS: dict[str, list[str]] = _DERIVED["topic_keywords"]
 
 DEFAULT_RUN: dict[str, Any] = {
     "lookback_hours": 48,
@@ -145,10 +128,21 @@ DEFAULT_SOURCES: dict[str, Any] = {
 def load_config(settings: SettingsStore) -> dict[str, Any]:
     """Read the 'news' namespace from SettingsStore and merge with defaults.
 
+    Topic packs (newsbot/topics.py) are the source of truth for which
+    subreddits, RSS feeds, GitHub queries, and topic boosts are active.
+    The operator can override individual packs via the settings key
+    'news.topics' (partial dict merged over defaults, e.g.
+    {"gaming": {"enabled": true}, "ai": {"enabled": false}}).
+
+    Explicit 'news.sources' overrides are merged over the pack-derived
+    sources — use this for non-topic sources (HN front page) or to
+    add/replace specific source blocks.
+
     Recognized keys (all optional; defaults applied if missing):
-      news.sources          — dict[source] -> source config (DEFAULT_SOURCES)
+      news.topics          — partial dict merged over DEFAULT_TOPIC_PACKS
+      news.sources         — dict[source] -> source config (merged over packs)
       news.source_weights   — dict (DEFAULT_SOURCE_WEIGHTS)
-      news.topic_boost      — dict (DEFAULT_TOPIC_BOOST)
+      news.topic_boost      — dict (merged over pack-derived boosts)
       news.lookback_hours   — int (48)
       news.max_candidates    — int (80)
       news.max_final_news    — int (14)
@@ -162,14 +156,48 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
     """
     raw = settings.list("news") if hasattr(settings, "list") else {}
 
-    sources = _coerce_dict(raw.get("sources"), DEFAULT_SOURCES, key="sources")
+    # --- Topic packs: the source of truth for sources/boosts/keywords ---
+    topic_overrides = _coerce_dict(raw.get("topics"), {}, key="topics")
+    topic_errors = _validate_topic_overrides(topic_overrides)
+    if topic_errors:
+        raise ValueError(
+            "Configuration validation failed:\n  " + "\n  ".join(topic_errors)
+        )
+    packs = _merge_topic_packs(topic_overrides)
+    derived = _derive_topic_config(packs)
+
+    # Pack-derived sources are the defaults; explicit news.sources overrides
+    # are merged ON TOP (per-source-block: if the operator sets
+    # news.sources.reddit, that replaces the reddit block entirely).
+    explicit_sources = _coerce_dict(raw.get("sources"), {}, key="sources")
+    sources = dict(derived["sources"])
+    # HN is not topic-specific — keep it as a default if not explicitly set.
+    if "hackernews" not in sources:
+        sources["hackernews"] = dict(DEFAULT_SOURCES["hackernews"])
+    # HuggingFace papers: new_research pack lives here, but the collector
+    # needs its own source block.
+    if "huggingface_papers" not in sources:
+        sources["huggingface_papers"] = dict(DEFAULT_SOURCES["huggingface_papers"])
+    # Merge explicit overrides over pack-derived sources.
+    for src_key, src_cfg in explicit_sources.items():
+        if src_cfg:
+            sources[src_key] = src_cfg
+        else:
+            sources.pop(src_key, None)
     # Drop sources the operator disabled (set to None or empty dict).
     sources = {k: v for k, v in sources.items() if v}
+
+    # Topic boosts: pack-derived + explicit overrides.
+    topic_boost = dict(derived["topic_boost"])
+    topic_boost.update(_coerce_dict(raw.get("topic_boost"), {}, key="topic_boost"))
 
     config = {
         "sources": sources,
         "source_weights": _coerce_dict(raw.get("source_weights"), DEFAULT_SOURCE_WEIGHTS, key="source_weights"),
-        "topic_boost": {**DEFAULT_TOPIC_BOOST, **_coerce_dict(raw.get("topic_boost"), {}, key="topic_boost")},
+        "topic_boost": topic_boost,
+        "topic_keywords": derived["topic_keywords"],
+        "source_topic_map": derived["source_topic_map"],
+        "topic_packs": packs,
         "lookback_hours": _as_int(raw.get("lookback_hours"), DEFAULT_RUN["lookback_hours"], key="lookback_hours"),
         "max_candidates": _as_int(raw.get("max_candidates"), DEFAULT_RUN["max_candidates"], key="max_candidates"),
         "max_final_news": _as_int(raw.get("max_final_news"), DEFAULT_RUN["max_final_news"], key="max_final_news"),

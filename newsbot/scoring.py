@@ -8,8 +8,15 @@ Implements the architecture spec §8:
                  + log1p(stars)*15   + log1p(reposts)*20
   recency        = exp(-age_hours / lookback_hours)  (exponential decay)
   source_weight  = SOURCE_WEIGHTS[source] (default 1.0)
-  topic_bonus    = sum of boosts for topics matched in title/snippet
+  topic_bonus    = max(boost of matched topics) — NOT sum (H-2 change)
   crosspost_bonus= 30 if the item appeared on >=2 sources (stamped by dedupe)
+
+H-2 changes:
+  - topic_bonus is max(boost), not sum. Stacking stops deciding rankings.
+  - origin_topic: a candidate's source_name is looked up in the pack
+    table; the origin topic counts as matched even with zero keyword hits.
+  - The keyword table comes from config["topic_keywords"] (pack-derived),
+    not the module-level TOPIC_KEYWORDS.
 
 The code discovers hype; the LLM only writes the digest.
 """
@@ -21,23 +28,25 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from newsbot.config import TOPIC_KEYWORDS, _SOURCE_ALIASES
+from newsbot.config import _SOURCE_ALIASES
 
 # Pre-compiled regex patterns for short keywords that need word-boundary matching.
 # Short keywords (≤3 chars or single-word) get \b boundaries to prevent
 # matching substrings like "ai" in "email". Multi-word phrases use substring.
-_SHORT_KEYWORD_PATTERNS: dict[str, list[tuple[re.Pattern, str]]] = {}
+# This cache is rebuilt when config provides a new keyword table.
+_SHORT_KEYWORD_PATTERNS: dict[str, list[tuple[re.Pattern | None, str]]] = {}
 
 
-def _build_keyword_patterns() -> None:
+def _build_keyword_patterns(topic_keywords: dict[str, list[str]]) -> None:
     """Pre-compile keyword patterns for boundary-aware matching.
 
     Single-word keywords use word-boundary regex to prevent false positives
     like "ai" matching "email", "unity" matching "community".
     Multi-word phrases use substring matching (they are already specific enough).
     """
-    for boost_key, keywords in TOPIC_KEYWORDS.items():
-        patterns: list[tuple[re.Pattern, str]] = []
+    _SHORT_KEYWORD_PATTERNS.clear()
+    for boost_key, keywords in topic_keywords.items():
+        patterns: list[tuple[re.Pattern | None, str]] = []
         for kw in keywords:
             kw_lower = kw.lower()
             if " " in kw:
@@ -50,7 +59,9 @@ def _build_keyword_patterns() -> None:
         _SHORT_KEYWORD_PATTERNS[boost_key] = patterns
 
 
-_build_keyword_patterns()
+# Build with defaults at import time so topic_bonus() works standalone.
+from newsbot.config import TOPIC_KEYWORDS as _DEFAULT_TOPIC_KEYWORDS
+_build_keyword_patterns(_DEFAULT_TOPIC_KEYWORDS)
 
 
 def _validate_now(now: datetime | None) -> datetime:
@@ -120,6 +131,9 @@ def _topic_bonus_with_matches(
 ) -> tuple[int, list[str]]:
     """Compute topic bonus and matched topic keys in a single pass.
 
+    H-2: topic_bonus = max(boost of matched topics), NOT sum.
+    Stacking stops deciding rankings; engagement does.
+
     Internal helper used by score_breakdown(). Public topic_bonus() wraps
     this to preserve its int-only API.
     """
@@ -130,7 +144,7 @@ def _topic_bonus_with_matches(
     if not haystack:
         return 0, []
 
-    total = 0
+    best = 0
     matched: list[str] = []
     for boost_key, patterns in _SHORT_KEYWORD_PATTERNS.items():
         weight = topic_boost.get(boost_key, 0)
@@ -140,26 +154,30 @@ def _topic_bonus_with_matches(
             if regex is not None:
                 # Short keyword: word-boundary match.
                 if regex.search(haystack):
-                    total += weight
+                    if weight > best:
+                        best = weight
                     matched.append(boost_key)
                     break
             else:
                 # Multi-word phrase or long keyword: substring match.
                 if kw_lower in haystack:
-                    total += weight
+                    if weight > best:
+                        best = weight
                     matched.append(boost_key)
                     break
-    return total, matched
+    return best, matched
 
 
 def topic_bonus(item: dict[str, Any], topic_boost: dict[str, int]) -> int:
-    """Sum boosts for topics whose keywords appear in title or snippet.
+    """Max boost among topics whose keywords appear in title or snippet.
+
+    H-2: returns max(boost), not sum. Stacking stops deciding rankings.
 
     Short keywords (≤4 chars, single word) use word-boundary matching to
     prevent false positives like "ai" matching "email". Multi-word phrases
     and longer keywords use substring matching.
 
-    Returns the total bonus (int).
+    Returns the bonus (int).
     """
     bonus, _ = _topic_bonus_with_matches(item, topic_boost)
     return bonus
@@ -191,12 +209,22 @@ def score_breakdown(
     and the /scores command (Task 3). All components are computed in a
     single pass — topic_bonus and matched_topics never drift apart.
 
+    H-2: topic_bonus = max(boost of matched topics). The origin topic
+    (derived from the candidate's source_name via the pack table) counts
+    as matched even with zero keyword hits. Keyword patterns are rebuilt
+    from config["topic_keywords"] if present.
+
     Returns dict with keys:
         score, engagement, recency, source_weight, topic_bonus,
-        crosspost_bonus, penalty, matched_topics, scored_at
+        crosspost_bonus, penalty, matched_topics, origin_topic, scored_at
     """
     source_weights: dict[str, float] = config.get("source_weights") or {}
     topic_boost: dict[str, int] = config.get("topic_boost") or {}
+
+    # H-2: rebuild keyword patterns from config if the keyword table changed.
+    topic_keywords = config.get("topic_keywords")
+    if topic_keywords is not None:
+        _build_keyword_patterns(topic_keywords)
 
     src = str(item.get("source") or "").strip()
     src = _SOURCE_ALIASES.get(src, src)
@@ -221,6 +249,26 @@ def score_breakdown(
     rec = recency_decay(item.get("published_at"), lookback_hours=lookback_hours, now=effective_now)
     topics, matched = _topic_bonus_with_matches(item, topic_boost)
 
+    # H-2: origin_topic — look up source_name in the pack table.
+    # The origin topic counts as matched even with zero keyword hits.
+    source_topic_map: dict[str, str] = config.get("source_topic_map") or {}
+    origin_topic: str | None = None
+    source_name = str(item.get("source_name") or "").strip()
+    if source_name:
+        # source_name may be "r/gaming" or "IGN" or "Hacker News".
+        # For merged items, source_name may be "r/gaming + IGN" — check each part.
+        for part in source_name.split(" + "):
+            part = part.strip()
+            if part and part in source_topic_map:
+                origin_topic = source_topic_map[part]
+                break
+    if origin_topic and origin_topic not in matched:
+        origin_boost = topic_boost.get(origin_topic, 0)
+        if origin_boost > 0:
+            matched.append(origin_topic)
+            if origin_boost > topics:
+                topics = origin_boost
+
     crosspost = 0.0
     cp_count = int(item.get("crosspost_count") or 1)
     if cp_count >= 2:
@@ -240,6 +288,7 @@ def score_breakdown(
         "crosspost_bonus": crosspost,
         "penalty": penalty,
         "matched_topics": matched,
+        "origin_topic": origin_topic,
         "scored_at": effective_now.isoformat(timespec="seconds"),
         "lookback_hours": lookback_hours,
         # Raw scoring inputs (for DB persistence and recalculation).
