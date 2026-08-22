@@ -105,7 +105,7 @@ groups + delay, same retry-once-on-429. New: client-credentials token
 (`geo` configurable, list). Each story → one Candidate per related news link
 (cap 3): title = news headline, url = news link, source=`trends`,
 source_name=`trends/<topic title>`, `reposts` = traffic mapped
-`200+→200, 1000+→1000, ... , Breakout→5000`. The existing dedupe merges it with the
+`200+→200, 1000+→1000, …, 1000000+→1000000, Breakout→1000000` (Breakout is the top signal). The existing dedupe merges it with the
 same article from IGN/Reddit via canonical URL or title; crosspost bonus fires.
 
 One new dedupe rule, scoped to `source == "trends"`: the trend title's tokens

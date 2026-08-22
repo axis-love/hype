@@ -832,7 +832,7 @@ async def test_trends_traffic_mapping_all_values():
     test_cases = [
         ("200+", 200), ("500+", 500), ("1000+", 1000),
         ("2000+", 2000), ("5000+", 5000), ("10000+", 10000),
-        ("Breakout", 5000), ("breakout", 5000),
+        ("1000000+", 1000000), ("Breakout", 1000000), ("breakout", 1000000),
         ("", 0), (None, 0), ("unknown", 0),
     ]
     for traffic, expected in test_cases:
