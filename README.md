@@ -146,6 +146,7 @@ each story costs at most one styling LLM call.
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
 | `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
+| `REDDIT_REFRESH_TOKEN` | Reddit refresh token (Devvit app; required for real vote/comment counts) |
 | `NEWS_TZ` | Wall-clock timezone for all schedules (default `Asia/Bangkok`) |
 | `NEWS_GEN_HOURS` | Comma-separated local hours for digests (default `5,17`; catch-up fires once after downtime) |
 | `NEWS_STORE_CAP` | Max unposted rows kept in the store (default 36). After each digest the coldest rows are evicted. Known trade-off: an evicted story stays in `seen` for `NEWS_RETENTION_SEEN_DAYS` and cannot re-enter on the same URL. |
