@@ -390,6 +390,7 @@ async def _run_generation_pipeline(
             "crosspost_bonus": float(bd.get("crosspost_bonus") or 0.0),
             "penalty": float(bd.get("penalty")) if bd.get("penalty") is not None else 1.0,
             "matched_topics": bd.get("matched_topics") or [],
+            "origin_topic": bd.get("origin_topic") or "",
         })
         log.info(log_line)
 
@@ -741,7 +742,9 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
         merge_note = f" merge={merge}×{mult:.2f}" if merge > 1 else ""
         lines.append(f"{i}. {effective:.1f} eff ({raw_temp:.1f} raw{merge_note}) [{flag}]")
         lines.append(title)
-        lines.append(f"source={source} | published={(row.get('published_at') or '')[:10] or 'unknown'}")
+        origin = row.get("origin_topic")
+        origin_str = f" | topic={origin}" if origin else ""
+        lines.append(f"source={source}{origin_str} | published={(row.get('published_at') or '')[:10] or 'unknown'}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -834,6 +837,7 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
         ("crosspost_bonus", "Crosspost bonus"),
         ("penalty", "Penalty"),
         ("matched_topics", "Matched topics"),
+        ("origin_topic", "Origin topic"),
     ]
     for key, label in score_keys:
         val = row.get(key)

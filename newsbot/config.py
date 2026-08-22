@@ -100,29 +100,7 @@ DEFAULT_RECAP_PROMPT = (
 
 DEFAULT_SOURCES: dict[str, Any] = {
     "hackernews": {"tags": "front_page", "limit": 15},
-    "reddit": {
-        "subreddits": [
-            "LocalLLaMA", "MachineLearning", "artificial", "singularity",
-            "programming", "gamedev", "Unity3D", "unrealengine", "Godot",
-            "virtualreality", "OculusQuest", "selfhosted", "opensource",
-        ],
-        "limit": 10,
-    },
-    "github": {
-        "queries": ["llm", "agent", "coding-agent", "rag", "local-llm",
-                    "unity", "game-engine", "unreal", "godot", "webxr", "vr", "robotics"],
-        "limit": 5,
-        "sort": "stars",
-    },
     "huggingface_papers": {"limit": 10},
-    "rss": {
-        "feeds": [
-            {"name": "OpenAI", "url": "https://openai.com/news/rss.xml", "weight": 1.3},
-            {"name": "Google DeepMind", "url": "https://deepmind.google/discover/blog/rss.xml", "weight": 1.3},
-            {"name": "Unity", "url": "https://blog.unity.com/feed", "weight": 1.1},
-            {"name": "Unreal Engine", "url": "https://www.unrealengine.com/en-US/feed", "weight": 1.1},
-        ],
-    },
     "trends": {
         "geos": ["US"],
         "limit": 3,
@@ -183,6 +161,11 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
     # needs its own source block.
     if "huggingface_papers" not in sources:
         sources["huggingface_papers"] = dict(DEFAULT_SOURCES["huggingface_papers"])
+    # Google Trends is not topic-specific — keep it as a default if not
+    # explicitly set. Without this the collector never dispatches in prod
+    # (collect_all only runs trends when "trends" is in config["sources"]).
+    if "trends" not in sources:
+        sources["trends"] = dict(DEFAULT_SOURCES["trends"])
     # Merge explicit overrides over pack-derived sources.
     for src_key, src_cfg in explicit_sources.items():
         if src_cfg:

@@ -22,15 +22,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 
-try:
-    import feedparser
-except ImportError:  # pragma: no cover
-    feedparser = None
-
-from newsbot.collectors.base import Candidate, new_candidate, strip_html, truncate, to_iso_utc
+from newsbot.collectors.base import Candidate, new_candidate, to_iso_utc
 from newsbot.collectors._shared import get_shared_semaphore
 
 log = logging.getLogger(__name__)
@@ -77,49 +73,36 @@ def _traffic_to_reposts(traffic: str | None) -> int:
         return 0
 
 
-def _extract_news_items(entry: Any) -> list[dict[str, str]]:
-    """Extract news items from a feedparser entry.
+_HT_NS = "https://trends.google.com/trending/rss"
+_HT = f"{{{_HT_NS}}}"
 
-    feedparser returns ht_news_item_title as a str (single item) or
-    list[str] (multiple items). Same for ht_news_item_url and
-    ht_news_item_source.
+
+def _extract_news_items(item: ET.Element) -> list[dict[str, str]]:
+    """Extract news items from one ``<item>`` element.
+
+    Each trend carries up to three ``ht:news_item`` children, each with
+    ``ht:news_item_title`` / ``ht:news_item_url`` / ``ht:news_item_source``
+    subelements. feedparser collapses the repeated elements into a single
+    concatenated string, so we parse the XML directly with ElementTree.
     """
-    titles = entry.get("ht_news_item_title")
-    urls = entry.get("ht_news_item_url")
-    sources = entry.get("ht_news_item_source")
-
-    # Normalize to lists.
-    if isinstance(titles, str):
-        titles = [titles]
-    if isinstance(urls, str):
-        urls = [urls]
-    if isinstance(sources, str):
-        sources = [sources]
-    if not isinstance(titles, list):
-        titles = []
-    if not isinstance(urls, list):
-        urls = []
-    if not isinstance(sources, list):
-        sources = []
-
     items: list[dict[str, str]] = []
-    count = min(len(titles), len(urls), _MAX_NEWS_PER_TREND)
-    for i in range(count):
-        title = str(titles[i]).strip()
-        url = str(urls[i]).strip()
+    for news_el in item.findall(f"{_HT}news_item"):
+        title_el = news_el.find(f"{_HT}news_item_title")
+        url_el = news_el.find(f"{_HT}news_item_url")
+        source_el = news_el.find(f"{_HT}news_item_source")
+        title = (title_el.text or "").strip() if title_el is not None else ""
+        url = (url_el.text or "").strip() if url_el is not None else ""
+        source = (source_el.text or "").strip() if source_el is not None else ""
         if title and url and url.startswith("http"):
-            source = str(sources[i]).strip() if i < len(sources) else ""
             items.append({"title": title, "url": url, "source": source})
+        if len(items) >= _MAX_NEWS_PER_TREND:
+            break
     return items
 
 
 async def _fetch_one_geo(geo: str, limit: int) -> list[Candidate]:
     """Fetch trending RSS for one geo and return candidates."""
     url = f"{_TRENDS_RSS_BASE}?geo={geo}"
-
-    if feedparser is None:
-        log.warning("Trends fetch skipped: feedparser not installed")
-        return []
 
     sem = get_shared_semaphore()
     async with sem:
@@ -137,22 +120,25 @@ async def _fetch_one_geo(geo: str, limit: int) -> list[Candidate]:
             return []
 
     try:
-        parsed = feedparser.parse(content)
+        root = ET.fromstring(content)
     except Exception as exc:
         log.warning("Trends parse failed for geo=%s url=%s: %s", geo, url, exc)
         return []
 
     items: list[Candidate] = []
-    for entry in list(getattr(parsed, "entries", []) or []):
-        trend_title = str(entry.get("title") or "").strip()
+    for item in root.findall(".//item"):
+        title_el = item.find("title")
+        trend_title = (title_el.text or "").strip() if title_el is not None else ""
         if not trend_title:
             continue
 
-        traffic = entry.get("ht_approx_traffic")
+        traffic_el = item.find(f"{_HT}approx_traffic")
+        traffic = (traffic_el.text or "").strip() if traffic_el is not None else ""
         reposts = _traffic_to_reposts(traffic)
-        published = entry.get("published") or entry.get("updated")
+        pub_el = item.find("pubDate")
+        published = (pub_el.text or "").strip() if pub_el is not None else ""
 
-        news_items = _extract_news_items(entry)
+        news_items = _extract_news_items(item)
         if not news_items:
             continue
 

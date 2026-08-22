@@ -112,8 +112,12 @@ def _trends_containment_match(
     """Check if a trends candidate's trend tokens are ALL in another title.
 
     Returns True if the trend title (from source_name "trends/<title>")
-    produces ≥2 non-stopword tokens and ALL of those tokens appear in the
-    other candidate's title. Scoped to source == "trends".
+    produces ≥2 non-stopword tokens and ALL of those tokens appear as
+    WHOLE TOKENS in the other candidate's title. Scoped to
+    source == "trends".
+
+    Token-set containment (not substring): substring matching merged
+    "GTA 6 leak" with GTA 5 articles ("6" in "2026", "ai" in "maintain").
     """
     # Only apply to trends candidates.
     if str(trends_item.get("source") or "") != "trends":
@@ -133,8 +137,9 @@ def _trends_containment_match(
     if not other_title:
         return False
 
-    # ALL trend tokens must be present in the other candidate's title.
-    return all(token in other_title for token in tokens)
+    # ALL trend tokens must appear as whole tokens in the other title.
+    other_tokens = set(re.findall(r"[a-z0-9]+", other_title.lower()))
+    return set(tokens) <= other_tokens
 
 
 

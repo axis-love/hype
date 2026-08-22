@@ -162,9 +162,9 @@ class TestRemovedAPIs:
         assert items_exists is None, "news_items table should be dropped"
         assert digests_exists is None, "news_digests table should be dropped"
 
-    def test_schema_version_is_5(self, store):
-        """Migration 5 (message_id column) should have been applied."""
+    def test_schema_version_is_6(self, store):
+        """Migration 6 (origin_topic column) should have been applied."""
         row = store._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert row["v"] == 5
+        assert row["v"] == 6

@@ -30,7 +30,6 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
             "quantize", "quantized", "quantization", "fine-tune", "fine tune",
             "local llm", "ollama", "llama.cpp", "lm studio", "gguf", "exllama", "vllm",
             "coding agent", "code agent", "dev agent", "copilot", "cursor", "aider", "agentic",
-            "research", "paper", "arxiv", "breakthrough", "benchmark", "study",
         ],
         "subreddits": [
             "LocalLLaMA", "MachineLearning", "artificial", "singularity",
@@ -40,6 +39,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
             {"name": "Google DeepMind", "url": "https://deepmind.google/discover/blog/rss.xml", "weight": 1.3},
         ],
         "github_queries": ["llm", "agent", "coding-agent", "rag", "local-llm"],
+        "source_names": [],
     },
     "gaming": {
         "enabled": True,
@@ -56,6 +56,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
             {"name": "Eurogamer", "url": "https://www.eurogamer.net/feed", "weight": 1.1},
         ],
         "github_queries": [],
+        "source_names": [],
     },
     "gamedev": {
         "enabled": True,
@@ -73,6 +74,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
             {"name": "Unreal Engine", "url": "https://www.unrealengine.com/en-US/feed", "weight": 1.1},
         ],
         "github_queries": ["unity", "game-engine", "unreal", "godot"],
+        "source_names": [],
     },
     "science": {
         "enabled": True,
@@ -86,6 +88,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
         ],
         "feeds": [],
         "github_queries": [],
+        "source_names": [],
     },
     "hardware": {
         "enabled": True,
@@ -99,6 +102,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
         ],
         "feeds": [],
         "github_queries": [],
+        "source_names": [],
     },
     "vr_ar": {
         "enabled": True,
@@ -112,6 +116,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
         ],
         "feeds": [],
         "github_queries": ["webxr", "vr"],
+        "source_names": [],
     },
     "robotics": {
         "enabled": True,
@@ -125,14 +130,24 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
         ],
         "feeds": [],
         "github_queries": ["robotics"],
+        "source_names": [],
     },
     "new_research": {
         "enabled": True,
         "boost": 20,
-        "keywords": [],
+        "keywords": [
+            # Moved from the ai pack (H-2 review): generic research words
+            # mislabelled science stories as ai ("Study finds GPU leak" →
+            # ai). They belong with the research pack, whose source is
+            # Hugging Face Papers.
+            "research", "paper", "arxiv", "breakthrough", "benchmark", "study",
+        ],
         "subreddits": [],
         "feeds": [],
         "github_queries": [],
+        # Non-topic collectors owned by this pack: their source_name maps
+        # here in source_topic_map so origin_topic fires without keywords.
+        "source_names": ["Hugging Face Papers"],
     },
     "design": {
         "enabled": False,
@@ -141,6 +156,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
         "subreddits": [],
         "feeds": [],
         "github_queries": [],
+        "source_names": [],
     },
     "art": {
         "enabled": False,
@@ -149,6 +165,7 @@ DEFAULT_TOPIC_PACKS: dict[str, dict[str, Any]] = {
         "subreddits": [],
         "feeds": [],
         "github_queries": [],
+        "source_names": [],
     },
 }
 
@@ -227,6 +244,13 @@ def derive_config(
             q = str(q).strip()
             if q and q not in github_queries:
                 github_queries.append(q)
+        for sname in pack.get("source_names") or []:
+            # Non-topic collectors owned by this pack (e.g. "Hugging Face
+            # Papers" → new_research): map their source_name so
+            # origin_topic fires even with zero keyword hits.
+            sname = str(sname).strip()
+            if sname:
+                source_topic_map[sname] = name
 
     sources: dict[str, Any] = {
         "reddit": {"subreddits": subreddits, "limit": 10},

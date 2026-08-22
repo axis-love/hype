@@ -34,8 +34,9 @@ class TestMigrations:
 
         store2 = NewsStore(db_path)
         rows = store2._conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()
-        # Should have exactly 5 migrations applied, not duplicated.
-        assert rows["n"] == 5
+        # Should have exactly len(_MIGRATIONS) applied, not duplicated.
+        from newsbot.db import _MIGRATIONS
+        assert rows["n"] == len(_MIGRATIONS)
         store2.close()
 
     def test_tables_exist_after_migration(self, store):
@@ -218,9 +219,11 @@ class TestScoreColumnsMigration:
         assert rows[0]["merge_count"] == 1
         # Migration 5 adds message_id (NULL for legacy rows).
         assert rows[0]["message_id"] is None
-        # Verify migration 5 was applied.
+        # Migration 6 adds origin_topic (NULL for legacy rows).
+        assert rows[0]["origin_topic"] is None
+        # Verify all migrations were applied.
         version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert version_row["v"] == 5
+        assert version_row["v"] == 6
         store2.close()
 
 
