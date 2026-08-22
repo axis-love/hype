@@ -49,6 +49,7 @@ from newsbot.collectors import (
     rss as rss_collector,
     producthunt as ph_collector,
     huggingface_papers as hf_collector,
+    trends as trends_collector,
 )
 from newsbot.collectors.base import Candidate
 from newsbot.config import load_config
@@ -171,6 +172,8 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         tasks.append(("producthunt", ph_collector.collect(sources["producthunt"])))
     if "rss" in sources:
         tasks.append(("rss", rss_collector.collect(sources["rss"])))
+    if "trends" in sources:
+        tasks.append(("trends", trends_collector.collect(sources["trends"])))
 
     if not tasks:
         log.warning("no collectors enabled in config")

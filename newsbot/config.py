@@ -33,6 +33,7 @@ DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "lobsters": 1.0,
     "rss": 0.5,           # normal RSS
     "official_rss": 1.3,  # tagged via feed 'weight' override
+    "trends": 0.6,        # Google Trends: traffic as reposts signal
 }
 
 # Source identifier normalization: maps collector source IDs to weight-map keys.
@@ -121,6 +122,10 @@ DEFAULT_SOURCES: dict[str, Any] = {
             {"name": "Unity", "url": "https://blog.unity.com/feed", "weight": 1.1},
             {"name": "Unreal Engine", "url": "https://www.unrealengine.com/en-US/feed", "weight": 1.1},
         ],
+    },
+    "trends": {
+        "geos": ["US"],
+        "limit": 3,
     },
 }
 
@@ -286,7 +291,7 @@ def _validate_config(config: dict[str, Any]) -> None:
         errors.append("sources must be a dict")
     else:
         _VALID_SORT_VALUES = {"stars", "forks", "updated", "best-match", "help-wanted-issues"}
-        _VALID_SOURCE_KEYS = {"hackernews", "reddit", "github", "rss", "producthunt", "huggingface_papers"}
+        _VALID_SOURCE_KEYS = {"hackernews", "reddit", "github", "rss", "producthunt", "huggingface_papers", "trends"}
 
         # Reject unknown source blocks.
         for src_key in sources:
@@ -423,6 +428,27 @@ def _validate_config(config: dict[str, Any]) -> None:
                         errors.append("sources.huggingface_papers.limit must be int")
                     elif hf_limit <= 0 or hf_limit > 100:
                         errors.append("sources.huggingface_papers.limit must be in [1, 100]")
+
+        # Trends config validation.
+        trends_config = sources.get("trends")
+        if trends_config is not None:
+            if not isinstance(trends_config, dict):
+                errors.append("sources.trends must be a dict")
+            else:
+                geos = trends_config.get("geos")
+                if geos is not None:
+                    if not isinstance(geos, list):
+                        errors.append("sources.trends.geos must be a list")
+                    else:
+                        for i, geo in enumerate(geos):
+                            if not isinstance(geo, str):
+                                errors.append(f"sources.trends.geos[{i}] must be a string")
+                tr_limit = trends_config.get("limit")
+                if tr_limit is not None:
+                    if not isinstance(tr_limit, int):
+                        errors.append("sources.trends.limit must be int")
+                    elif tr_limit <= 0 or tr_limit > 3:
+                        errors.append("sources.trends.limit must be in [1, 3]")
 
     # Source weights: reject NaN/Infinity.
     for src, w in config["source_weights"].items():

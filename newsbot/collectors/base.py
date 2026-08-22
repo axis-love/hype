@@ -31,6 +31,7 @@ _KNOWN_SOURCES: frozenset[str] = frozenset({
     "producthunt",
     "huggingface_papers",
     "rss",
+    "trends",
 })
 
 #: Alias normalization: maps alternative names to canonical source IDs.
