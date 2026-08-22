@@ -50,8 +50,9 @@ def test_recency_decay_missing_published_at_is_neutral():
 def test_topic_bonus_matches_keywords():
     item = _item(title="New local LLM runs on llama.cpp", snippet="")
     bonus = topic_bonus(item, DEFAULT_TOPIC_BOOST)
-    # Should match both 'llm' and 'local_llm' keywords.
-    assert bonus >= DEFAULT_TOPIC_BOOST["llm"] + DEFAULT_TOPIC_BOOST["local_llm"]
+    # 'llm', 'local llm', 'llama.cpp' are all in the 'ai' pack now (merged).
+    # With max-not-sum, the bonus is the ai pack's boost (20), not a stack.
+    assert bonus >= DEFAULT_TOPIC_BOOST["ai"]
 
 
 def test_topic_bonus_zero_when_no_match():
@@ -68,9 +69,9 @@ def test_hype_score_combines_engagement_recency_weight_topic_crosspost():
         crosspost_count=2,
     )
     score = hype_score(item, CFG)
-    # crosspost bonus is +30; topic bonus for 'llm'+'local_llm' is +45.
-    assert score > 30 + 45  # engagement contribution must be positive
-    assert score > 75.0
+    # crosspost bonus is +30; topic bonus for 'ai' pack is +20 (max, not stacked).
+    assert score > 30 + 20  # engagement contribution must be positive
+    assert score > 50.0
 
 
 def test_hype_score_source_weight_applies():
@@ -126,8 +127,8 @@ def test_quantiz_keywords_match():
     for word in ["quantize", "quantized", "quantization"]:
         item = _item(title=f"New {word} technique", snippet="")
         bonus, matched = _topic_bonus_with_matches(item, DEFAULT_TOPIC_BOOST)
-        assert bonus >= DEFAULT_TOPIC_BOOST["llm"], f"'{word}' should match 'llm' topic"
-        assert "llm" in matched
+        assert bonus >= DEFAULT_TOPIC_BOOST["ai"], f"'{word}' should match 'ai' topic"
+        assert "ai" in matched
 
 
 def test_recency_decay_deterministic_with_now():
@@ -209,7 +210,7 @@ def test_score_breakdown_returns_all_keys():
     expected_keys = {
         "score", "engagement", "recency", "source_weight",
         "topic_bonus", "crosspost_bonus", "penalty", "matched_topics",
-        "scored_at", "lookback_hours",
+        "origin_topic", "scored_at", "lookback_hours",
         "source", "published_at", "upvotes", "comments",
         "stars", "reposts", "crosspost_count",
     }
