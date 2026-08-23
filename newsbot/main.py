@@ -43,14 +43,26 @@ from lm_client import LMClient
 from newsbot.bot_commands import BotCommandHandler
 from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot, summary_day
 from newsbot.collectors import (
-    hackernews as hn_collector,
-    reddit as reddit_collector,
-    github as github_collector,
-    rss as rss_collector,
-    huggingface_papers as hf_collector,
-    trends as trends_collector,
+    hackernews,
+    reddit,
+    github,
+    rss,
+    huggingface_papers,
+    trends,
 )
 from newsbot.collectors.base import Candidate
+
+# Registry: source key -> collector module. Each module exposes
+# ``async def collect(config: dict) -> list[Candidate]``.
+# Adding a collector is one line here + one entry in config sources.
+COLLECTORS: dict[str, Any] = {
+    "hackernews": hackernews,
+    "reddit": reddit,
+    "github": github,
+    "rss": rss,
+    "huggingface_papers": huggingface_papers,
+    "trends": trends,
+}
 from newsbot.config import load_config
 from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
@@ -159,18 +171,9 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     sources = cfg["sources"]
     tasks: list[tuple[str, Any]] = []
 
-    if "hackernews" in sources:
-        tasks.append(("hackernews", hn_collector.collect(sources["hackernews"])))
-    if "reddit" in sources:
-        tasks.append(("reddit", reddit_collector.collect(sources["reddit"])))
-    if "github" in sources:
-        tasks.append(("github", github_collector.collect(sources["github"])))
-    if "huggingface_papers" in sources:
-        tasks.append(("huggingface_papers", hf_collector.collect(sources["huggingface_papers"])))
-    if "rss" in sources:
-        tasks.append(("rss", rss_collector.collect(sources["rss"])))
-    if "trends" in sources:
-        tasks.append(("trends", trends_collector.collect(sources["trends"])))
+    for name, module in COLLECTORS.items():
+        if name in sources:
+            tasks.append((name, module.collect(sources[name])))
 
     if not tasks:
         log.warning("no collectors enabled in config")

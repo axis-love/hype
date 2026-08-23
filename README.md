@@ -10,7 +10,7 @@ temperature threshold.
 ## What it does
 
 ```text
-GENERATION (wall-clock slots, default 05:00 + 17:00 NEWS_TZ):
+GENERATION (wall-clock slots, default 05:00/09:00/13:00/17:00/21:00 NEWS_TZ):
   collect (HN/Reddit/GitHub/HF Papers/RSS/Trends)
     → filter already-seen
     → cross-source dedupe + merge engagement (merged rows re-score hotter)
@@ -96,7 +96,7 @@ long as needed. All times are wall-clock in `NEWS_TZ` (default
 
 | Job | Schedule | Notes |
 |---|---|---|
-| Generation | `NEWS_GEN_HOURS` (default `5,17`) | One digest per listed hour. **Catch-up:** if the process was down past a slot, the most recent due slot fires exactly once when it comes back. |
+| Generation | `NEWS_GEN_HOURS` (default `5,9,13,17,21`) | One digest per listed hour. **Catch-up:** if the process was down past a slot, the most recent due slot fires exactly once when it comes back. |
 | Posting | Even hours (00, 02, …, 22) | One pick per slot; skipped (never backfilled) if the bot was down. |
 | Daily summary | 13:00 | Recaps the last 24h of posted news. |
 
@@ -153,7 +153,7 @@ each story costs at most one styling LLM call.
 | `REDDIT_REFRESH_TOKEN` | Reddit refresh token (Devvit app; required for real vote/comment counts) |
 | `REDDIT_CLIENT_ID` | Client id for the Reddit token endpoint (optional; defaults to the Devvit CLI's public id) |
 | `NEWS_TZ` | Wall-clock timezone for all schedules (default `Asia/Bangkok`) |
-| `NEWS_GEN_HOURS` | Comma-separated local hours for digests (default `5,17`; catch-up fires once after downtime) |
+| `NEWS_GEN_HOURS` | Comma-separated local hours for digests (default `5,9,13,17,21`; catch-up fires once after downtime) |
 | `NEWS_STORE_CAP` | Max unposted rows kept in the store (default 36). After each digest the coldest rows are evicted. Known trade-off: an evicted story stays in `seen` for `NEWS_RETENTION_SEEN_DAYS` and cannot re-enter on the same URL. |
 | `NEWS_TEMP_FLOOR` | Minimum raw temperature to post (default 35) |
 | `NEWS_THRESHOLD_RATIO` | Threshold = max(floor, ratio × median) (default 0.5) |
