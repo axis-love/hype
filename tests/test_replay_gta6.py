@@ -11,12 +11,17 @@ candidates (Aug 17-21, 2026) fetched with the new collectors: Reddit gaming
 Eurogamer, HN, and a reconstructed Google Trends "GTA 6 leak" entry with
 Breakout traffic.
 
+Also tests that store mode (no-arg default) does not crash: constructs a
+temp DB with a pending_posts row via the db module, runs _load_store_candidates.
+
 If this test regresses, the tuning has drifted — investigate before adjusting.
 """
 
 from __future__ import annotations
 
 import json
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +30,7 @@ import pytest
 from core.settings_store import SettingsStore, SettingsStoreConfig
 from newsbot.collectors.base import Candidate
 from newsbot.config import load_config
+from newsbot.db import NewsStore
 from newsbot.dedupe import dedupe_and_merge
 from newsbot.scoring import score_all
 
@@ -133,3 +139,82 @@ def test_gta6_leak_has_full_score_breakdown(scored_fixture):
     assert bd["origin_topic"] == "gaming", (
         f"Expected origin_topic=gaming, got {bd.get('origin_topic')!r}"
     )
+
+
+# --- Store mode tests (review fix: no-arg default = score the current store) ---
+
+
+def _make_store_with_row(tmpdir: str) -> str:
+    """Create a temp SQLite DB with one pending_posts row via NewsStore.
+
+    Returns the path to the temp DB. Uses the db module's own
+    add_stories_to_store() so the row schema is exactly what prod
+    writes — no hand-rolled SQL.
+    """
+    db_path = str(Path(tmpdir) / "test.sqlite")
+    store = NewsStore(Path(db_path))
+    now = datetime(2026, 8, 23, 12, 0, 0, tzinfo=timezone.utc).isoformat(timespec="seconds")
+    story = {
+        "title": "GTA 6 gameplay leaks online ahead of showcase",
+        "url": "https://www.ign.com/articles/gta-6-leak",
+        "source": "reddit",
+        "source_name": "r/gaming",
+        "snippet": "Gameplay footage leaked",
+        "published_at": now,
+        "upvotes": 5000,
+        "comments": 300,
+        "score": 200.0,
+        "score_breakdown": {
+            "score": 200.0,
+            "engagement": 150.0,
+            "recency": 1.0,
+            "source_weight": 1.0,
+            "topic_bonus": 20,
+            "crosspost_bonus": 30.0,
+            "penalty": 1.0,
+            "matched_topics": ["gaming"],
+            "origin_topic": "gaming",
+            "crosspost_count": 2,
+            "upvotes": 5000,
+            "comments": 300,
+            "stars": 0,
+            "reposts": 0,
+            "lookback_hours": 48,
+            "source": "reddit",
+            "published_at": now,
+            "scored_at": now,
+        },
+    }
+    store.add_stories_to_store([story], [])
+    store.close()
+    return db_path
+
+
+def test_store_mode_does_not_crash():
+    """_load_store_candidates must load rows from the DB without crashing.
+
+    Regression test for the review bug where store mode used hand-rolled
+    SQL against a 'store' table that didn't exist (the real table is
+    'pending_posts'). Now uses NewsStore.list_store_rows() — the same
+    accessor the poster uses.
+    """
+    # Import the replay module's store loader.
+    import sys
+    scripts_dir = str(Path(__file__).resolve().parents[1] / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from replay_scores import _load_store_candidates
+
+    tmpdir = tempfile.mkdtemp()
+    try:
+        db_path = _make_store_with_row(tmpdir)
+        candidates = _load_store_candidates(db_path)
+        assert len(candidates) == 1, f"Expected 1 candidate, got {len(candidates)}"
+        c = candidates[0]
+        assert c["title"] == "GTA 6 gameplay leaks online ahead of showcase"
+        assert c["source"] == "reddit"
+        assert c["source_name"] == "r/gaming"
+        assert c["upvotes"] == 5000
+        assert c["comments"] == 300
+    finally:
+        shutil.rmtree(tmpdir)

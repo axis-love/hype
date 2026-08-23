@@ -2,10 +2,18 @@
 """Score replay tool — rescoring a candidate fixture under the current config.
 
 Usage:
-    python scripts/replay_scores.py [candidates.json] [--weights '{"reddit": 0.8}']
     python scripts/replay_scores.py                    # score the current store
+    python scripts/replay_scores.py fixture            # score the GTA6 fixture
+    python scripts/replay_scores.py path/to/cands.json
+    python scripts/replay_scores.py --weights '{"reddit": 0.8}'
 
-Loads a JSON list of Candidate dicts (default: tests/fixtures/gta6_week.json),
+No argument (the default) scores the current SQLite store via the db
+module's own list_store_rows() accessor — the canonical path that the
+poster uses. Store rows are mapped to candidate dicts carrying their raw
+engagement fields (upvotes, comments, stars, reposts) so score_all
+recomputes a fresh breakdown under the current config.
+
+The 'fixture' keyword or any path arg loads a JSON list of Candidate dicts.
 runs dedupe_and_merge + score_all under the active config (or a --weights
 override), and prints the ranking with the FULL score breakdown per item:
 engagement, recency, source_weight, topic_bonus, crosspost_bonus, origin_topic,
@@ -18,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +38,7 @@ if str(REPO) not in sys.path:
 
 from newsbot.collectors.base import Candidate
 from newsbot.config import load_config
+from newsbot.db import NewsStore
 from newsbot.dedupe import dedupe_and_merge
 from newsbot.scoring import score_all
 from core.settings_store import SettingsStore, SettingsStoreConfig
@@ -46,58 +54,49 @@ def _load_candidates(path: str) -> list[dict[str, Any]]:
 
 
 def _load_store_candidates(db_path: str) -> list[dict[str, Any]]:
-    """Load candidates from the current SQLite store (no scoring, raw rows)."""
-    # The store schema stores candidates as rows; we reconstruct dicts.
-    # This path is for the "no arg = dump/score the current store" case.
-    import sqlite3
+    """Load candidates from the current SQLite store via NewsStore.
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT title, url, source, source_name, published_at, "
-        "upvotes, comments, stars, reposts, crosspost_count, "
-        "engagement_score, source_weight, topic_bonus, crosspost_bonus, "
-        "penalty, lookback_hours, score as score_at_queue, merged_urls "
-        "FROM store ORDER BY score_at_queue DESC"
-    ).fetchall()
-    conn.close()
+    Uses list_store_rows() — the same accessor the poster uses — so the
+    replay never references a table name or column set that could drift
+    from the schema. Store rows are mapped to candidate dicts carrying
+    their raw engagement fields (upvotes, comments, stars, reposts) and
+    the source_name for origin_topic lookup.
+    """
+    store = NewsStore(Path(db_path))
+    try:
+        rows = store.list_store_rows()
+    finally:
+        store.close()
 
-    candidates = []
+    candidates: list[dict[str, Any]] = []
     for row in rows:
-        c = {
-            "title": row["title"],
-            "url": row["url"],
-            "source": row["source"] or "hn",
-            "source_name": row["source_name"] or "",
-            "published_at": row["published_at"],
-            "upvotes": row["upvotes"],
-            "comments": row["comments"],
-            "stars": row["stars"],
-            "reposts": row["reposts"],
-            "crosspost_count": row["crosspost_count"] or 1,
-            "penalty": row["penalty"] if row["penalty"] is not None else 1.0,
-            "raw_json": {},
-        }
-        # Restore raw_json weight for RSS items (source_weight was derived
-        # from the feed weight; store it back so score_breakdown can use it).
-        sw = row["source_weight"]
-        if sw is not None and row["source"] == "rss":
-            c["raw_json"]["weight"] = float(sw)
-        candidates.append(c)
+        # Map store row → candidate dict for dedupe + score_all.
+        # The store persists score_breakdown components; we carry the
+        # raw engagement fields so score_all recomputes a fresh score
+        # under the current config (not the stale queue-time snapshot).
+        raw_json: dict[str, Any] = {}
+        # RSS items: source_weight was derived from the feed weight.
+        # Store it in raw_json so score_breakdown can apply it.
+        sw = row.get("source_weight")
+        if sw is not None and row.get("source") == "rss":
+            raw_json["weight"] = float(sw)
+
+        candidates.append({
+            "title": row.get("title") or "",
+            "url": row.get("url") or "",
+            "source": row.get("source") or "hn",
+            "source_name": row.get("source_name") or "",
+            "snippet": row.get("snippet"),
+            "published_at": row.get("published_at"),
+            "upvotes": row.get("upvotes"),
+            "comments": row.get("comments"),
+            "stars": row.get("stars"),
+            "reposts": row.get("reposts"),
+            "crosspost_count": row.get("crosspost_count") or 1,
+            "penalty": row.get("penalty") if row.get("penalty") is not None else 1.0,
+            "raw_json": raw_json,
+        })
     return candidates
-
-
-def _to_candidate_dicts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ensure items are plain dicts (convert Candidate objects if needed)."""
-    result = []
-    for item in items:
-        if isinstance(item, Candidate):
-            result.append(item.to_dict())
-        elif isinstance(item, dict):
-            result.append(dict(item))
-        else:
-            raise ValueError(f"Unexpected item type: {type(item).__name__}")
-    return result
 
 
 def replay(
@@ -116,7 +115,7 @@ def replay(
     # Convert plain dicts to Candidate instances for dedupe (which expects
     # dict-like objects with .get()/.setitem()). Candidate.from_dict gives us
     # the validation + dict-like interface dedupe needs.
-    as_candidates = [Candidate.from_dict(c) for c in candidates]
+    as_candidates: list = [Candidate.from_dict(c) for c in candidates]
 
     # Dedupe + merge (cross-source aggregation, trends containment, etc.)
     merged = dedupe_and_merge(as_candidates)
@@ -177,15 +176,14 @@ def print_ranking(scored: list[dict[str, Any]], config: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Replay scoring on a candidate fixture or the current store."
+        description="Replay scoring on the current store or a candidate fixture."
     )
     parser.add_argument(
         "candidates",
         nargs="?",
         default=None,
-        help="Path to a JSON list of candidates. "
-        "Default: tests/fixtures/gta6_week.json. "
-        "Use 'store' to score the current SQLite store.",
+        help="Path to a JSON list of candidates, 'fixture' for the GTA6 "
+        "week fixture, or omit to score the current SQLite store (default).",
     )
     parser.add_argument(
         "--weights",
@@ -195,7 +193,7 @@ def main() -> int:
     parser.add_argument(
         "--db",
         default=None,
-        help="Path to the SQLite DB (for 'store' mode). Default: data/newsbot.sqlite.",
+        help="Path to the SQLite DB (for store mode). Default: data/newsbot.sqlite.",
     )
     args = parser.parse_args()
 
@@ -214,22 +212,25 @@ def main() -> int:
         print(f"  --weights override: {overrides}", file=sys.stderr)
 
     # --- Load candidates ---
-    if args.candidates is None or args.candidates == "fixture":
+    # No arg = score the current store (the brief's spec).
+    # 'fixture' = the GTA6 week fixture.
+    # Anything else = a path to a JSON file.
+    if args.candidates is None:
+        candidates = _load_store_candidates(db_path)
+        print(f"  Loaded {len(candidates)} candidates from store", file=sys.stderr)
+    elif args.candidates == "fixture":
         fixture_path = str(repo_root / "tests" / "fixtures" / "gta6_week.json")
-    elif args.candidates == "store":
-        fixture_path = None
-    else:
-        fixture_path = args.candidates
-
-    if fixture_path:
         candidates = _load_candidates(fixture_path)
         print(
             f"  Loaded {len(candidates)} candidates from {fixture_path}",
             file=sys.stderr,
         )
     else:
-        candidates = _load_store_candidates(db_path)
-        print(f"  Loaded {len(candidates)} candidates from store", file=sys.stderr)
+        candidates = _load_candidates(args.candidates)
+        print(
+            f"  Loaded {len(candidates)} candidates from {args.candidates}",
+            file=sys.stderr,
+        )
 
     # --- Replay ---
     scored = replay(candidates, config)
@@ -244,7 +245,7 @@ def main() -> int:
 
     # Topic diversity in top 14
     top14 = scored[:14]
-    topics = set()
+    topics: set[str] = set()
     for item in top14:
         bd = item.get("score_breakdown") or {}
         ot = bd.get("origin_topic")
