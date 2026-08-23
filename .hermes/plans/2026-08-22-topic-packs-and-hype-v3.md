@@ -160,6 +160,11 @@ Acceptance: in that replay the GTA6 leak story ranks **#1**, clears the threshol
 at least **three distinct topics** appear in the top 14. Encoded as a pytest so the
 tuning can't regress silently.
 
+**H-5 final weights (2026-08-23):** `reddit: 1.0` (was 0.8). At 0.8, r/science
+items with 7064 upvotes scored below HN items with 200–300 upvotes, starving
+the top 14 of topic diversity. 1.0 lets real engagement dominate as intended
+while HN keeps its 1.2 edge for lower-volume but high-signal stories.
+
 ### Live validation (after rollout)
 
 1. `/topics` shows packs; `/topic off ai` → `/sources` no longer lists AI subs/queries.
