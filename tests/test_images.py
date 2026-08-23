@@ -6,6 +6,9 @@ is exercised via a monkeypatched httpx.Client so tests stay hermetic.
 """
 from __future__ import annotations
 
+import struct
+import zlib
+
 import pytest
 
 from newsbot.images import (
@@ -153,10 +156,34 @@ class _FakeClient:
         return _FakeResponse(status_code=404)
 
 
-PNG_1PX = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
-    "0000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082"
-)
+def _make_png(width: int = 200, height: int = 200) -> bytes:
+    """Build a real PNG (>= MIN_IMG_DIM x MIN_IMG_DIM, > MIN_IMG_BYTES).
+
+    Uses a tEXt ancillary chunk for padding so the file exceeds 5 KB
+    without inflating the image data. Dimensions are real so that
+    ``_image_dims`` returns (width, height) when Pillow is installed.
+    """
+    sig = bytes.fromhex("89504e470d0a1a0a")
+    # IHDR
+    ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    ihdr = struct.pack(">I", len(ihdr_data)) + b"IHDR" + ihdr_data
+    ihdr += struct.pack(">I", zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF)
+    # tEXt chunk padded to exceed MIN_IMG_BYTES (5000)
+    text_data = b"Comment\x00" + b"x" * 5500
+    text = struct.pack(">I", len(text_data)) + b"tEXt" + text_data
+    text += struct.pack(">I", zlib.crc32(b"tEXt" + text_data) & 0xFFFFFFFF)
+    # IDAT: solid-color image
+    raw = bytearray()
+    for _ in range(height):
+        raw.append(0)  # filter: None
+        raw.extend(b"\x00\x00\x80" * width)
+    compressed = zlib.compress(bytes(raw), 9)
+    idat = struct.pack(">I", len(compressed)) + b"IDAT" + compressed
+    idat += struct.pack(">I", zlib.crc32(b"IDAT" + compressed) & 0xFFFFFFFF)
+    # IEND
+    iend = struct.pack(">I", 0) + b"IEND"
+    iend += struct.pack(">I", zlib.crc32(b"IEND") & 0xFFFFFFFF)
+    return sig + ihdr + text + idat + iend
 
 HTML_TWO_IMAGES = """
 <html><head>
@@ -180,7 +207,7 @@ class TestExtractArticleMedia:
 
     def test_dedupe_same_path_different_params(self, monkeypatch):
         """hero.png and hero.png?w=800 are ONE image; logo filtered out."""
-        big = PNG_1PX + b"x" * 6000  # > MIN_IMG_BYTES
+        big = _make_png()  # real 200x200 PNG, passes MIN_IMG_DIM + MIN_IMG_BYTES
         self._patch_client(monkeypatch, HTML_TWO_IMAGES, images={
             "https://cdn.example.com/hero.png": _FakeResponse(
                 content=big, headers={"content-type": "image/png"}),
@@ -232,7 +259,7 @@ class TestExtractArticleMedia:
             f'<img src="https://cdn.example.com/p{i}.png">' for i in range(15)
         )
         html = f"<html><body>{imgs}</body></html>"
-        big = PNG_1PX + b"x" * 6000
+        big = _make_png()
         self._patch_client(monkeypatch, html, images={
             f"https://cdn.example.com/p{i}.png": _FakeResponse(
                 content=big, headers={"content-type": "image/png"})

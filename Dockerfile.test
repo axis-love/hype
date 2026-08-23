@@ -1,0 +1,16 @@
+FROM news-bot-newsbot:latest
+
+USER root
+
+# Install dev dependencies (pytest + pytest-asyncio)
+COPY pyproject.toml /app/pyproject.toml
+RUN pip install --no-cache-dir pytest==8.4.2 pytest-asyncio==0.26.0
+
+# Copy test suite (excluded from prod image by .dockerignore)
+COPY tests/ /app/tests/
+
+# Copy scripts (needed by migration tests)
+COPY scripts/ /app/scripts/
+
+WORKDIR /app
+USER appuser

@@ -179,3 +179,17 @@ class TestSafeTimeout:
         # All collectors that do HTTP must call get_shared_semaphore().
         # The returned instance must be the same object across calls.
         assert get_shared_semaphore() is sem
+
+
+def test_collector_registry_entries_expose_collect():
+    """H-6: every COLLECTORS entry is a module exposing ``async def collect(config)``."""
+    import inspect
+
+    from newsbot.main import COLLECTORS
+
+    assert COLLECTORS, "COLLECTORS registry must not be empty"
+    for name, module in COLLECTORS.items():
+        assert hasattr(module, "collect"), f"{name} module has no collect()"
+        assert inspect.iscoroutinefunction(module.collect), (
+            f"{name}.collect must be a coroutine function"
+        )
