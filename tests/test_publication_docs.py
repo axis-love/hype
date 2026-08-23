@@ -78,7 +78,7 @@ class TestDocumentationCorrectness:
             content = f.read()
         required_vars = [
             "BOT_TOKEN", "NEWS_CHANNEL_ID", "LM_BASE", "LM_MODEL",
-            "LM_API_KEY", "LM_TIMEOUT", "PH_API_KEY", "GITHUB_TOKEN",
+            "LM_API_KEY", "LM_TIMEOUT", "GITHUB_TOKEN",
             "NEWS_TZ", "NEWS_GEN_HOURS", "NEWS_STORE_CAP",
             "NEWS_TEMP_FLOOR", "NEWS_THRESHOLD_RATIO",
             "NEWS_MERGE_BONUS", "NEWS_MERGE_CAP",

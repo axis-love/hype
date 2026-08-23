@@ -23,6 +23,10 @@ Commands:
   Configure:
     /setstyle <text>  — update the style prompt for Pass B
     /setrecap <text>  — update the recap prompt
+    /topics           — list all topic packs (on/off, boost, source counts)
+    /topic on <name>  — enable a topic pack (writes news.topics override)
+    /topic off <name> — disable a topic pack (writes news.topics override)
+    /sources          — show the effective derived source blocks
     /help             — list commands
 """
 
@@ -38,8 +42,9 @@ import httpx
 
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
-from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT
+from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT, load_config
 from newsbot.telegram_poster import post_rich_message, RichSendRejected
+from newsbot.topics import DEFAULT_TOPIC_PACKS, merge_packs as _merge_topic_packs
 
 log = logging.getLogger(__name__)
 
@@ -190,6 +195,12 @@ class BotCommandHandler:
             await self._cmd_setstyle(chat_id, arg)
         elif command == "/style":
             await self._cmd_show_style(chat_id)
+        elif command == "/topics":
+            await self._cmd_topics(chat_id)
+        elif command == "/topic":
+            await self._cmd_topic(chat_id, arg)
+        elif command == "/sources":
+            await self._cmd_sources(chat_id)
         elif command == "/digest":
             if arg.strip().lower() == "dry":
                 await self._cmd_digest_dry(chat_id)
@@ -238,7 +249,11 @@ class BotCommandHandler:
             "\n"
             "⚙️ Configure\n"
             "/setstyle <text> — set the style prompt\n"
-            "/setrecap <text> — set the recap prompt"
+            "/setrecap <text> — set the recap prompt\n"
+            "/topics — list all topic packs (on/off, boost, source counts)\n"
+            "/topic on <name> — enable a topic pack\n"
+            "/topic off <name> — disable a topic pack\n"
+            "/sources — show effective derived sources (what /digest will fetch)"
         )
 
     async def _cmd_setstyle(self, chat_id: int, arg: str) -> None:
@@ -252,6 +267,106 @@ class BotCommandHandler:
     async def _cmd_show_style(self, chat_id: int) -> None:
         prompt = self.settings.get("news", "style_prompt", DEFAULT_STYLE_PROMPT)
         await self._send(chat_id, f"Current style prompt:\n\n{prompt}")
+
+    async def _cmd_topics(self, chat_id: int) -> None:
+        """List every topic pack with on/off, boost, and source counts."""
+        overrides = self.settings.get("news", "topics", {}) or {}
+        packs = _merge_topic_packs(overrides)
+
+        lines = [f"Topic packs ({len(packs)}):\n"]
+        for name, pack in packs.items():
+            state = "on" if pack.get("enabled") else "off"
+            boost = int(pack.get("boost") or 0)
+            subs = len(pack.get("subreddits") or [])
+            feeds = len(pack.get("feeds") or [])
+            queries = len(pack.get("github_queries") or [])
+            source_count = subs + feeds + queries
+            lines.append(
+                f"  {name}: {state} | boost={boost} | "
+                f"{subs} subs, {feeds} feeds, {queries} gh queries "
+                f"({source_count} sources)"
+            )
+        await self._send(chat_id, "\n".join(lines))
+
+    async def _cmd_topic(self, chat_id: int, arg: str) -> None:
+        """Enable or disable a topic pack via the news.topics override."""
+        parts = arg.split(maxsplit=1)
+        if len(parts) < 2:
+            await self._send(
+                chat_id,
+                "Usage: /topic on <name>  or  /topic off <name>\n"
+                f"Packs: {', '.join(sorted(DEFAULT_TOPIC_PACKS.keys()))}",
+            )
+            return
+
+        action, topic_name = parts[0].strip().lower(), parts[1].strip().lower()
+        if action not in ("on", "off"):
+            await self._send(
+                chat_id,
+                f"Unknown action '{action}'. Use: /topic on <name> or /topic off <name>",
+            )
+            return
+
+        if topic_name not in DEFAULT_TOPIC_PACKS:
+            valid = ", ".join(sorted(DEFAULT_TOPIC_PACKS.keys()))
+            await self._send(
+                chat_id,
+                f"Unknown topic pack '{topic_name}'.\nValid packs: {valid}",
+            )
+            return
+
+        # Merge the new override into the existing news.topics row.
+        overrides = self.settings.get("news", "topics", {}) or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        overrides[topic_name] = {"enabled": action == "on"}
+        self.settings.set("news", "topics", overrides)
+        log.info("topic pack '%s' turned %s via /topic", topic_name, action)
+        await self._send(chat_id, f"Topic '{topic_name}' is now {action}.")
+
+    async def _cmd_sources(self, chat_id: int) -> None:
+        """Show the effective derived source blocks the next /digest will fetch."""
+        try:
+            cfg = load_config(self.settings)
+        except ValueError as exc:
+            await self._send(chat_id, f"Config error: {exc}")
+            return
+        sources = cfg.get("sources") or {}
+
+        lines = ["Effective sources (what the next /digest will fetch):\n"]
+        reddit = sources.get("reddit") or {}
+        subs = reddit.get("subreddits") or []
+        lines.append(f"Reddit ({len(subs)} subreddits): {', '.join(subs) if subs else '—'}")
+
+        rss = sources.get("rss") or {}
+        feeds = rss.get("feeds") or []
+        if feeds:
+            feed_names = [f.get("name", "?") for f in feeds]
+            lines.append(f"RSS ({len(feeds)} feeds): {', '.join(feed_names)}")
+        else:
+            lines.append("RSS (0 feeds): —")
+
+        github = sources.get("github") or {}
+        queries = github.get("queries") or []
+        lines.append(f"GitHub ({len(queries)} queries): {', '.join(queries) if queries else '—'}")
+
+        hn = sources.get("hackernews") or {}
+        if hn:
+            lines.append(f"Hacker News: limit={hn.get('limit', '?')}")
+
+        hf = sources.get("huggingface_papers") or {}
+        if hf:
+            lines.append(f"HuggingFace Papers: limit={hf.get('limit', '?')}")
+
+        trends = sources.get("trends") or {}
+        if trends:
+            lines.append(f"Trends: geos={trends.get('geos', [])}")
+
+        boosts = cfg.get("topic_boost") or {}
+        if boosts:
+            lines.append(f"\nTopic boosts: {', '.join(f'{k}={v}' for k, v in sorted(boosts.items()))}")
+
+        await self._send(chat_id, "\n".join(lines))
 
     async def _cmd_digest(self, chat_id: int) -> None:
         if self.on_digest:

@@ -335,12 +335,6 @@ class TestNestedListValidation:
         with pytest.raises(ValueError, match="queries.*must be a string"):
             _validate_config(cfg)
 
-    def test_ph_topic_not_string(self):
-        from newsbot.config import _validate_config
-        cfg = self._make_config(sources={"producthunt": {"topics": [123]}})
-        with pytest.raises(ValueError, match="topics.*must be a string"):
-            _validate_config(cfg)
-
     def test_unknown_source_rejected(self):
         from newsbot.config import _validate_config
         cfg = self._make_config(sources={"twitter": {"limit": 10}})

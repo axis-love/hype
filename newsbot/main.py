@@ -47,7 +47,6 @@ from newsbot.collectors import (
     reddit as reddit_collector,
     github as github_collector,
     rss as rss_collector,
-    producthunt as ph_collector,
     huggingface_papers as hf_collector,
     trends as trends_collector,
 )
@@ -168,8 +167,6 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
         tasks.append(("github", github_collector.collect(sources["github"])))
     if "huggingface_papers" in sources:
         tasks.append(("huggingface_papers", hf_collector.collect(sources["huggingface_papers"])))
-    if "producthunt" in sources:
-        tasks.append(("producthunt", ph_collector.collect(sources["producthunt"])))
     if "rss" in sources:
         tasks.append(("rss", rss_collector.collect(sources["rss"])))
     if "trends" in sources:

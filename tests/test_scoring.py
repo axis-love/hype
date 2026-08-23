@@ -75,11 +75,11 @@ def test_hype_score_combines_engagement_recency_weight_topic_crosspost():
 
 
 def test_hype_score_source_weight_applies():
-    # Same engagement on HN (1.2) vs Product Hunt (0.8) → HN should score higher
+    # Same engagement on HN (1.2) vs RSS (0.5) → HN should score higher
     # (ignoring topic bonus, which is title-driven; use a neutral title).
     hn = _item(source="hackernews", title="zzz neutral", upvotes=100, comments=10)
-    ph = _item(source="producthunt", title="zzz neutral", upvotes=100, comments=10)
-    assert hype_score(hn, CFG) > hype_score(ph, CFG)
+    rss = _item(source="rss", title="zzz neutral", upvotes=100, comments=10)
+    assert hype_score(hn, CFG) > hype_score(rss, CFG)
 
 
 def test_score_all_stamps_score_on_every_item():

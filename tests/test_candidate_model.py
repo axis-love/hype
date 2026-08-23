@@ -293,7 +293,7 @@ class TestSourceIdValidation:
 
     def test_known_sources_accepted(self):
         """All known source IDs should be accepted without error."""
-        for src in ("hn", "reddit", "github", "producthunt", "rss", "huggingface_papers"):
+        for src in ("hn", "reddit", "github", "rss", "huggingface_papers"):
             c = Candidate(title="T", url="https://example.com", source=src, source_name="N")
             assert c.source == src
 

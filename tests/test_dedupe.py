@@ -187,18 +187,18 @@ def test_dedupe_contributing_sources_set():
     b = new_candidate(title="Story", url="https://example.com/s",
                       source="reddit", source_name="r/LocalLLaMA")
     c = new_candidate(title="Story", url="https://example.com/s",
-                      source="producthunt", source_name="Product Hunt")
+                      source="rss", source_name="Test Feed")
     out = dedupe_and_merge([a, b, c])
     assert len(out) == 1
     merged = out[0]
     assert "Hacker News" in merged["source_name"]
     assert "r/LocalLLaMA" in merged["source_name"]
-    assert "Product Hunt" in merged["source_name"]
+    assert "Test Feed" in merged["source_name"]
     # Internal-only tracking field should be cleaned up.
     assert "_source_names_set" not in merged
     # contributing_sources is a persistent field (not deleted).
     assert "contributing_sources" in merged
-    assert set(merged["contributing_sources"]) == {"hn", "reddit", "producthunt"}
+    assert set(merged["contributing_sources"]) == {"hn", "reddit", "rss"}
 
 
 def test_dedupe_same_source_takes_max_engagement():

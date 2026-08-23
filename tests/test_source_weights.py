@@ -221,16 +221,16 @@ class TestMixedPoolDiversity:
     """Verify mixed HN+RSS+GitHub+other pools in a single selection run."""
 
     def test_mixed_pool_all_sources_represented(self):
-        """A single selection run with HN, RSS, GitHub, and ProductHunt
+        """A single selection run with HN, RSS, GitHub, and Trends
         must give every source at least one slot when slots are available."""
         from newsbot.main import _select_diverse_candidates
 
         hn = [{"source": "hn", "title": f"HN-{i}", "score": 100.0 - i, "url": f"http://hn/{i}"} for i in range(5)]
         rss = [{"source": "rss", "title": f"RSS-{i}", "score": 80.0 - i, "url": f"http://rss/{i}"} for i in range(5)]
         github = [{"source": "github", "title": f"GH-{i}", "score": 90.0 - i, "url": f"http://gh/{i}"} for i in range(5)]
-        ph = [{"source": "producthunt", "title": f"PH-{i}", "score": 70.0 - i, "url": f"http://ph/{i}"} for i in range(3)]
+        trends = [{"source": "trends", "title": f"TR-{i}", "score": 70.0 - i, "url": f"http://tr/{i}"} for i in range(3)]
 
-        scored = sorted(hn + rss + github + ph, key=lambda c: c["score"], reverse=True)
+        scored = sorted(hn + rss + github + trends, key=lambda c: c["score"], reverse=True)
         cfg = {"source_quota": 2}
         top = _select_diverse_candidates(scored, 8, cfg)
 
@@ -238,7 +238,7 @@ class TestMixedPoolDiversity:
         assert "hn" in sources
         assert "rss" in sources
         assert "github" in sources
-        assert "producthunt" in sources
+        assert "trends" in sources
 
     def test_mixed_pool_deterministic_across_permutations(self):
         """Reversing mixed-pool input must produce identical selection."""
@@ -249,7 +249,7 @@ class TestMixedPoolDiversity:
             ("hn", 100, 1), ("hn", 95, 2),
             ("rss", 80, 3), ("rss", 75, 4),
             ("github", 90, 5), ("github", 85, 6),
-            ("producthunt", 70, 7),
+            ("trends", 70, 7),
         ]:
             candidates.append({"source": src, "title": f"{src}-{i}", "score": float(score), "url": f"http://{src}/{i}"})
 
