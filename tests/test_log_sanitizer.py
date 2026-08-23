@@ -169,35 +169,6 @@ class TestSafeLogDict:
         assert "***" in safe["layers"][0][0][0]
 
 
-class TestProductHuntNoResponseBody:
-    """Verify Product Hunt collector does not log raw response bodies."""
-
-    def test_ph_http_error_no_body_in_log(self, caplog):
-        """PH collector must not include response body in error logs."""
-        import httpx
-        import asyncio
-        from newsbot.collectors.producthunt import _fetch_topic
-
-        sentinel = "SENTINEL_PH_RESPONSE_BODY_UNIQUE_XYZ"
-
-        class FakeResponse:
-            status_code = 400
-            text = f'{{"error":"{sentinel}"}}'
-
-        class FakeClient:
-            async def post(self, *a, **kw):
-                return FakeResponse()
-
-        client = FakeClient()
-        with caplog.at_level(logging.WARNING):
-            result = asyncio.run(_fetch_topic(client, topic="tech", limit=5, token="fake"))
-
-        assert result == []
-        for record in caplog.records:
-            assert sentinel not in record.getMessage(), \
-                f"PH response body leaked in log: {record.getMessage()}"
-
-
 class TestTelegramLoggerOutput:
     """Verify that captured log output does not contain bot tokens."""
 

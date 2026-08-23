@@ -1,8 +1,8 @@
 # newsbot
 
 A lightweight hype-driven tech news bot. Collects candidate news from
-engagement-bearing sources (Hacker News, Reddit, GitHub, Product Hunt,
-Hugging Face Papers, RSS), ranks by hype signals, deduplicates across
+engagement-bearing sources (Hacker News, Reddit, GitHub, Hugging Face
+Papers, RSS, Google Trends), ranks by hype signals, deduplicates across
 sources, filters via an OpenAI-compatible LLM, and posts the hottest
 stories to a Telegram channel — styled on demand, gated by a live
 temperature threshold.
@@ -11,7 +11,7 @@ temperature threshold.
 
 ```text
 GENERATION (wall-clock slots, default 05:00 + 17:00 NEWS_TZ):
-  collect (HN/Reddit/GitHub/PH/HF Papers/RSS)
+  collect (HN/Reddit/GitHub/HF Papers/RSS/Trends)
     → filter already-seen
     → cross-source dedupe + merge engagement (merged rows re-score hotter)
     → score by hype (upvotes, comments, stars, recency, topic, crossposts)
@@ -79,6 +79,11 @@ user can issue commands.
 | Command | Action |
 |---|---|
 | `/setstyle <text>` | Update the style prompt for post writing |
+| `/setrecap <text>` | Update the recap prompt |
+| `/topics` | List all topic packs (on/off, boost, source counts) |
+| `/topic on <name>` | Enable a topic pack (writes `news.topics` override) |
+| `/topic off <name>` | Disable a topic pack (writes `news.topics` override) |
+| `/sources` | Show the effective derived source blocks (what /digest will fetch) |
 | `/help` | List commands |
 
 ## Scheduling
@@ -144,7 +149,6 @@ each story costs at most one styling LLM call.
 | `LM_API_KEY` | Bearer token (required) |
 | `LM_TIMEOUT` | Request timeout, seconds (default 300) |
 | `NEWS_DB` | SQLite path (default `data/newsbot.sqlite`) |
-| `PH_API_KEY` | Product Hunt API token (optional; skips PH if unset) |
 | `GITHUB_TOKEN` | GitHub token for higher rate limits (optional) |
 | `REDDIT_REFRESH_TOKEN` | Reddit refresh token (Devvit app; required for real vote/comment counts) |
 | `REDDIT_CLIENT_ID` | Client id for the Reddit token endpoint (optional; defaults to the Devvit CLI's public id) |
@@ -162,15 +166,24 @@ each story costs at most one styling LLM call.
 
 Source lists, weights, topic boosts, and runtime parameters live in the
 SQLite `settings` table under the `news` namespace. Sensible defaults ship
-in `newsbot/config.py` so the bot runs with an empty settings table. To
-override, set keys via SQL or seed the table:
+in `newsbot/config.py` so the bot runs with an empty settings table.
+
+Topic packs (`newsbot/topics.py`) are the source of truth for which
+subreddits, RSS feeds, GitHub queries, and topic boosts are active.
+The operator can override individual packs via the settings key
+`news.topics` (partial dict merged over defaults, e.g.
+`{"gaming": {"enabled": true}, "ai": {"enabled": false}}`). Use
+`/topics`, `/topic on|off`, and `/sources` to manage them at runtime
+without a deploy.
+
+To override other settings, set keys via SQL or seed the table:
 
 ```sql
 INSERT OR REPLACE INTO settings(namespace, key, value_json, updated_at)
 VALUES ('news', 'max_final_news', '8', datetime('now'));
 ```
 
-Recognized keys: `sources`, `source_weights`, `topic_boost`,
+Recognized keys: `topics`, `sources`, `source_weights`, `topic_boost`,
 `lookback_hours`, `max_candidates`, `max_final_news`, `min_score`,
 `source_quota`, `item_prune_hours`, `llm_temperature`,
 `llm_max_tokens_filter`, `llm_max_tokens_digest`, `style_prompt`.
@@ -250,10 +263,10 @@ newsbot/
   dedupe.py            # canonical URL + fuzzy title + GitHub repo + merge
   summarizer.py        # llm_filter + llm_style_posts + llm_daily_summary
   telegram_poster.py   # httpx Bot API sendMessage, 429 retry, tag-safe 4096 split
-  bot_commands.py      # long-polling command handler (/preview, /recap, /digest, /post, /scores, /status, /summary, …)
+  bot_commands.py      # long-polling command handler (/preview, /recap, /topics, /topic, /sources, /digest, /post, /scores, /status, /summary, …)
   jobs.py              # JobCoordinator (serializes gen + posting + summary via asyncio lock)
   collectors/
-    hackernews.py reddit.py github.py rss.py producthunt.py huggingface_papers.py
+    hackernews.py reddit.py github.py rss.py huggingface_papers.py trends.py
 lm_client.py           # OpenAI-compatible HTTP client with bounded retries
 core/                  # settings_store, text_utils, logging_config, log_sanitizer
 ```

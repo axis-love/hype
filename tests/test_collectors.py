@@ -577,43 +577,6 @@ async def test_github_collect_returns_candidate_instances():
 
 
 @pytest.mark.asyncio
-async def test_producthunt_collect_returns_candidate_instances():
-    """ProductHunt collector should return Candidate instances, not dicts."""
-    from newsbot.collectors import producthunt
-    fake_post = {
-        "name": "Cool Product",
-        "url": "/posts/cool-product",
-        "tagline": "A cool product",
-        "votesCount": 500,
-        "commentsCount": 50,
-        "createdAt": "2026-07-15T10:00:00Z",
-        "topics": {"edges": [{"node": {"name": "AI"}}]},
-    }
-    fake_resp = MagicMock()
-    fake_resp.status_code = 200
-    fake_resp.json.return_value = {
-        "data": {"topic": {"posts": {"edges": [{"node": fake_post}]}}}
-    }
-    fake_resp.raise_for_status = MagicMock()
-
-    fake_client = AsyncMock()
-    fake_client.post = AsyncMock(return_value=fake_resp)
-    fake_client.__aenter__ = AsyncMock(return_value=fake_client)
-    fake_client.__aexit__ = AsyncMock(return_value=None)
-
-    with patch("newsbot.collectors.producthunt.httpx.AsyncClient", return_value=fake_client):
-        with patch.dict("os.environ", {"PH_API_KEY": "test-token"}):
-            items = await producthunt.collect({
-                "topics": ["ai"], "limit": 5,
-            })
-
-    assert len(items) == 1
-    assert isinstance(items[0], Candidate)
-    assert items[0].source == "producthunt"
-    assert items[0].upvotes == 500
-
-
-@pytest.mark.asyncio
 async def test_rss_collect_returns_candidate_instances():
     """RSS collector should return Candidate instances, not dicts."""
     from newsbot.collectors import rss

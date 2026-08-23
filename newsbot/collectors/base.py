@@ -28,7 +28,6 @@ _KNOWN_SOURCES: frozenset[str] = frozenset({
     "hn", "hackernews",
     "reddit",
     "github",
-    "producthunt",
     "huggingface_papers",
     "rss",
     "trends",
@@ -68,7 +67,7 @@ class Candidate:
     # Required identity fields.
     title: str
     url: str
-    source: str          # 'hn' | 'reddit' | 'github' | 'producthunt' | 'rss' | etc.
+    source: str          # 'hn' | 'reddit' | 'github' | 'rss' | etc.
     source_name: str     # Human label, e.g. 'r/LocalLLaMA', 'OpenAI blog'
 
     # Optional fields with defaults.

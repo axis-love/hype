@@ -28,9 +28,7 @@ DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "hn": 1.2,  # alias — HN collector uses "hn" as source
     "reddit": 0.8,  # real counts now; start lower than HN
     "github": 1.1,
-    "producthunt": 0.8,
     "huggingface_papers": 1.2,
-    "lobsters": 1.0,
     "rss": 0.5,           # normal RSS
     "official_rss": 1.3,  # tagged via feed 'weight' override
     "trends": 0.6,        # Google Trends: traffic as reposts signal
@@ -274,7 +272,7 @@ def _validate_config(config: dict[str, Any]) -> None:
         errors.append("sources must be a dict")
     else:
         _VALID_SORT_VALUES = {"stars", "forks", "updated", "best-match", "help-wanted-issues"}
-        _VALID_SOURCE_KEYS = {"hackernews", "reddit", "github", "rss", "producthunt", "huggingface_papers", "trends"}
+        _VALID_SOURCE_KEYS = {"hackernews", "reddit", "github", "rss", "huggingface_papers", "trends"}
 
         # Reject unknown source blocks.
         for src_key in sources:
@@ -377,27 +375,6 @@ def _validate_config(config: dict[str, Any]) -> None:
                 sort_val = gh_config.get("sort")
                 if sort_val is not None and sort_val not in _VALID_SORT_VALUES:
                     errors.append(f"sources.github.sort must be one of {_VALID_SORT_VALUES}, got {sort_val!r}")
-
-        # Product Hunt config validation.
-        ph_config = sources.get("producthunt")
-        if ph_config is not None:
-            if not isinstance(ph_config, dict):
-                errors.append("sources.producthunt must be a dict")
-            else:
-                ph_limit = ph_config.get("limit")
-                if ph_limit is not None:
-                    if not isinstance(ph_limit, int):
-                        errors.append("sources.producthunt.limit must be int")
-                    elif ph_limit <= 0 or ph_limit > 100:
-                        errors.append("sources.producthunt.limit must be in [1, 100]")
-                ph_topics = ph_config.get("topics")
-                if ph_topics is not None:
-                    if not isinstance(ph_topics, list):
-                        errors.append("sources.producthunt.topics must be a list")
-                    else:
-                        for i, topic in enumerate(ph_topics):
-                            if not isinstance(topic, str):
-                                errors.append(f"sources.producthunt.topics[{i}] must be a string")
 
         # HuggingFace Papers config validation.
         hf_config = sources.get("huggingface_papers")

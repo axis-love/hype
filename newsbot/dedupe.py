@@ -59,7 +59,6 @@ _PRE_MERGE_WEIGHTS: dict[str, float] = {
     "hn": 1.2,
     "reddit": 1.0,
     "github": 1.1,
-    "producthunt": 0.8,
     "huggingface_papers": 1.2,
     "rss": 0.5,
 }

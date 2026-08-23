@@ -15,7 +15,7 @@ from newsbot.bot_commands import BotCommandHandler
 
 
 class _FakeSettings:
-    """In-memory SettingsStore double: get/set over a nested dict."""
+    """In-memory SettingsStore double: get/set/list over a nested dict."""
 
     def __init__(self, data: dict[str, dict[str, object]] | None = None):
         self._data: dict[str, dict[str, object]] = data or {}
@@ -25,6 +25,9 @@ class _FakeSettings:
 
     def set(self, section: str, key: str, value: object) -> None:
         self._data.setdefault(section, {})[key] = value
+
+    def list(self, section: str) -> dict[str, object]:
+        return dict(self._data.get(section, {}))
 
 
 def _make_handler(**overrides: Any) -> BotCommandHandler:
@@ -75,7 +78,8 @@ class TestHelpPanel:
         text = handler._help_text()
         # Every command in the panel must be documented.
         for cmd in ["/preview", "/recap", "/recap prompt", "/digest dry", "/status", "/scores",
-                    "/store", "/style", "/digest", "/post", "/summary", "/setstyle", "/setrecap"]:
+                    "/store", "/style", "/digest", "/post", "/summary", "/setstyle", "/setrecap",
+                    "/topics", "/topic on", "/topic off", "/sources"]:
             assert cmd in text, f"/help missing {cmd}"
         # Grouped sections exist.
         assert "Preview" in text
@@ -342,3 +346,142 @@ class TestDigestDryCommand:
         await handler._handle(_update(123, "/digest"))
         assert any("Triggering" in c[1] for c in calls)
         assert not any("dry" in c[1].lower() for c in calls)
+
+
+class TestTopicCommands:
+    """Tests for /topics, /topic on|off, /sources (H-4 admin surface)."""
+
+    @pytest.mark.asyncio
+    async def test_topics_lists_all_packs(self):
+        """/topics shows every pack with on/off, boost, and source counts."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/topics"))
+        assert len(calls) == 1
+        text = calls[0][1]
+        # All default packs must appear.
+        from newsbot.topics import DEFAULT_TOPIC_PACKS
+        for name in DEFAULT_TOPIC_PACKS:
+            assert name in text, f"/topics missing pack {name}"
+        # gaming is enabled by default and has subs + feeds.
+        assert "gaming" in text
+        assert "on" in text
+
+    @pytest.mark.asyncio
+    async def test_topic_off_gaming_then_sources_omits_gaming(self):
+        """/topic off gaming → /sources no longer lists gaming subs/feeds."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+
+        # Disable gaming.
+        await handler._handle(_update(123, "/topic off gaming"))
+        assert any("gaming" in c[1] and "off" in c[1] for c in calls)
+        # The settings store now has the override.
+        topics = settings.get("news", "topics", {})
+        assert topics.get("gaming", {}).get("enabled") is False
+
+        # /sources should not list gaming subs/feeds.
+        calls.clear()
+        await handler._handle(_update(123, "/sources"))
+        assert len(calls) == 1
+        sources_text = calls[0][1]
+        # Gaming subs must not appear.
+        assert "GamingLeaksAndRumours" not in sources_text
+        # Gaming feeds must not appear.
+        assert "IGN" not in sources_text
+        assert "Eurogamer" not in sources_text
+
+    @pytest.mark.asyncio
+    async def test_topic_on_art_accepted_but_no_sources(self):
+        """/topic on art → accepted (art is a known empty pack) but /sources shows no art sources."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+
+        await handler._handle(_update(123, "/topic on art"))
+        assert any("art" in c[1] and "on" in c[1] for c in calls)
+        topics = settings.get("news", "topics", {})
+        assert topics.get("art", {}).get("enabled") is True
+
+        # /sources should still show 0 art sources (art has no subs/feeds/queries).
+        calls.clear()
+        await handler._handle(_update(123, "/sources"))
+        assert len(calls) == 1
+        # art has no sources to list — no error, just no art-specific subs.
+        assert "Config error" not in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_topic_on_unknown_pack_returns_error(self):
+        """/topic on nope → error reply, nothing written to settings."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+
+        await handler._handle(_update(123, "/topic on nope"))
+        assert len(calls) == 1
+        assert "Unknown" in calls[0][1] or "unknown" in calls[0][1]
+        # Nothing was written.
+        assert "topics" not in settings._data.get("news", {})
+
+    @pytest.mark.asyncio
+    async def test_topic_no_args_shows_usage(self):
+        """/topic with no args → usage message."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/topic"))
+        assert any("Usage" in c[1] for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_topic_off_then_on_restores_sources(self):
+        """/topic off gaming then /topic on gaming → /sources lists gaming again."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+
+        await handler._handle(_update(123, "/topic off gaming"))
+        await handler._handle(_update(123, "/topic on gaming"))
+        topics = settings.get("news", "topics", {})
+        assert topics.get("gaming", {}).get("enabled") is True
+
+        calls.clear()
+        await handler._handle(_update(123, "/sources"))
+        assert "GamingLeaksAndRumours" in calls[0][1]
+        assert "IGN" in calls[0][1]
+
+    @pytest.mark.asyncio
+    async def test_topic_off_persists_across_settings_instances(self):
+        """/topic off writes to the settings store — a new handler sees it."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        await handler._handle(_update(123, "/topic off ai"))
+
+        # New handler with the same settings store should see ai is off.
+        handler2 = _make_handler(settings=settings)
+        calls = _capture_send(handler2)
+        await handler2._handle(_update(123, "/topics"))
+        assert len(calls) == 1
+        # ai should show as off in the listing.
+        text = calls[0][1]
+        ai_line = [l for l in text.split("\n") if "ai:" in l]
+        assert ai_line
+        assert "off" in ai_line[0]
+
+    @pytest.mark.asyncio
+    async def test_sources_shows_all_enabled_sources(self):
+        """/sources with default config shows all enabled pack sources."""
+        settings = _FakeSettings({})
+        handler = _make_handler(settings=settings)
+        calls = _capture_send(handler)
+        await handler._handle(_update(123, "/sources"))
+        assert len(calls) == 1
+        text = calls[0][1]
+        # HN should be present (non-topic source).
+        assert "Hacker News" in text or "hackernews" in text.lower()
+        # Reddit subs from enabled packs should appear.
+        assert "Reddit" in text
+        # Topic boosts should be listed.
+        assert "boosts" in text.lower() or "boost" in text.lower()
+
