@@ -26,7 +26,7 @@ from newsbot.topics import (
 DEFAULT_SOURCE_WEIGHTS: dict[str, float] = {
     "hackernews": 1.2,
     "hn": 1.2,  # alias — HN collector uses "hn" as source
-    "reddit": 0.8,  # real counts now; start lower than HN
+    "reddit": 1.0,  # H-5 tuning: 0.8 depressed high-engagement Reddit items
     "github": 1.1,
     "huggingface_papers": 1.2,
     "rss": 0.5,           # normal RSS
