@@ -23,20 +23,32 @@ from typing import Any, Optional
 
 # --- Source identifier validation ---
 
-#: Valid source identifiers accepted by the Candidate model.
-_KNOWN_SOURCES: frozenset[str] = frozenset({
-    "hn", "hackernews",
+#: Canonical source keys accepted in config ``sources`` blocks.
+#: This is the single source of truth — config.py imports it for validation,
+#: and main.py's COLLECTORS registry keys must match this set (tested).
+#: Adding a collector means adding its key here + a COLLECTORS entry.
+VALID_SOURCE_KEYS: frozenset[str] = frozenset({
+    "hackernews",
     "reddit",
     "github",
-    "huggingface_papers",
     "rss",
+    "huggingface_papers",
     "trends",
 })
 
 #: Alias normalization: maps alternative names to canonical source IDs.
+#: Used by Candidate so collectors can emit either form (e.g. "hackernews"
+#: in config vs "hn" in Candidate.source).
 _SOURCE_ALIASES: dict[str, str] = {
     "hackernews": "hn",
 }
+
+#: All accepted Candidate source IDs: canonical config keys + alias keys
+#: and targets. Derived from VALID_SOURCE_KEYS so the set stays in sync
+#: automatically when a collector is added or removed.
+_KNOWN_SOURCES: frozenset[str] = VALID_SOURCE_KEYS | frozenset(
+    _SOURCE_ALIASES.keys()
+) | frozenset(_SOURCE_ALIASES.values())
 
 
 def _normalize_source_id(src: str) -> str:

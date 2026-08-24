@@ -44,7 +44,7 @@ from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT, load_config
 from newsbot.telegram_poster import post_rich_message, RichSendRejected
-from newsbot.topics import DEFAULT_TOPIC_PACKS, merge_packs as _merge_topic_packs
+from newsbot.topics import DEFAULT_TOPIC_PACKS, merge_packs as _merge_topic_packs, validate_topic_overrides as _validate_topic_overrides
 
 log = logging.getLogger(__name__)
 
@@ -289,7 +289,14 @@ class BotCommandHandler:
         await self._send(chat_id, "\n".join(lines))
 
     async def _cmd_topic(self, chat_id: int, arg: str) -> None:
-        """Enable or disable a topic pack via the news.topics override."""
+        """Enable or disable a topic pack via the news.topics override.
+
+        The ``enabled`` flag is merged into the existing per-topic override
+        dict (preserving keys like ``feeds`` written by the migration script)
+        rather than replacing it wholesale. The merged overrides are validated
+        before persisting so a stale key never takes down the next
+        ``load_config`` tick.
+        """
         parts = arg.split(maxsplit=1)
         if len(parts) < 2:
             await self._send(
@@ -316,57 +323,104 @@ class BotCommandHandler:
             return
 
         # Merge the new override into the existing news.topics row.
+        # Do NOT replace the per-topic dict — keys like "feeds" written by
+        # the migration script must survive a /topic on|off toggle.
         overrides = self.settings.get("news", "topics", {}) or {}
         if not isinstance(overrides, dict):
             overrides = {}
-        overrides[topic_name] = {"enabled": action == "on"}
-        self.settings.set("news", "topics", overrides)
+        existing = overrides.get(topic_name, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        merged_topic = dict(existing)
+        merged_topic["enabled"] = action == "on"
+        merged_overrides = dict(overrides)
+        merged_overrides[topic_name] = merged_topic
+
+        # Validate BEFORE persisting: a stale key makes every load_config
+        # tick fail after /topic replied success.
+        errors = _validate_topic_overrides(merged_overrides)
+        if errors:
+            await self._send(
+                chat_id,
+                "Refusing to persist — validation error:\n  "
+                + "\n  ".join(errors)
+                + "\nFix the news.topics override directly (SQLite).",
+            )
+            return
+
+        self.settings.set("news", "topics", merged_overrides)
         log.info("topic pack '%s' turned %s via /topic", topic_name, action)
         await self._send(chat_id, f"Topic '{topic_name}' is now {action}.")
 
     async def _cmd_sources(self, chat_id: int) -> None:
-        """Show the effective derived source blocks the next /digest will fetch."""
+        """Show the effective derived source blocks the next /digest will fetch.
+
+        Renders generically from ``cfg["sources"]`` — any source block not
+        matching a known shape is rendered as JSON. Blocks that came from
+        an explicit ``news.sources`` override (rather than topic packs) are
+        flagged so the operator knows a /topic toggle is inert for them.
+        """
         try:
             cfg = load_config(self.settings)
         except ValueError as exc:
             await self._send(chat_id, f"Config error: {exc}")
             return
         sources = cfg.get("sources") or {}
+        shadowed = set(cfg.get("shadowed_sources") or [])
 
         lines = ["Effective sources (what the next /digest will fetch):\n"]
-        reddit = sources.get("reddit") or {}
-        subs = reddit.get("subreddits") or []
-        lines.append(f"Reddit ({len(subs)} subreddits): {', '.join(subs) if subs else '—'}")
 
-        rss = sources.get("rss") or {}
-        feeds = rss.get("feeds") or []
-        if feeds:
-            feed_names = [f.get("name", "?") for f in feeds]
-            lines.append(f"RSS ({len(feeds)} feeds): {', '.join(feed_names)}")
-        else:
-            lines.append("RSS (0 feeds): —")
-
-        github = sources.get("github") or {}
-        queries = github.get("queries") or []
-        lines.append(f"GitHub ({len(queries)} queries): {', '.join(queries) if queries else '—'}")
-
-        hn = sources.get("hackernews") or {}
-        if hn:
-            lines.append(f"Hacker News: limit={hn.get('limit', '?')}")
-
-        hf = sources.get("huggingface_papers") or {}
-        if hf:
-            lines.append(f"HuggingFace Papers: limit={hf.get('limit', '?')}")
-
-        trends = sources.get("trends") or {}
-        if trends:
-            lines.append(f"Trends: geos={trends.get('geos', [])}")
+        # Render each source block generically. Known shapes get a compact
+        # summary; unknown shapes fall back to JSON so nothing is hidden.
+        for src_key in sorted(sources):
+            block = sources[src_key] or {}
+            flag = " ⚠️ explicit override (shadows topic packs)" if src_key in shadowed else ""
+            summary = self._render_source_block(src_key, block)
+            lines.append(f"{src_key}{flag}: {summary}")
 
         boosts = cfg.get("topic_boost") or {}
         if boosts:
             lines.append(f"\nTopic boosts: {', '.join(f'{k}={v}' for k, v in sorted(boosts.items()))}")
 
+        if shadowed:
+            lines.append(
+                "\n⚠️ Shadowed source blocks above come from an explicit "
+                "news.sources override. /topic on|off will NOT change them — "
+                "edit news.sources directly to remove the override."
+            )
+
         await self._send(chat_id, "\n".join(lines))
+
+    @staticmethod
+    def _render_source_block(src_key: str, block: dict[str, Any]) -> str:
+        """Compact one-line summary of a source block.
+
+        Known shapes (reddit, rss, github, hackernews, huggingface_papers,
+        trends) get a human-readable summary. Unknown shapes fall back to
+        JSON so every block is visible without hardcoding every collector.
+        """
+        if not block:
+            return "(empty)"
+
+        if src_key == "reddit":
+            subs = block.get("subreddits") or []
+            return f"{len(subs)} subreddits: {', '.join(subs) if subs else '—'}"
+        if src_key == "rss":
+            feeds = block.get("feeds") or []
+            names = [f.get("name", "?") for f in feeds if isinstance(f, dict)]
+            return f"{len(feeds)} feeds: {', '.join(names) if names else '—'}"
+        if src_key == "github":
+            queries = block.get("queries") or []
+            return f"{len(queries)} queries: {', '.join(queries) if queries else '—'}"
+        if src_key == "hackernews":
+            return f"limit={block.get('limit', '?')}"
+        if src_key == "huggingface_papers":
+            return f"limit={block.get('limit', '?')}"
+        if src_key == "trends":
+            return f"geos={block.get('geos', [])}"
+
+        # Unknown shape — render as JSON so nothing is hidden.
+        return json.dumps(block, default=str, ensure_ascii=False)
 
     async def _cmd_digest(self, chat_id: int) -> None:
         if self.on_digest:

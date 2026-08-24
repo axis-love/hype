@@ -13,6 +13,7 @@ import math
 from typing import Any
 
 from core.settings_store import SettingsStore
+from newsbot.collectors.base import VALID_SOURCE_KEYS
 from newsbot.topics import (
     DEFAULT_TOPIC_PACKS,
     derive_config as _derive_topic_config,
@@ -134,6 +135,11 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
       news.llm_max_tokens_digest  — int (1500)
       news.style_prompt           — str (DEFAULT_STYLE_PROMPT)
       news.recap_prompt           — str (DEFAULT_RECAP_PROMPT)
+
+    Returns ``shadowed_sources``: list of source keys whose blocks came
+    from an explicit ``news.sources`` override rather than topic packs.
+    /sources and /topic surface this so the operator knows a /topic toggle
+    is inert for those blocks.
     """
     raw = settings.list("news") if hasattr(settings, "list") else {}
 
@@ -165,9 +171,14 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
     if "trends" not in sources:
         sources["trends"] = dict(DEFAULT_SOURCES["trends"])
     # Merge explicit overrides over pack-derived sources.
+    shadowed_sources: list[str] = []
     for src_key, src_cfg in explicit_sources.items():
         if src_cfg:
             sources[src_key] = src_cfg
+            # A non-topic explicit override shadows the pack-derived block
+            # (or the default block for HN/HF/Trends). Report it so /sources
+            # and /topic can surface the signal to the operator.
+            shadowed_sources.append(src_key)
         else:
             sources.pop(src_key, None)
     # Drop sources the operator disabled (set to None or empty dict).
@@ -179,6 +190,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
 
     config = {
         "sources": sources,
+        "shadowed_sources": shadowed_sources,
         "source_weights": _coerce_dict(raw.get("source_weights"), DEFAULT_SOURCE_WEIGHTS, key="source_weights"),
         "topic_boost": topic_boost,
         "topic_keywords": derived["topic_keywords"],
@@ -272,12 +284,13 @@ def _validate_config(config: dict[str, Any]) -> None:
         errors.append("sources must be a dict")
     else:
         _VALID_SORT_VALUES = {"stars", "forks", "updated", "best-match", "help-wanted-issues"}
-        _VALID_SOURCE_KEYS = {"hackernews", "reddit", "github", "rss", "huggingface_papers", "trends"}
 
-        # Reject unknown source blocks.
+        # Reject unknown source blocks. VALID_SOURCE_KEYS is the single
+        # source of truth imported from collectors/base.py — adding a
+        # collector there automatically extends config validation.
         for src_key in sources:
-            if src_key not in _VALID_SOURCE_KEYS:
-                errors.append(f"unknown source {src_key!r} — valid: {', '.join(sorted(_VALID_SOURCE_KEYS))}")
+            if src_key not in VALID_SOURCE_KEYS:
+                errors.append(f"unknown source {src_key!r} — valid: {', '.join(sorted(VALID_SOURCE_KEYS))}")
 
         # RSS feeds validation (expanded).
         rss_config = sources.get("rss")

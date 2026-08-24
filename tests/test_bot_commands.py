@@ -471,7 +471,9 @@ class TestTopicCommands:
 
     @pytest.mark.asyncio
     async def test_sources_shows_all_enabled_sources(self):
-        """/sources with default config shows all enabled pack sources."""
+        """/sources with default config shows all enabled pack sources.
+        H-7: rendered generically from cfg['sources'] — source keys are
+        lowercase (matching the config block names)."""
         settings = _FakeSettings({})
         handler = _make_handler(settings=settings)
         calls = _capture_send(handler)
@@ -479,9 +481,11 @@ class TestTopicCommands:
         assert len(calls) == 1
         text = calls[0][1]
         # HN should be present (non-topic source).
-        assert "Hacker News" in text or "hackernews" in text.lower()
+        assert "hackernews" in text.lower()
         # Reddit subs from enabled packs should appear.
-        assert "Reddit" in text
+        assert "reddit" in text.lower()
+        # RSS feeds from enabled packs should appear.
+        assert "rss" in text.lower()
         # Topic boosts should be listed.
         assert "boosts" in text.lower() or "boost" in text.lower()
 
