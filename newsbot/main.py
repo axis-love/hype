@@ -75,7 +75,7 @@ from newsbot.jobs import (
 )
 from newsbot.images import extract_article_media
 from newsbot.richmd import render_post, render_post_blocks, render_recap, signature_for
-from newsbot.selection import pick_hottest
+from newsbot.selection import pick_hottest, select_diverse_candidates
 from newsbot.telegram_poster import post_digest, post_rich_message, RichSendRejected
 from newsbot.summarizer import (
     _assign_candidate_ids,
@@ -220,89 +220,7 @@ def filter_seen(items: list[dict[str, Any]], store: NewsStore) -> list[dict[str,
     return kept
 
 
-def _select_diverse_candidates(
-    scored: list[dict[str, Any]],
-    max_candidates: int,
-    cfg: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """Select top candidates with guaranteed source diversity.
 
-    Uses round-robin allocation: sources are ordered by their top score,
-    and each source contributes one item per round until it exhausts its
-    quota or all slots are filled. This ensures every source with eligible
-    candidates gets at least one slot before any source gets a second.
-
-    When a guarantee cannot be met (not enough eligible items), remaining
-    slots are filled by global score ranking.
-    """
-    if not scored:
-        return []
-
-    sq = cfg.get("source_quota")
-    source_quota = int(sq) if sq is not None else 8
-
-    # Deterministic sort key: score desc, title asc, source asc, URL asc.
-    # Used everywhere to ensure order-independent selection.
-    def _sort_key(c: dict[str, Any]) -> tuple:
-        return (
-            -float(c.get("score") or 0.0),
-            str(c.get("title") or ""),
-            str(c.get("source") or ""),
-            str(c.get("url") or ""),
-        )
-
-    # Group by source, sorted by score within each group.
-    by_source: dict[str, list[dict[str, Any]]] = {}
-    for c in scored:
-        src = str(c.get("source") or "unknown")
-        by_source.setdefault(src, []).append(c)
-    for src in by_source:
-        by_source[src].sort(key=_sort_key)
-
-    # Order sources by their top item's score (descending), then alphabetically.
-    # Uses the same key (including title) as the pool sort for consistency.
-    source_order = sorted(
-        by_source,
-        key=lambda s: (
-            -float(by_source[s][0].get("score") or 0.0),
-            str(by_source[s][0].get("title") or ""),
-            s,
-        ),
-    )
-
-    top: list[dict[str, Any]] = []
-    used: set[int] = set()
-
-    # Phase 1: round-robin allocation — one item per source per round.
-    # This ensures every source gets at least one slot before any gets two.
-    rounds = min(source_quota, max_candidates)
-    for round_idx in range(rounds):
-        for src in source_order:
-            if len(top) >= max_candidates:
-                break
-            items = by_source[src]
-            if round_idx < len(items):
-                item = items[round_idx]
-                if id(item) not in used:
-                    top.append(item)
-                    used.add(id(item))
-        if len(top) >= max_candidates:
-            break
-
-    # Phase 2: fill remaining slots by global score ranking.
-    # Use the same deterministic key: score desc, title asc, source asc, URL asc.
-    if len(top) < max_candidates:
-        remaining = [c for c in scored if id(c) not in used]
-        remaining.sort(key=_sort_key)
-        for item in remaining:
-            top.append(item)
-            if len(top) >= max_candidates:
-                break
-
-    # Re-sort the final selection by score for the LLM filter.
-    # Deterministic tie-break: score desc, title asc, source asc, URL asc.
-    top.sort(key=_sort_key)
-    return top
 
 
 @dataclass
@@ -358,7 +276,7 @@ async def _run_generation_pipeline(
     min_score = float(cfg.get("min_score") or 0.0)
     scored = [c for c in candidates if float(c.get("score") or 0.0) >= min_score]
     above_min_score = len(scored)
-    top = _select_diverse_candidates(scored, int(cfg["max_candidates"]), cfg)
+    top = select_diverse_candidates(scored, int(cfg["max_candidates"]), cfg)
     sent_to_filter = len(top)
     if not top:
         return None

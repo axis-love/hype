@@ -2,9 +2,11 @@ FROM news-bot-newsbot:latest
 
 USER root
 
-# Install dev dependencies (pytest + pytest-asyncio)
+# Install dev dependencies from pyproject.toml's [dev] extras.
+# The prod image already has the package installed; this adds pytest +
+# pytest-asyncio from the same pyproject that pins their versions.
 COPY pyproject.toml /app/pyproject.toml
-RUN pip install --no-cache-dir pytest==8.4.2 pytest-asyncio==0.26.0
+RUN pip install --no-cache-dir ".[dev]"
 
 # Copy test suite (excluded from prod image by .dockerignore)
 COPY tests/ /app/tests/

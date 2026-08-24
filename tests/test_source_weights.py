@@ -61,7 +61,7 @@ class TestSourceWeightNormalization:
 
 
 class TestDiversitySelection:
-    """Tests for _select_diverse_candidates round-robin allocation."""
+    """Tests for select_diverse_candidates round-robin allocation."""
 
     def _make_candidates(self, source: str, count: int, score_base: float = 50.0) -> list[dict]:
         return [
@@ -71,7 +71,7 @@ class TestDiversitySelection:
 
     def test_all_sources_get_representation(self):
         """With 3 sources and max_candidates=6, each source should get at least 2 slots."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         hn = self._make_candidates("hn", 5, 100)
         reddit = self._make_candidates("reddit", 5, 80)
@@ -79,7 +79,7 @@ class TestDiversitySelection:
 
         scored = sorted(hn + reddit + github, key=lambda c: c["score"], reverse=True)
         cfg = {"source_quota": 3}
-        top = _select_diverse_candidates(scored, 6, cfg)
+        top = select_diverse_candidates(scored, 6, cfg)
 
         sources = [c["source"] for c in top]
         assert sources.count("hn") >= 1
@@ -88,7 +88,7 @@ class TestDiversitySelection:
 
     def test_dominant_source_does_not_crowd_out(self):
         """Even if GitHub has 20 items, other sources should still get slots."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         github = self._make_candidates("github", 20, 100)
         hn = self._make_candidates("hn", 3, 50)
@@ -96,7 +96,7 @@ class TestDiversitySelection:
 
         scored = sorted(github + hn + reddit, key=lambda c: c["score"], reverse=True)
         cfg = {"source_quota": 3}
-        top = _select_diverse_candidates(scored, 8, cfg)
+        top = select_diverse_candidates(scored, 8, cfg)
 
         sources = [c["source"] for c in top]
         # Each source should get at least 2 slots (round-robin, 8 slots, 3 sources)
@@ -106,14 +106,14 @@ class TestDiversitySelection:
 
     def test_remaining_slots_filled_by_score(self):
         """When all sources have fewer items than slots, fill by score."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         hn = self._make_candidates("hn", 2, 100)
         reddit = self._make_candidates("reddit", 2, 80)
 
         scored = sorted(hn + reddit, key=lambda c: c["score"], reverse=True)
         cfg = {"source_quota": 5}
-        top = _select_diverse_candidates(scored, 6, cfg)
+        top = select_diverse_candidates(scored, 6, cfg)
 
         assert len(top) == 4  # only 4 candidates exist
         # Should be sorted by score
@@ -121,18 +121,18 @@ class TestDiversitySelection:
         assert scores == sorted(scores, reverse=True)
 
     def test_empty_candidates(self):
-        from newsbot.main import _select_diverse_candidates
-        assert _select_diverse_candidates([], 10, {"source_quota": 3}) == []
+        from newsbot.selection import select_diverse_candidates
+        assert select_diverse_candidates([], 10, {"source_quota": 3}) == []
 
     def test_source_quota_zero_respected(self):
         """source_quota=0 should mean no round-robin, all slots filled by score."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         hn = self._make_candidates("hn", 3, 100)
         reddit = self._make_candidates("reddit", 3, 50)
         scored = sorted(hn + reddit, key=lambda c: c["score"], reverse=True)
         cfg = {"source_quota": 0}
-        top = _select_diverse_candidates(scored, 4, cfg)
+        top = select_diverse_candidates(scored, 4, cfg)
         assert len(top) == 4
         # With quota=0, round-robin gives 0 rounds; all filled by score.
         # HN has higher scores, so HN items should dominate.
@@ -140,15 +140,15 @@ class TestDiversitySelection:
 
     def test_equal_score_deterministic_with_quota_zero(self):
         """Equal-score candidates with quota=0 and one slot: same title regardless of input order."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         # Two candidates with equal score, different titles.
         alpha = {"source": "hn", "title": "Alpha", "score": 50.0, "url": "http://a"}
         zulu = {"source": "hn", "title": "Zulu", "score": 50.0, "url": "http://z"}
 
         cfg = {"source_quota": 0}
-        top1 = _select_diverse_candidates([alpha, zulu], 1, cfg)
-        top2 = _select_diverse_candidates([zulu, alpha], 1, cfg)
+        top1 = select_diverse_candidates([alpha, zulu], 1, cfg)
+        top2 = select_diverse_candidates([zulu, alpha], 1, cfg)
 
         # With deterministic tie-break (title ascending), Alpha should always win.
         assert len(top1) == 1
@@ -157,7 +157,7 @@ class TestDiversitySelection:
 
     def test_deterministic_selection_across_permutations(self):
         """Reversing input order must produce identical selection."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         candidates = []
         for src, score, i in [
@@ -168,8 +168,8 @@ class TestDiversitySelection:
             candidates.append({"source": src, "title": f"{src}-{i}", "score": float(score), "url": f"http://{src}/{i}"})
 
         cfg = {"source_quota": 2}
-        top1 = _select_diverse_candidates(list(candidates), 5, cfg)
-        top2 = _select_diverse_candidates(list(reversed(candidates)), 5, cfg)
+        top1 = select_diverse_candidates(list(candidates), 5, cfg)
+        top2 = select_diverse_candidates(list(reversed(candidates)), 5, cfg)
 
         assert len(top1) == len(top2) == 5
         titles1 = [c["title"] for c in top1]
@@ -223,7 +223,7 @@ class TestMixedPoolDiversity:
     def test_mixed_pool_all_sources_represented(self):
         """A single selection run with HN, RSS, GitHub, and Trends
         must give every source at least one slot when slots are available."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         hn = [{"source": "hn", "title": f"HN-{i}", "score": 100.0 - i, "url": f"http://hn/{i}"} for i in range(5)]
         rss = [{"source": "rss", "title": f"RSS-{i}", "score": 80.0 - i, "url": f"http://rss/{i}"} for i in range(5)]
@@ -232,7 +232,7 @@ class TestMixedPoolDiversity:
 
         scored = sorted(hn + rss + github + trends, key=lambda c: c["score"], reverse=True)
         cfg = {"source_quota": 2}
-        top = _select_diverse_candidates(scored, 8, cfg)
+        top = select_diverse_candidates(scored, 8, cfg)
 
         sources = [c["source"] for c in top]
         assert "hn" in sources
@@ -242,7 +242,7 @@ class TestMixedPoolDiversity:
 
     def test_mixed_pool_deterministic_across_permutations(self):
         """Reversing mixed-pool input must produce identical selection."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         candidates = []
         for src, score, i in [
@@ -254,8 +254,8 @@ class TestMixedPoolDiversity:
             candidates.append({"source": src, "title": f"{src}-{i}", "score": float(score), "url": f"http://{src}/{i}"})
 
         cfg = {"source_quota": 2}
-        top1 = _select_diverse_candidates(list(candidates), 5, cfg)
-        top2 = _select_diverse_candidates(list(reversed(candidates)), 5, cfg)
+        top1 = select_diverse_candidates(list(candidates), 5, cfg)
+        top2 = select_diverse_candidates(list(reversed(candidates)), 5, cfg)
 
         titles1 = [c["title"] for c in top1]
         titles2 = [c["title"] for c in top2]
@@ -267,14 +267,14 @@ class TestURLTieBreak:
 
     def test_equal_score_title_source_url_tiebreak(self):
         """Two candidates with equal score, title, and source — URL breaks tie."""
-        from newsbot.main import _select_diverse_candidates
+        from newsbot.selection import select_diverse_candidates
 
         a = {"source": "hn", "title": "Same", "score": 50.0, "url": "http://a.com"}
         b = {"source": "hn", "title": "Same", "score": 50.0, "url": "http://b.com"}
 
         cfg = {"source_quota": 0}
-        top1 = _select_diverse_candidates([a, b], 1, cfg)
-        top2 = _select_diverse_candidates([b, a], 1, cfg)
+        top1 = select_diverse_candidates([a, b], 1, cfg)
+        top2 = select_diverse_candidates([b, a], 1, cfg)
 
         # URL ascending: a.com < b.com, so a always wins.
         assert top1[0]["url"] == "http://a.com"
