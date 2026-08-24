@@ -8,7 +8,7 @@ Runs as a long-lived process inside Docker:
 In scheduled mode, two wall-clock slot loops run concurrently
 (local time from NEWS_TZ, default Asia/Bangkok):
 
-  - Generation slots (NEWS_GEN_HOURS, default "5,17"):
+  - Generation slots (NEWS_GEN_HOURS, default "5,9,13,17,21"):
       collect → filter-seen → dedupe → score → LLM filter → store raw
       candidates. Catch-up: a missed slot still fires once after downtime.
 
@@ -41,7 +41,7 @@ from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
 from newsbot.bot_commands import BotCommandHandler
-from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot, summary_day
+from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot, summary_day, DEFAULT_GEN_HOURS
 from newsbot.collectors import (
     hackernews,
     reddit,
@@ -1055,9 +1055,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     """Long-running loop with wall-clock slot-based scheduling.
 
     Generation fires at the hours named by ``NEWS_GEN_HOURS`` (default
-    ``"5,17"`` local time) with catch-up after downtime. Posting fires on
-    even hours, never backfilling. Bot command handler polls Telegram
-    getUpdates concurrently.
+    ``DEFAULT_GEN_HOURS`` = "5,9,13,17,21" local time) with catch-up after
+    downtime. Posting fires on even hours, never backfilling. Bot command
+    handler polls Telegram getUpdates concurrently.
 
     All jobs go through a JobCoordinator that serializes generation and
     posting, preventing overlap between scheduled and manual commands.
@@ -1066,7 +1066,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     store = NewsStore(Path(db_path))
     coordinator = JobCoordinator(store, settings)
 
-    gen_hours = gen_slots(os.getenv("NEWS_GEN_HOURS", "5,17"))
+    gen_hours = gen_slots(os.getenv("NEWS_GEN_HOURS", DEFAULT_GEN_HOURS))
 
     # --- Bot command handler (optional) ---
     bot_token = os.getenv("BOT_TOKEN", "").strip()

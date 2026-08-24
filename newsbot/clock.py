@@ -16,6 +16,11 @@ from zoneinfo import ZoneInfo
 
 DEFAULT_TZ = "Asia/Bangkok"
 
+#: Default generation hours (local wall-clock). The H-6 cadence — every 4 h
+#: from 05:00. Declared once here so main.py, README, .env.example, and
+#: compose.yml all reference the same value without hand-syncing.
+DEFAULT_GEN_HOURS = "5,9,13,17,21"
+
 
 def local_now() -> datetime:
     """Current wall-clock time in ``NEWS_TZ`` (default Asia/Bangkok)."""
