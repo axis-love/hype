@@ -29,8 +29,8 @@ log = logging.getLogger(__name__)
 FILTER_SYSTEM = (
     "You are a tech-news filter. For each candidate below, decide whether to keep it "
     "for a Telegram digest. Drop: old news, thin marketing launches, pure drama, "
-    "crypto spam, obvious reposts, low-quality GitHub repos, low-value Product Hunt "
-    "launches. Check the Published date — if the item is older than 7 days, drop it "
+    "crypto spam, obvious reposts, low-quality GitHub repos. Check the Published "
+    "date — if the item is older than 7 days, drop it "
     "unless it has extraordinary engagement (10K+ stars, 1K+ upvotes) AND is still "
     "actively discussed. For kept items, assign a category (e.g. 'AI / Coding', 'LLM', 'Game Dev', "
     "'VR/AR', 'Robotics', 'Research', 'Tools'), an importance score from 1 to 10, a "

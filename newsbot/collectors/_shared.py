@@ -1,7 +1,7 @@
 """Shared concurrency primitives for collectors.
 
 A single shared semaphore bounds concurrent leaf HTTP requests across
-ALL collectors (RSS, Reddit, GitHub, Hacker News, Product Hunt, HuggingFace)
+ALL collectors (RSS, Reddit, GitHub, Hacker News, HuggingFace)
 to prevent overwhelming the event loop or hitting connection limits.
 """
 from __future__ import annotations
