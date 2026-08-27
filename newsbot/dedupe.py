@@ -328,6 +328,49 @@ def _merged_urls_list(row: dict[str, Any]) -> list[str]:
     return [entry for entry in parsed if isinstance(entry, str)]
 
 
+def _row_raw_json(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse a store row's raw_json (a JSON *string* in the DB) into a dict.
+
+    Tolerant: str or dict input, malformed JSON, and missing values all
+    degrade to None — never raises. Mirrors _merged_urls_list's tolerance
+    so match_candidate_to_store can consult row-side external_url without
+    a separate try/except at every call site.
+    """
+    raw = row.get("raw_json")
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        # json.loads can yield non-dict types (list, int, etc).
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _row_external_url_key(row: dict[str, Any]) -> str:
+    """Canonical key of the external article URL stored in a row's raw_json.
+
+    Store rows carry raw_json as a JSON *string* (dict only in-memory).
+    This helper parses it tolerantly (via _row_raw_json) and returns the
+    canonical URL of the linked article, or "" when absent/malformed.
+
+    Mirrors _external_url_key (candidate-side) so that a Reddit link post
+    whose raw_json.external_url is apple.com can match a store row whose
+    raw_json.external_url IS apple.com — cross-side identity.
+    """
+    rj = _row_raw_json(row)
+    if rj is None:
+        return ""
+    external = str(rj.get("external_url") or "").strip()
+    if not external.startswith(("http://", "https://")):
+        return ""
+    return _canonical_url(external)
+
+
 def _fuzzy_ratio(a: str, b: str) -> float:
     """rapidfuzz ratio if available, else a cheap token-overlap fallback."""
     if _HAS_RAPIDFUZZ:
@@ -361,6 +404,11 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     # Track contributing sources in a persistent list.
     if not keep.get("contributing_sources"):
         keep["contributing_sources"] = [keep.get("source") or "unknown"]
+    # Track contributing URLs (every absorbed candidate's url and
+    # external_url) so the store can persist them in merged_urls and
+    # seen-marking can include them. Survives primary-source switch.
+    if not keep.get("contributing_urls"):
+        keep["contributing_urls"] = []
     # Track per-source engagement values so same-source duplicates
     # can take MAX per source without inflating other sources' totals.
     if "_per_source_eng" not in keep:
@@ -379,6 +427,14 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
     if "_primary_preference" not in keep:
         keep["_primary_preference"] = _pre_merge_preference(keep)
     other_pref = _pre_merge_preference(other)
+
+    # Accumulate the absorbed candidate's url and external_url into
+    # contributing_urls (deduped). These are persisted in merged_urls
+    # and seen-marking so a recycled permalink is caught next cycle.
+    for curl in (other.get("url"), _external_url_key(other)):
+        cs = str(curl or "").strip()
+        if cs and cs not in keep["contributing_urls"]:
+            keep["contributing_urls"].append(cs)
 
     if other_source not in keep["contributing_sources"]:
         # New distinct source: add to contributing sources, record its engagement.
@@ -451,6 +507,12 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
         other_pref == keep["_primary_preference"]
         and str(other.get("source") or "") < str(keep.get("source") or "")
     ):
+        # Before switching, capture the old primary's url and external_url
+        # in contributing_urls (the old primary is now "absorbed" too).
+        for curl in (keep.get("url"), _external_url_key(keep)):
+            cs = str(curl or "").strip()
+            if cs and cs not in keep["contributing_urls"]:
+                keep["contributing_urls"].append(cs)
         # Switch primary: copy all representative fields from other,
         # EXCEPT published_at — that's the merged max, already computed.
         keep["source"] = other.get("source") or keep.get("source")
@@ -565,7 +627,8 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     log.info("dedupe: %d candidates -> %d unique", len(items), len(result))
 
-    # Clean up internal-only tracking fields (but keep contributing_sources).
+    # Clean up internal-only tracking fields (but keep contributing_sources
+    # and contributing_urls — those are persisted to the store).
     for item in result:
         item.pop("_source_names_set", None)
         item.pop("_primary_preference", None)
@@ -586,15 +649,18 @@ def match_candidate_to_store(candidate: dict, store_rows: list[dict]) -> dict | 
          source="github"), store rows via `_row_github_repo_key` (derived
          from the row URL, since store rows carry no source field).
       2. Canonical URL (`_canonical_url`) against row['url'] AND each entry
-         of the row's merged_urls JSON string.
+         of the row's merged_urls JSON string. Also includes external-URL
+         identity: candidate `_external_url_key` vs row url + merged_urls,
+         AND candidate canonical url + external key vs the ROW's
+         `_row_external_url_key` (parsed from raw_json, tolerantly).
       3. Normalized title (`_normalize_title`) exact match on row['title'].
       4. Fuzzy title similarity >= FUZZY_THRESHOLD against row titles —
          same scan semantics as dedupe_and_merge: best ratio tracked across
          rows, early exit once the threshold is met.
 
     All helpers are shared with `dedupe_and_merge`; no identity logic is
-    duplicated here. Malformed merged_urls JSON degrades to an empty list
-    and never raises.
+    duplicated here. Malformed merged_urls / raw_json JSON degrades to
+    empty / None and never raises.
     """
     if not store_rows:
         return None
@@ -605,14 +671,26 @@ def match_candidate_to_store(candidate: dict, store_rows: list[dict]) -> dict | 
             if gh_key == _row_github_repo_key(row.get("url")):
                 return row
 
+    # Candidate-side URL family: canonical url and external_url key.
     canon = _canonical_url(candidate.get("url"))
-    if canon:
+    ext_key = _external_url_key(candidate)
+    if canon or ext_key:
         for row in store_rows:
-            if canon == _canonical_url(row.get("url")):
+            row_canon = _canonical_url(row.get("url"))
+            row_urls = [row_canon] + [ _canonical_url(u) for u in _merged_urls_list(row) ]
+            # (a) candidate canonical url vs row url + merged_urls
+            if canon and canon in row_urls:
                 return row
-            for merged_url in _merged_urls_list(row):
-                if canon == _canonical_url(merged_url):
-                    return row
+            # (b) candidate external_url key vs row url + merged_urls
+            if ext_key and ext_key in row_urls:
+                return row
+            # (c) candidate canonical url vs row's external_url
+            row_ext = _row_external_url_key(row)
+            if canon and row_ext and canon == row_ext:
+                return row
+            # (d) candidate external key vs row's external_url
+            if ext_key and row_ext and ext_key == row_ext:
+                return row
 
     norm_title = _normalize_title(candidate.get("title"))
     if norm_title:

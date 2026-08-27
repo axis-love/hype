@@ -511,11 +511,17 @@ class NewsStore:
                 raw_json = story.get("raw_json")
                 if raw_json is not None and not isinstance(raw_json, str):
                     raw_json = json.dumps(raw_json)
+                # Seed merged_urls from contributing_urls (minus the row's
+                # own url) so in-cycle merge audit trails persist (flow_001123).
+                row_url = str(story.get("url") or "").strip()
+                contributing = story.get("contributing_urls") or []
+                seed_urls = [u for u in contributing if u and u != row_url]
+                merged_urls_json = json.dumps(seed_urls) if seed_urls else None
                 post_rows.append((
                     str(story.get("title") or "").strip(),
                     "",  # body — raw, not yet styled
                     str(story.get("category") or "").strip() or None,
-                    str(story.get("url") or "").strip() or None,
+                    row_url or None,
                     now,
                     str(story.get("snippet") or "").strip() or None,
                     str(story.get("source_name") or "").strip() or None,
@@ -539,6 +545,7 @@ class NewsStore:
                     json.dumps(bd.get("matched_topics") or []) if bd else None,
                     bd.get("scored_at"),
                     bd.get("origin_topic"),
+                    merged_urls_json,
                 ))
             if post_rows:
                 cur.executemany(
@@ -550,8 +557,8 @@ class NewsStore:
                         crosspost_count, penalty, lookback_hours,
                         score_at_queue, engagement_score, recency_at_queue,
                         source_weight, topic_bonus, crosspost_bonus,
-                        matched_topics, scored_at, origin_topic
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        matched_topics, scored_at, origin_topic, merged_urls
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     post_rows,
                 )
@@ -597,6 +604,35 @@ class NewsStore:
         rows = self._conn.execute(
             f"SELECT {self._STORE_SELECT} FROM pending_posts "
             "WHERE posted_at IS NULL ORDER BY created_at ASC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_merge_target_rows(self, days: int) -> list[dict]:
+        """Return rows eligible as merge targets: unposted + recently posted.
+
+        Includes all unposted rows (posted_at IS NULL) plus posted rows
+        within the *days* window (posted_at >= cutoff). The posted_at
+        column is included so callers can tell posted targets apart from
+        unposted ones.
+
+        Used ONLY at classification (main.py step 8) so that a story
+        arriving from a different source can merge into a recently-posted
+        row instead of being inserted as a duplicate. list_store_rows()
+        stays the sole method for pick_hottest, eviction, /scores, /store
+        — those must see unposted rows only.
+
+        This is the future seam for the planned deliveries(post_id,
+        channel, delivered_at) table — do not overload posted_at
+        semantics elsewhere.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        ).isoformat(timespec="seconds")
+        rows = self._conn.execute(
+            f"SELECT {self._STORE_SELECT}, posted_at FROM pending_posts "
+            "WHERE posted_at IS NULL OR posted_at >= ? "
+            "ORDER BY created_at ASC, id ASC",
+            (cutoff,),
         ).fetchall()
         return [dict(row) for row in rows]
 
