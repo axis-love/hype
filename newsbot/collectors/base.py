@@ -109,6 +109,7 @@ class Candidate:
     # Dedup/scoring fields (filled by dedupe.py).
     penalty: float = 1.0
     contributing_sources: list[str] = field(default_factory=list, repr=False)
+    contributing_urls: list[str] = field(default_factory=list, repr=False)
     _source_names_set: set[str] = field(default_factory=set, repr=False)
 
     # Scoring breakdown (filled by scoring.score_all, used by /scores command).
@@ -306,6 +307,7 @@ class Candidate:
             "short_summary": self.short_summary,
             "penalty": self.penalty,
             "contributing_sources": list(self.contributing_sources),
+            "contributing_urls": list(self.contributing_urls),
             "score_breakdown": dict(self.score_breakdown) if self.score_breakdown else None,
         }
 
@@ -381,6 +383,7 @@ class Candidate:
             short_summary=d.get("short_summary"),
             penalty=_float_or_none(d.get("penalty"), "penalty") if d.get("penalty") is not None else 1.0,
             contributing_sources=list(d.get("contributing_sources") or []),
+            contributing_urls=list(d.get("contributing_urls") or []),
             score_breakdown=d.get("score_breakdown"),
         )
 
@@ -395,7 +398,7 @@ _KNOWN_CANDIDATE_FIELDS = frozenset({
     "stars", "forks", "reposts", "upvote_ratio", "velocity",
     "category", "raw_text", "extracted_text", "crosspost_count",
     "raw_json", "candidate_id", "importance", "reason",
-    "short_summary", "penalty", "contributing_sources",
+    "short_summary", "penalty", "contributing_sources", "contributing_urls",
 })
 
 

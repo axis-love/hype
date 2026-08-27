@@ -327,7 +327,11 @@ async def _run_generation_pipeline(
     final = [_as_dict(item) for item in final]
 
     # 8. Classify against store (add vs merge).
-    store_rows = store.list_store_rows()
+    #    Use list_merge_target_rows (unposted + recently posted) so a story
+    #    arriving from a different source can merge into a posted row
+    #    instead of being inserted as a duplicate (flow_001123).
+    merge_window_days = int(os.getenv("NEWS_MERGE_WINDOW_DAYS", "7"))
+    store_rows = store.list_merge_target_rows(merge_window_days)
     items: list[dict[str, Any]] = []
     for item in final:
         hit = match_candidate_to_store(item, store_rows)
@@ -391,9 +395,17 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         else:
             to_add.append(item)
 
-    # 9. Merges: fold each duplicate into its existing store row
+    # 9. Merges: fold each duplicate into its existing store row.
+    #    Pass ALL contributing URLs (from in-cycle merges) into the store
+    #    row so they're persisted in merged_urls and can match future
+    #    re-collected permalinks (flow_001123).
     for row_id, item in merges:
-        store.merge_into_store_row(row_id, item, str(item.get("url") or ""))
+        contributing = item.get("contributing_urls") or []
+        urls_to_merge = [str(item.get("url") or "")] + [
+            u for u in contributing if u and u != str(item.get("url") or "")
+        ]
+        for url in urls_to_merge:
+            store.merge_into_store_row(row_id, item, url)
         updated = store._conn.execute(
             "SELECT merge_count FROM pending_posts WHERE id=?", (row_id,)
         ).fetchone()
@@ -406,9 +418,19 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
 
     # 10. Append new raw stories (body='') and mark ALL survivors seen —
     #     added and merged alike; they live in the store now.
+    #     Include contributing URLs in seen-marking so a recycled permalink
+    #     is dropped at filter_seen next cycle (flow_001123).
     final = [item for item in pipeline.items]
+    # Build seen_items with contributing URLs appended.
+    seen_items: list[dict[str, Any]] = []
+    for item in final:
+        seen_items.append(item)
+        for curl in (item.get("contributing_urls") or []):
+            cs = str(curl or "").strip()
+            if cs:
+                seen_items.append({"url": cs, "title": str(item.get("title") or "")})
     try:
-        inserted = store.add_stories_to_store(to_add, seen_items=final)
+        inserted = store.add_stories_to_store(to_add, seen_items=seen_items)
     except sqlite3.Error as exc:
         log.error("additive store insert failed: %s — merges already applied", exc)
         return 1
