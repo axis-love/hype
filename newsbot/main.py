@@ -398,14 +398,16 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     # 9. Merges: fold each duplicate into its existing store row.
     #    Pass ALL contributing URLs (from in-cycle merges) into the store
     #    row so they're persisted in merged_urls and can match future
-    #    re-collected permalinks (flow_001123).
+    #    re-collected permalinks (flow_001123). A single call per
+    #    candidate — merge_into_store_row accepts a list and increments
+    #    merge_count exactly once regardless of URL count.
     for row_id, item in merges:
+        candidate_url = str(item.get("url") or "")
         contributing = item.get("contributing_urls") or []
-        urls_to_merge = [str(item.get("url") or "")] + [
-            u for u in contributing if u and u != str(item.get("url") or "")
+        urls_to_merge = [candidate_url] + [
+            u for u in contributing if u and u != candidate_url
         ]
-        for url in urls_to_merge:
-            store.merge_into_store_row(row_id, item, url)
+        store.merge_into_store_row(row_id, item, urls_to_merge)
         updated = store._conn.execute(
             "SELECT merge_count FROM pending_posts WHERE id=?", (row_id,)
         ).fetchone()
