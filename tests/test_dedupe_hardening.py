@@ -608,3 +608,86 @@ class TestMergeIntoPostedRow:
         ).fetchone()
         assert row["posted_at"] == posted_at, "merge must not change posted_at"
         assert row["merge_count"] == 2
+
+
+# --- Regression: merge_count not inflated by multiple URLs ---------------
+
+
+class TestMergeCountNotInflated:
+    """Regression: merge_into_store_row with a list of URLs must
+    increment merge_count exactly ONCE, not once per URL.
+
+    The original step-9 loop called merge_into_store_row once per
+    contributing URL, and each call did merge_count += 1 — so one
+    candidate carrying N URLs inflated merge_count by N. merge_count
+    feeds the merge multiplier in pick_hottest; inflated counts
+    distort posting selection.
+    """
+
+    def test_list_of_urls_single_merge_count_increment(self, store):
+        """One candidate merged with 3 URLs -> merge_count goes 1 -> 2,
+        not 1 -> 4. All URLs present in merged_urls."""
+        story = _store_story(title="Original", url="https://example.com/orig")
+        store.add_stories_to_store([story], [])
+        row_id = store._conn.execute(
+            "SELECT id FROM pending_posts"
+        ).fetchone()["id"]
+
+        candidate = _store_story(
+            title="Original (dup)",
+            url="https://reddit.com/r/test/comments/abc/orig",
+            upvotes=200,
+        )
+        urls = [
+            "https://reddit.com/r/test/comments/abc/orig",
+            "https://hn.algolia.com/story/orig",
+            "https://example.com/orig-article",
+        ]
+        store.merge_into_store_row(row_id, candidate, urls)
+
+        row = store._conn.execute(
+            "SELECT merge_count, merged_urls FROM pending_posts WHERE id=?",
+            (row_id,),
+        ).fetchone()
+        assert row["merge_count"] == 2, \
+            f"merge_count must be 2 (one merge), got {row['merge_count']}"
+        merged = json.loads(row["merged_urls"] or "[]")
+        for u in urls:
+            assert u in merged, f"URL {u} must be in merged_urls: {merged}"
+
+    def test_str_arg_backward_compatible(self, store):
+        """Passing a single str (old call sites) still works — merge_count
+        increments by 1, URL appended."""
+        story = _store_story(title="Original", url="https://example.com/orig")
+        store.add_stories_to_store([story], [])
+        row_id = store._conn.execute(
+            "SELECT id FROM pending_posts"
+        ).fetchone()["id"]
+
+        store.merge_into_store_row(row_id, _store_story(title="Dup"), "https://b.example.com/1")
+
+        row = store._conn.execute(
+            "SELECT merge_count, merged_urls FROM pending_posts WHERE id=?",
+            (row_id,),
+        ).fetchone()
+        assert row["merge_count"] == 2
+        assert "https://b.example.com/1" in json.loads(row["merged_urls"] or "[]")
+
+    def test_dedupe_urls_in_list(self, store):
+        """Duplicate URLs in the list are deduped — no double-append."""
+        story = _store_story(title="Original", url="https://example.com/orig")
+        store.add_stories_to_store([story], [])
+        row_id = store._conn.execute(
+            "SELECT id FROM pending_posts"
+        ).fetchone()["id"]
+
+        url = "https://b.example.com/1"
+        store.merge_into_store_row(row_id, _store_story(title="Dup"), [url, url, url])
+
+        row = store._conn.execute(
+            "SELECT merge_count, merged_urls FROM pending_posts WHERE id=?",
+            (row_id,),
+        ).fetchone()
+        assert row["merge_count"] == 2
+        merged = json.loads(row["merged_urls"] or "[]")
+        assert merged.count(url) == 1, "duplicate URL must appear once"

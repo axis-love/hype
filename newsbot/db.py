@@ -637,21 +637,27 @@ class NewsStore:
         return [dict(row) for row in rows]
 
     def merge_into_store_row(
-        self, row_id: int, candidate: _StoryLike, extra_url: str
+        self, row_id: int, candidate: _StoryLike, extra_urls: str | list[str]
     ) -> None:
         """Merge a duplicate candidate into an existing store row.
 
-        merge_count += 1; raw engagement fields take per-field max(stored,
-        candidate); published_at takes the max; extra_url is appended to
-        merged_urls (deduped). engagement_score is RECOMPUTED via
-        scoring.engagement() from the merged raw fields — never copied from
-        either side — so a hotter stored row can never lose temperature to a
-        colder candidate. The remaining components (source_weight,
-        topic_bonus, crosspost_bonus, penalty, lookback_hours) refresh from
-        candidate['score_breakdown'], and score_at_queue is recomputed from
-        the rebuilt components using the queue-time formula:
+        merge_count += 1 (exactly once, regardless of how many URLs are
+        appended); raw engagement fields take per-field max(stored,
+        candidate); published_at takes the max; each URL in *extra_urls*
+        is appended to merged_urls (deduped). engagement_score is
+        RECOMPUTED via scoring.engagement() from the merged raw fields —
+        never copied from either side — so a hotter stored row can never
+        lose temperature to a colder candidate. The remaining components
+        (source_weight, topic_bonus, crosspost_bonus, penalty,
+        lookback_hours) refresh from candidate['score_breakdown'], and
+        score_at_queue is recomputed from the rebuilt components using
+        the queue-time formula:
         (engagement * recency * source_weight + topic_bonus + crosspost_bonus)
         * penalty.
+
+        *extra_urls* accepts a single URL string (backward-compatible)
+        or a list of URLs. All are appended to merged_urls (deduped) in
+        a single UPDATE — merge_count increments exactly once per call.
         """
         row = self._conn.execute(
             "SELECT * FROM pending_posts WHERE id=?", (row_id,)
@@ -685,9 +691,15 @@ class NewsStore:
                 merged_urls = list(json.loads(row["merged_urls"]))
             except (json.JSONDecodeError, TypeError):
                 merged_urls = []
-        url = str(extra_url or "").strip()
-        if url and url not in merged_urls:
-            merged_urls.append(url)
+        # Normalize extra_urls to a list (backward-compatible with str).
+        if isinstance(extra_urls, str):
+            url_list = [extra_urls]
+        else:
+            url_list = list(extra_urls) if extra_urls else []
+        for url in url_list:
+            url = str(url or "").strip()
+            if url and url not in merged_urls:
+                merged_urls.append(url)
 
         # Recompute engagement from the merged raw fields — never copy.
         merged_engagement = engagement({
