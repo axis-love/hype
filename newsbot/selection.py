@@ -36,13 +36,21 @@ def pick_hottest(
     ratio: float,
     merge_bonus: float,
     merge_cap: float,
+    excluded_ids: set[int] | None = None,
 ) -> PickResult:
     """Pick the hottest eligible store row for posting.
 
     temps = current_temperature per row; threshold = max(floor, ratio *
-    median(temps)); eligible = raw temp >= threshold; winner = max of
-    eligible by raw_temp * merge_multiplier. The merge multiplier affects
-    RANKING only — it never makes a below-threshold row eligible.
+    median(temps)); eligible = raw temp >= threshold AND row id NOT in
+    excluded_ids; winner = max of eligible by raw_temp * merge_multiplier.
+    The merge multiplier affects RANKING only — it never makes a
+    below-threshold row eligible.
+
+    Excluded rows still participate in temps/median (threshold stays
+    comparable across slots) but are removed from the ELIGIBLE set.
+    If everything eligible is excluded, the result reason is
+    "below_threshold" (PickResult fields stay stable). The caller
+    computes the exclusion set — selection.py stays dependency-free.
     """
     temps = {row["id"]: current_temperature(row, config, now=now) for row in rows}
     if not rows:
@@ -52,7 +60,11 @@ def pick_hottest(
     hottest = max(temps.values())
     threshold = max(floor, ratio * median)
 
-    eligible = [row for row in rows if temps[row["id"]] >= threshold]
+    eligible = [
+        row for row in rows
+        if temps[row["id"]] >= threshold
+        and (excluded_ids is None or row["id"] not in excluded_ids)
+    ]
     if not eligible:
         return PickResult(row=None, reason="below_threshold", threshold=threshold, median=median, hottest=hottest, temps=temps)
 

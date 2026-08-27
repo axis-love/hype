@@ -159,6 +159,7 @@ each story costs at most one styling LLM call.
 | `NEWS_THRESHOLD_RATIO` | Threshold = max(floor, ratio × median) (default 0.5) |
 | `NEWS_MERGE_BONUS` | Ranking multiplier bonus per extra merge (default 0.2) |
 | `NEWS_MERGE_CAP` | Cap on the merge multiplier (default 2.0) |
+| `NEWS_TOPIC_COOLDOWN_MAX` | Max posts per `origin_topic` in the last 24h before that topic is excluded from posting (default 3, 0 disables) |
 | `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
 
