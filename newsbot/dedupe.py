@@ -518,6 +518,20 @@ def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
         keep["source"] = other.get("source") or keep.get("source")
         keep["url"] = other.get("url") or keep.get("url")
         keep["title"] = other.get("title") or keep.get("title")
+        # Carry raw_json from the new primary so the write-boundary
+        # reddit link-post URL swap (flow_001125) can read is_self and
+        # external_url. Merge dicts instead of replacing outright —
+        # the old primary's raw_json may carry per-feed fields (e.g.
+        # 'weight' for official RSS) that scoring reads. New primary's
+        # keys take precedence.
+        old_rj = keep.get("raw_json")
+        new_rj = other.get("raw_json")
+        if isinstance(new_rj, dict):
+            if isinstance(old_rj, dict):
+                merged_rj = {**old_rj, **new_rj}
+            else:
+                merged_rj = {**new_rj}
+            keep["raw_json"] = merged_rj
         if other.get("snippet"):
             keep["snippet"] = other["snippet"]
         # Restore the merged published_at — the new primary's timestamp

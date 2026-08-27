@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -353,6 +354,73 @@ async def _run_generation_pipeline(
     )
 
 
+_REDDIT_HOST_SUFFIXES = ("reddit.com", "redd.it")
+
+
+def _is_reddit_self_host(url: str) -> bool:
+    """True if *url* points at reddit itself (crosspost/self-referential)."""
+    try:
+        host = (urlsplit(url).netloc or "").lower().removeprefix("www.")
+    except ValueError:
+        return False
+    return any(host == s or host.endswith("." + s) for s in _REDDIT_HOST_SUFFIXES)
+
+
+def _swap_reddit_link_post_url(item: dict[str, Any]) -> dict[str, Any]:
+    """Swap a reddit link-post's permalink for the article URL at the write
+    boundary.
+
+    When the FINAL candidate about to be written to the store is a reddit
+    LINK post — source == 'reddit', raw_json.is_self is falsy,
+    raw_json.external_url is a valid http(s) URL — swap: row url =
+    external_url; the permalink goes into contributing_urls (which
+    add_stories_to_store seeds into merged_urls and _run_generation seeds
+    into seen). Reddit SELF posts keep the permalink. The swap is skipped
+    when external_url points at reddit itself (crossposts).
+
+    This runs AFTER classification/dedupe/scoring so in-cycle identity
+    matching and scoring keep operating on the original permalink. Media
+    extraction (extract_article_media in jobs.py) then fetches the article
+    page — better images.
+
+    Returns the (mutated in place) item for chaining.
+    """
+    if str(item.get("source") or "").lower() != "reddit":
+        return item
+
+    raw_json = item.get("raw_json")
+    if not isinstance(raw_json, dict):
+        return item
+
+    if raw_json.get("is_self"):
+        return item  # self-post — permalink is the right URL
+
+    external = str(raw_json.get("external_url") or "").strip()
+    if not external.startswith(("http://", "https://")):
+        return item
+
+    if _is_reddit_self_host(external):
+        return item  # crosspost — don't swap one permalink for another
+
+    permalink = str(item.get("url") or "").strip()
+    if not permalink or permalink == external:
+        return item  # nothing to swap
+
+    item["url"] = external
+    contributing = item.get("contributing_urls")
+    if not isinstance(contributing, list):
+        contributing = []
+        item["contributing_urls"] = contributing
+    if permalink not in contributing:
+        contributing.append(permalink)
+
+    log.info(
+        "reddit link-post URL swap: %s -> %s (permalink archived in contributing_urls)",
+        permalink, external,
+    )
+    return item
+
+
 async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     """Generation cycle: collect → filter → score → LLM filter → store.
 
@@ -385,6 +453,21 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         pipeline.above_min_score, pipeline.sent_to_filter,
         pipeline.llm_kept, pipeline.final_count,
     )
+
+    # 8b. Reddit link-post URL swap (flow_001125): for each item being
+    #     ADDED to the store, if it's a reddit LINK post (not self, has a
+    #     valid http(s) external_url not pointing at reddit itself), swap
+    #     the permalink for the article URL. The permalink is archived in
+    #     contributing_urls so add_stories_to_store seeds it into
+    #     merged_urls and the seen-marking loop below picks it up —
+    #     re-collecting the permalink next cycle will merge/drop, not
+    #     create a new row. This runs AFTER classification/dedupe/scoring
+    #     so in-cycle identity matching keeps operating on the original
+    #     permalink. Merge items are NOT swapped (they fold into existing
+    #     rows whose URL is already set).
+    for item in pipeline.items:
+        if item.get("action") == "add":
+            _swap_reddit_link_post_url(item)
 
     # Separate adds from merges for the write phase.
     to_add: list[dict[str, Any]] = []
