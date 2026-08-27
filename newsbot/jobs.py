@@ -12,7 +12,7 @@ import html as html_module
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +63,15 @@ def _env_float(name: str, default: str) -> float:
     except ValueError:
         log.warning("invalid float for %s — falling back to %s", name, default)
         return float(default)
+
+
+def _env_int(name: str, default: str) -> int:
+    """Read an int env var, falling back (with a warning) on bad values."""
+    try:
+        return int(os.getenv(name, default))
+    except ValueError:
+        log.warning("invalid int for %s — falling back to %s", name, default)
+        return int(default)
 
 
 def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
@@ -299,6 +308,13 @@ class JobCoordinator:
         on the single winner, so ≤1 LLM styling call per post (≤12/day)
         instead of styling the whole digest up front.
 
+        Same-topic cooldown (flow_001124): before pick_hottest, count posts
+        per origin_topic in the last 24h; rows whose topic already has
+        >= NEWS_TOPIC_COOLDOWN_MAX posts are excluded from the eligible set.
+        The policy lives in the CONSUMER (jobs.py), not selection or db —
+        future consumers pass their own exclusion sets. Rows with
+        NULL/empty origin_topic are never excluded.
+
         Shared by run_posting (single) and drain_posts (loop).
         Returns:
             0 — success: a post was styled, delivered, and marked posted.
@@ -309,12 +325,31 @@ class JobCoordinator:
         cfg = load_config(self._settings)
         rows = self._store.list_store_rows()
         now = datetime.now(timezone.utc)
+
+        # Same-topic cooldown: exclude rows whose origin_topic has
+        # >= N posts in the last 24h (flow_001124).
+        cooldown_max = _env_int("NEWS_TOPIC_COOLDOWN_MAX", "3")
+        excluded_ids: set[int] = set()
+        if cooldown_max > 0 and rows:
+            since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+            posted_recently = self._store.list_posted_since(since)
+            topic_counts: dict[str, int] = {}
+            for p in posted_recently:
+                topic = str(p.get("origin_topic") or "").strip()
+                if topic:
+                    topic_counts[topic] = topic_counts.get(topic, 0) + 1
+            for row in rows:
+                topic = str(row.get("origin_topic") or "").strip()
+                if topic and topic_counts.get(topic, 0) >= cooldown_max:
+                    excluded_ids.add(row["id"])
+
         result = pick_hottest(
             rows, cfg, now=now,
             floor=_env_float("NEWS_TEMP_FLOOR", "35"),
             ratio=_env_float("NEWS_THRESHOLD_RATIO", "0.5"),
             merge_bonus=_env_float("NEWS_MERGE_BONUS", "0.2"),
             merge_cap=_env_float("NEWS_MERGE_CAP", "2.0"),
+            excluded_ids=excluded_ids or None,
         )
         if result.reason == "empty":
             log.debug("store empty — nothing to post")
@@ -326,6 +361,7 @@ class JobCoordinator:
                 "threshold": round(result.threshold, 2),
                 "median": round(result.median, 2),
                 "hottest": round(result.hottest, 2),
+                "cooldown_excluded": len(excluded_ids),
             }))
             self._last_skip_reason = "below_threshold"
             return 4
@@ -373,6 +409,7 @@ class JobCoordinator:
             "chosen_id": row_id,
             "raw_temp": round(raw_temp, 2),
             "merge_count": row.get("merge_count") or 1,
+            "cooldown_excluded": len(excluded_ids),
         }))
 
         markdown = render_post(
