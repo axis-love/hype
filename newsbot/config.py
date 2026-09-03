@@ -95,6 +95,50 @@ DEFAULT_RECAP_PROMPT = (
     "The application renders the final layout — return data only, no formatting."
 )
 
+
+# --- Consumer profiles (design note §3) ---------------------------------
+#
+# Each consumer profile carries its own selection knobs (floor, ratio,
+# cooldown_max, max_candidates) and topic filter. The telegram profile
+# mirrors today's env defaults so behaviour is unchanged. The girllm
+# profile reads from HYPE_CONSUMER_GIRLLM_* env with sane defaults.
+#
+# load_config returns config["consumers"] as a dict[consumer_name -> profile].
+
+def _consumer_profiles() -> dict[str, dict[str, Any]]:
+    """Build consumer profiles from env defaults.
+
+    telegram: mirrors today's env knobs (NEWS_TEMP_FLOOR etc.).
+    girllm: reads HYPE_CONSUMER_GIRLLM_* env with sane defaults
+            (floor 25, ratio 0.3, cooldown 2, max_candidates 5).
+    """
+    import os
+    tg_floor = float(os.getenv("NEWS_TEMP_FLOOR", "35"))
+    tg_ratio = float(os.getenv("NEWS_THRESHOLD_RATIO", "0.5"))
+    tg_cooldown = int(os.getenv("NEWS_TOPIC_COOLDOWN_MAX", "3"))
+    return {
+        "telegram": {
+            "channel": "telegram",
+            "floor": tg_floor,
+            "ratio": tg_ratio,
+            "merge_bonus": float(os.getenv("NEWS_MERGE_BONUS", "0.2")),
+            "merge_cap": float(os.getenv("NEWS_MERGE_CAP", "2.0")),
+            "cooldown_max": tg_cooldown,
+            "max_candidates": int(os.getenv("NEWS_MAX_CANDIDATES", "20")),
+            "topics": None,  # None = no topic filter (all topics)
+        },
+        "girllm": {
+            "channel": "girllm",
+            "floor": float(os.getenv("HYPE_CONSUMER_GIRLLM_FLOOR", "25")),
+            "ratio": float(os.getenv("HYPE_CONSUMER_GIRLLM_RATIO", "0.3")),
+            "merge_bonus": float(os.getenv("NEWS_MERGE_BONUS", "0.2")),
+            "merge_cap": float(os.getenv("NEWS_MERGE_CAP", "2.0")),
+            "cooldown_max": int(os.getenv("HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX", "2")),
+            "max_candidates": int(os.getenv("HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES", "5")),
+            "topics": ["gaming", "gamedev", "ai"],
+        },
+    }
+
 # --- Default source config (so the bot runs with no settings) ---------
 
 DEFAULT_SOURCES: dict[str, Any] = {
@@ -207,6 +251,7 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
         "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"], key="llm_max_tokens_digest"),
         "style_prompt": str(raw.get("style_prompt") or DEFAULT_STYLE_PROMPT),
         "recap_prompt": str(raw.get("recap_prompt") or DEFAULT_RECAP_PROMPT),
+        "consumers": _consumer_profiles(),
     }
 
     _validate_config(config)
