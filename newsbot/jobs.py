@@ -30,7 +30,7 @@ from newsbot.richmd import (
     render_post_blocks,
     signature_for,
 )
-from newsbot.selection import pick_hottest
+from newsbot.selection import pick_hottest, select_for_consumer
 from newsbot.summarizer import llm_style_posts
 from newsbot.telegram_poster import (
     PartialDeliveryError,
@@ -308,12 +308,12 @@ class JobCoordinator:
         on the single winner, so ≤1 LLM styling call per post (≤12/day)
         instead of styling the whole digest up front.
 
-        Same-topic cooldown (flow_001124): before pick_hottest, count posts
-        per origin_topic in the last 24h; rows whose topic already has
-        >= NEWS_TOPIC_COOLDOWN_MAX posts are excluded from the eligible set.
-        The policy lives in the CONSUMER (jobs.py), not selection or db —
-        future consumers pass their own exclusion sets. Rows with
-        NULL/empty origin_topic are never excluded.
+        Per-consumer selection (flow_001140): uses select_for_consumer with
+        the 'telegram' consumer profile from config. The profile carries
+        floor, ratio, cooldown_max, max_candidates, and topic filter.
+        select_for_consumer computes per-consumer median (§4) and per-consumer
+        cooldown (counts only this consumer's deliveries). Behaviour is
+        unchanged — the telegram profile mirrors today's env defaults.
 
         Shared by run_posting (single) and drain_posts (loop).
         Returns:
@@ -326,31 +326,32 @@ class JobCoordinator:
         rows = self._store.list_store_rows("telegram")
         now = datetime.now(timezone.utc)
 
-        # Same-topic cooldown: exclude rows whose origin_topic has
-        # >= N posts in the last 24h (flow_001124).
-        cooldown_max = _env_int("NEWS_TOPIC_COOLDOWN_MAX", "3")
-        excluded_ids: set[int] = set()
+        profile = cfg.get("consumers", {}).get("telegram")
+        if profile is None:
+            raise RuntimeError("consumer profile 'telegram' not found in config")
+
+        # Fetch this consumer's recent deliveries for per-consumer cooldown.
+        since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+        deliveries_for_channel = self._store.list_posted_since("telegram", since)
+
+        result = select_for_consumer(
+            rows, deliveries_for_channel, profile, cfg, now=now,
+        )
+
+        # Count cooldown-excluded for logging.
+        cooldown_max = int(profile.get("cooldown_max", 0))
+        excluded_count = 0
         if cooldown_max > 0 and rows:
-            since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
-            posted_recently = self._store.list_posted_since("telegram", since)
             topic_counts: dict[str, int] = {}
-            for p in posted_recently:
+            for p in deliveries_for_channel:
                 topic = str(p.get("origin_topic") or "").strip()
                 if topic:
                     topic_counts[topic] = topic_counts.get(topic, 0) + 1
             for row in rows:
                 topic = str(row.get("origin_topic") or "").strip()
                 if topic and topic_counts.get(topic, 0) >= cooldown_max:
-                    excluded_ids.add(row["id"])
+                    excluded_count += 1
 
-        result = pick_hottest(
-            rows, cfg, now=now,
-            floor=_env_float("NEWS_TEMP_FLOOR", "35"),
-            ratio=_env_float("NEWS_THRESHOLD_RATIO", "0.5"),
-            merge_bonus=_env_float("NEWS_MERGE_BONUS", "0.2"),
-            merge_cap=_env_float("NEWS_MERGE_CAP", "2.0"),
-            excluded_ids=excluded_ids or None,
-        )
         if result.reason == "empty":
             log.debug("store empty — nothing to post")
             self._last_skip_reason = "empty"
@@ -361,7 +362,7 @@ class JobCoordinator:
                 "threshold": round(result.threshold, 2),
                 "median": round(result.median, 2),
                 "hottest": round(result.hottest, 2),
-                "cooldown_excluded": len(excluded_ids),
+                "cooldown_excluded": excluded_count,
             }))
             self._last_skip_reason = "below_threshold"
             return 4
@@ -409,7 +410,7 @@ class JobCoordinator:
             "chosen_id": row_id,
             "raw_temp": round(raw_temp, 2),
             "merge_count": row.get("merge_count") or 1,
-            "cooldown_excluded": len(excluded_ids),
+            "cooldown_excluded": excluded_count,
         }))
 
         markdown = render_post(

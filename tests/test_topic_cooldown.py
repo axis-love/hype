@@ -371,7 +371,7 @@ class TestSelectionImports:
         # Check imports are limited to stdlib + newsbot.scoring.
         tree = ast.parse(Path(sel.__file__).read_text())
         allowed_modules = {
-            "statistics", "dataclasses", "datetime", "typing",
+            "statistics", "dataclasses", "datetime", "typing", "json",
             "newsbot.scoring", "__future__",
         }
         for node in ast.walk(tree):

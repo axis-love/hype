@@ -7,6 +7,7 @@ hot_take and the blog writer later — can import and reuse it unchanged.
 """
 from __future__ import annotations
 
+import json
 import statistics
 from dataclasses import dataclass
 from datetime import datetime
@@ -73,6 +74,77 @@ def pick_hottest(
         key=lambda row: temps[row["id"]] * merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap),
     )
     return PickResult(row=winner, reason="picked", threshold=threshold, median=median, hottest=hottest, temps=temps)
+
+
+def select_for_consumer(
+    rows: list[dict[str, Any]],
+    deliveries_for_channel: list[dict[str, Any]],
+    profile: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    now: datetime,
+) -> PickResult:
+    """Per-consumer selection: topic filter → cooldown → pick_hottest.
+
+    Design note §3 (consumer profiles) and §4 (per-consumer median).
+
+    1. Topic filter: if profile['topics'] is not None, keep only rows
+       whose origin_topic OR matched_topics intersects the profile's
+       topic list. Rows with NULL/empty origin_topic are kept only if
+       their matched_topics intersect (or if topics is None = all).
+
+    2. Per-consumer cooldown: count deliveries per origin_topic in the
+       consumer's own deliveries_for_channel list (already scoped to
+       this channel by the caller). Rows whose topic has >=
+       profile['cooldown_max'] recent deliveries are excluded. Rows
+       with NULL/empty origin_topic are never excluded.
+
+    3. pick_hottest over the filtered rows only — median is per-consumer
+       (§4), so a science-heavy store doesn't inflate the gaming median.
+
+    No styling — consumers own voice (decision 2026-09-03).
+    """
+    topics = profile.get("topics")
+    # 1. Topic filter.
+    if topics is not None:
+        topic_set = set(topics)
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
+            origin = str(row.get("origin_topic") or "").strip()
+            matched = row.get("matched_topics")
+            if isinstance(matched, str):
+                try:
+                    matched = json.loads(matched)
+                except (ValueError, TypeError):
+                    matched = []
+            matched_list = set(matched or [])
+            if origin in topic_set or matched_list & topic_set:
+                filtered.append(row)
+        rows = filtered
+
+    # 2. Per-consumer cooldown.
+    cooldown_max = int(profile.get("cooldown_max", 0))
+    excluded_ids: set[int] = set()
+    if cooldown_max > 0 and rows:
+        topic_counts: dict[str, int] = {}
+        for p in deliveries_for_channel:
+            topic = str(p.get("origin_topic") or "").strip()
+            if topic:
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        for row in rows:
+            topic = str(row.get("origin_topic") or "").strip()
+            if topic and topic_counts.get(topic, 0) >= cooldown_max:
+                excluded_ids.add(row["id"])
+
+    # 3. pick_hottest over the filtered rows only.
+    return pick_hottest(
+        rows, config, now=now,
+        floor=float(profile.get("floor", 35.0)),
+        ratio=float(profile.get("ratio", 0.5)),
+        merge_bonus=float(profile.get("merge_bonus", 0.2)),
+        merge_cap=float(profile.get("merge_cap", 2.0)),
+        excluded_ids=excluded_ids or None,
+    )
 
 
 def select_diverse_candidates(
