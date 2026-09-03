@@ -22,9 +22,11 @@ Store semantics (migration 4 / v2):
   styled" is therefore ``body='' AND styled_at IS NULL``.
 
   ``posted_at`` means "delivered to the Telegram channel" — nothing else.
-  Future consumers (girllm hot_take feeder, blog writer) get a
-  ``deliveries(post_id, channel, delivered_at)`` table (future migration);
-  do not overload ``posted_at`` as a general consumption marker.
+  The ``deliveries`` table (migration 7) is the per-consumer delivery
+  marker: each row records a (post_id, channel, delivered_at) delivery.
+  ``posted_at`` is preserved during the transition (dual-write in
+  ``mark_delivered``); read paths migrate to ``deliveries`` in H2.
+  Do not overload ``posted_at`` as a general consumption marker.
   ``message_id`` (migration 5) stores the Telegram channel message_id for
   recap linking — it is NOT a general consumption marker.
 
@@ -237,6 +239,49 @@ def _migration_6(cur: sqlite3.Cursor) -> None:
     NULL (legacy).
     """
     cur.execute("ALTER TABLE pending_posts ADD COLUMN origin_topic TEXT")
+
+
+@_migration(7, "Add deliveries table for per-consumer delivery tracking")
+def _migration_7(cur: sqlite3.Cursor) -> None:
+    """Create the deliveries table and backfill from posted_at.
+
+    The deliveries table is the per-consumer delivery marker designed in
+    .hermes/plans/2026-08-27-multi-consumer-hype.md (§2). Each row records
+    that a post was delivered to a specific channel (e.g. 'telegram',
+    'girllm:gaming'). UNIQUE(post_id, channel) prevents duplicate
+    deliveries per (post, channel) pair.
+
+    Backfill: every pending_posts row with posted_at IS NOT NULL gets a
+    'telegram' delivery row, preserving the original posted_at timestamp
+    and message_id. This makes the deliveries table a superset of the
+    existing posted_at data — read paths migrate one at a time in H2.
+
+    posted_at on pending_posts stays untouched (db.py:24-27 contract).
+    """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS deliveries(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          post_id INTEGER NOT NULL REFERENCES pending_posts(id),
+          channel TEXT NOT NULL,
+          delivered_at TEXT NOT NULL,
+          message_id INTEGER,
+          UNIQUE(post_id, channel)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_deliveries_post ON deliveries(post_id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_deliveries_channel ON deliveries(channel);")
+    cur.execute("CREATE INDEX IF NOT EXISTS ix_deliveries_delivered ON deliveries(delivered_at);")
+    # Backfill: one delivery row per posted pending_posts row.
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id)
+        SELECT id, 'telegram', posted_at, message_id
+        FROM pending_posts
+        WHERE posted_at IS NOT NULL
+        """
+    )
 
 
 class NewsStore:
@@ -464,8 +509,29 @@ class NewsStore:
             return None
         return int(cur.lastrowid)
 
+    def mark_delivered(self, post_id: int, channel: str, message_id: int | None = None) -> None:
+        """Record a delivery of a post to a specific channel (idempotent).
+
+        Inserts into the deliveries table with UNIQUE(post_id, channel)
+        so a second call for the same pair is a silent no-op (INSERT OR
+        IGNORE). This is the per-consumer delivery marker — callers pass
+        their own channel name (e.g. 'telegram', 'girllm:gaming').
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
+            "VALUES(?,?,?,?)",
+            (post_id, channel, _utc_now_iso(), message_id),
+        )
+
     def mark_posted(self, post_id: int, message_id: int | None = None) -> None:
-        """Mark a pending post as posted, optionally storing its channel message_id."""
+        """Mark a pending post as posted (Telegram delivery, dual-write).
+
+        Sets posted_at on pending_posts (legacy contract, kept during the
+        transition) AND records a 'telegram' delivery via
+        mark_delivered. Read paths migrate to deliveries in H2; until
+        then posted_at stays the authoritative source for existing
+        queries.
+        """
         if message_id is not None:
             self._conn.execute(
                 "UPDATE pending_posts SET posted_at=?, message_id=? WHERE id=?",
@@ -476,6 +542,7 @@ class NewsStore:
                 "UPDATE pending_posts SET posted_at=? WHERE id=?",
                 (_utc_now_iso(), post_id),
             )
+        self.mark_delivered(post_id, "telegram", message_id)
 
     # Note: clear_unposted(), replace_unposted_batch(), and
     # get_next_pending_post() were removed in the v2 store redesign —
