@@ -64,19 +64,18 @@ COLLECTORS: dict[str, Any] = {
     "huggingface_papers": huggingface_papers,
     "trends": trends,
 }
-from newsbot.config import load_config
+from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
 from newsbot.jobs import (
     JobCoordinator,
-    _env_float,
     _format_recap_html_fallback,
     _row_to_styler_input,
     format_post_message,
 )
 from newsbot.images import extract_article_media
 from newsbot.richmd import render_post, render_post_blocks, render_recap, signature_for
-from newsbot.selection import pick_hottest, select_diverse_candidates
+from newsbot.selection import select_diverse_candidates, select_for_consumer
 from newsbot.telegram_poster import post_digest, post_rich_message, RichSendRejected
 from newsbot.summarizer import (
     _assign_candidate_ids,
@@ -707,19 +706,28 @@ async def _scheduler_summary_iteration(
 
 
 def _pick_snapshot(store: NewsStore, config: dict[str, Any]) -> tuple[Any, float, float, float, float]:
-    """Run pick_hottest over the current store rows (pure — no delivery).
+    """Run per-consumer selection over the current store rows (pure — no delivery).
+
+    Routes through select_for_consumer with the telegram profile (flow_001162
+    item 9) so /scores and /status share the exact same numbers the poster
+    uses — one source of truth, including the 24h same-topic cooldown.
 
     Returns (PickResult, floor, ratio, merge_bonus, merge_cap) so callers
     (/scores, /status) share the exact same numbers the poster uses.
     """
+    profile = consumer_profile(config, "telegram")
     rows = store.list_store_rows("telegram")
     now = datetime.now(timezone.utc)
-    floor = _env_float("NEWS_TEMP_FLOOR", "35")
-    ratio = _env_float("NEWS_THRESHOLD_RATIO", "0.5")
-    merge_bonus = _env_float("NEWS_MERGE_BONUS", "0.2")
-    merge_cap = _env_float("NEWS_MERGE_CAP", "2.0")
-    result = pick_hottest(rows, config, now=now, floor=floor, ratio=ratio, merge_bonus=merge_bonus, merge_cap=merge_cap)
-    return result, floor, ratio, merge_bonus, merge_cap
+    since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
+    deliveries_for_channel = store.list_posted_since("telegram", since)
+    result = select_for_consumer(rows, deliveries_for_channel, profile, config, now=now)
+    return (
+        result,
+        float(profile.get("floor", 35.0)),
+        float(profile.get("ratio", 0.5)),
+        float(profile.get("merge_bonus", 0.2)),
+        float(profile.get("merge_cap", 2.0)),
+    )
 
 
 def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:

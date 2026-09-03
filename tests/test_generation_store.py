@@ -108,7 +108,7 @@ class TestAdditiveGeneration:
         result = await _run_generation(store, MagicMock())
         assert result == 0
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         titles = {r["title"] for r in rows}
         assert "Seed Story" in titles  # survived
         assert "Fresh Story" in titles  # appended
@@ -123,7 +123,7 @@ class TestAdditiveGeneration:
             "upvotes": 200, "comments": 20,
         }
         store.add_stories_to_store([original], [])
-        before = store.list_store_rows()
+        before = store.list_store_rows("telegram")
         assert len(before) == 1
         row_id = before[0]["id"]
 
@@ -136,7 +136,7 @@ class TestAdditiveGeneration:
         result = await _run_generation(store, MagicMock())
         assert result == 0
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         assert len(rows) == 1, "duplicate must merge, not insert a new row"
         row = next(r for r in rows if r["id"] == row_id)
         assert row["merge_count"] == 2
@@ -188,7 +188,7 @@ class TestAdditiveGeneration:
         result = await _run_generation(store, MagicMock())
         assert result == 0
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         assert len(rows) == cap, f"store must be capped at {cap}, got {len(rows)}"
         titles = {r["title"] for r in rows}
         assert "Hot Fresh" in titles, "the hot new row must survive eviction"
@@ -237,7 +237,7 @@ class TestAdditiveGeneration:
 
         result = await _run_generation(store, MagicMock())
         assert result == 0
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         assert len(rows) == 1 and rows[0]["merge_count"] == 2
 
 
@@ -279,7 +279,7 @@ class TestRunGenerationPipeline:
             "penalty": 1.0, "lookback_hours": 48, "published_at": original["published_at"],
         }
         store.add_stories_to_store([original], [])
-        row_id = store.list_store_rows()[0]["id"]
+        row_id = store.list_store_rows("telegram")[0]["id"]
 
         stories = [
             _story("New Story", "https://new.example.com/2", upvotes=200),
@@ -323,7 +323,7 @@ class TestRunGenerationPipeline:
         }
         store.add_stories_to_store([original], [])
 
-        rows_before = len(store.list_store_rows())
+        rows_before = len(store.list_store_rows("telegram"))
         seen_before = store._conn.execute("SELECT COUNT(*) AS n FROM seen").fetchone()["n"]
 
         stories = [
@@ -335,12 +335,12 @@ class TestRunGenerationPipeline:
         result = await _run_generation_pipeline(store, _make_cfg())
         assert result is not None
 
-        rows_after = len(store.list_store_rows())
+        rows_after = len(store.list_store_rows("telegram"))
         seen_after = store._conn.execute("SELECT COUNT(*) AS n FROM seen").fetchone()["n"]
         assert rows_after == rows_before, "pipeline must not add rows"
         assert seen_after == seen_before, "pipeline must not mark seen"
         # merge_count unchanged — no merge written.
-        row = store.list_store_rows()[0]
+        row = store.list_store_rows("telegram")[0]
         assert row["merge_count"] == 1
 
 

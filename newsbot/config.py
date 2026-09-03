@@ -10,6 +10,7 @@ any key via SQLite or the (future) admin path.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 from core.settings_store import SettingsStore
@@ -112,7 +113,6 @@ def _consumer_profiles() -> dict[str, dict[str, Any]]:
     girllm: reads HYPE_CONSUMER_GIRLLM_* env with sane defaults
             (floor 25, ratio 0.3, cooldown 2, max_candidates 5).
     """
-    import os
     tg_floor = float(os.getenv("NEWS_TEMP_FLOOR", "35"))
     tg_ratio = float(os.getenv("NEWS_THRESHOLD_RATIO", "0.5"))
     tg_cooldown = int(os.getenv("NEWS_TOPIC_COOLDOWN_MAX", "3"))
@@ -138,6 +138,24 @@ def _consumer_profiles() -> dict[str, dict[str, Any]]:
             "topics": ["gaming", "gamedev", "ai"],
         },
     }
+
+
+def consumer_profile(config: dict[str, Any], name: str) -> dict[str, Any]:
+    """Look up a consumer profile by name, raising ValueError if unknown.
+
+    The API key -> consumer mapping (H4) and every selection call site
+    resolve profiles through this helper so an unknown consumer fails
+    loudly with the name in the message instead of a silent KeyError
+    or None-deref.
+
+    Raises ValueError: unknown consumer: <name>
+    """
+    profiles = config.get("consumers") or {}
+    profile = profiles.get(name)
+    if profile is None:
+        raise ValueError(f"unknown consumer: {name}")
+    return profile
+
 
 # --- Default source config (so the bot runs with no settings) ---------
 
@@ -322,6 +340,36 @@ def _validate_config(config: dict[str, Any]) -> None:
             errors.append(f"topic_boost['{key}'] must be numeric, got {type(val).__name__}")
         elif val < 0:
             errors.append(f"topic_boost['{key}'] must be >= 0")
+
+    # Consumer profiles validation (design note §3).
+    consumers = config.get("consumers")
+    if not isinstance(consumers, dict):
+        errors.append("consumers must be a dict")
+    else:
+        for c_name, c_prof in consumers.items():
+            if not isinstance(c_prof, dict):
+                errors.append(f"consumers['{c_name}'] must be a dict, got {type(c_prof).__name__}")
+                continue
+            for c_field in ("channel", "floor", "ratio", "merge_bonus", "merge_cap", "cooldown_max", "max_candidates", "topics"):
+                if c_field not in c_prof:
+                    errors.append(f"consumers['{c_name}'] missing required field {c_field!r}")
+            if not isinstance(c_prof.get("channel"), str) or not c_prof.get("channel"):
+                errors.append(f"consumers['{c_name}'].channel must be a non-empty string, got {c_prof.get('channel')!r}")
+            for c_field in ("floor", "ratio", "merge_bonus", "merge_cap"):
+                c_val = c_prof.get(c_field)
+                if c_val is not None and not isinstance(c_val, (int, float)):
+                    errors.append(f"consumers['{c_name}']['{c_field}'] must be numeric, got {type(c_val).__name__}")
+            # cooldown_max may be 0 (disables the filter — env contract);
+            # max_candidates must be a positive int.
+            c_cd = c_prof.get("cooldown_max")
+            if c_cd is not None and (not isinstance(c_cd, int) or c_cd < 0):
+                errors.append(f"consumers['{c_name}']['cooldown_max'] must be a non-negative int, got {c_cd!r}")
+            c_mc = c_prof.get("max_candidates")
+            if c_mc is not None and (not isinstance(c_mc, int) or c_mc <= 0):
+                errors.append(f"consumers['{c_name}']['max_candidates'] must be a positive int, got {c_mc!r}")
+            c_topics = c_prof.get("topics")
+            if c_topics is not None and (not isinstance(c_topics, list) or not all(isinstance(t, str) and t for t in c_topics)):
+                errors.append(f"consumers['{c_name}']['topics'] must be None or a list of non-empty strings")
 
     # Nested source config validation.
     sources = config.get("sources") or {}

@@ -26,6 +26,7 @@ class PickResult:
     median: float
     hottest: float
     temps: dict[int, float]  # row_id -> raw current temp (reusable for eviction / /scores)
+    excluded_ids: frozenset[int] = frozenset()  # rows removed from the eligible set before pick (e.g. same-topic cooldown)
 
 
 def pick_hottest(
@@ -54,8 +55,9 @@ def pick_hottest(
     computes the exclusion set — selection.py stays dependency-free.
     """
     temps = {row["id"]: current_temperature(row, config, now=now) for row in rows}
+    excl = frozenset(excluded_ids or ())
     if not rows:
-        return PickResult(row=None, reason="empty", threshold=0.0, median=0.0, hottest=0.0, temps=temps)
+        return PickResult(row=None, reason="empty", threshold=0.0, median=0.0, hottest=0.0, temps=temps, excluded_ids=excl)
 
     median = statistics.median(temps.values())
     hottest = max(temps.values())
@@ -67,13 +69,13 @@ def pick_hottest(
         and (excluded_ids is None or row["id"] not in excluded_ids)
     ]
     if not eligible:
-        return PickResult(row=None, reason="below_threshold", threshold=threshold, median=median, hottest=hottest, temps=temps)
+        return PickResult(row=None, reason="below_threshold", threshold=threshold, median=median, hottest=hottest, temps=temps, excluded_ids=excl)
 
     winner = max(
         eligible,
         key=lambda row: temps[row["id"]] * merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap),
     )
-    return PickResult(row=winner, reason="picked", threshold=threshold, median=median, hottest=hottest, temps=temps)
+    return PickResult(row=winner, reason="picked", threshold=threshold, median=median, hottest=hottest, temps=temps, excluded_ids=excl)
 
 
 def select_for_consumer(

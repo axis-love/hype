@@ -105,7 +105,7 @@ class TestPostingGate:
 
         assert result == 0
         assert len(calls) == 1  # styled exactly one row, at pick time
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         assert len(rows) == 1  # hot row posted, cold remains
         assert rows[0]["title"] == "Cold story"
 
@@ -128,7 +128,7 @@ class TestPostingGate:
         assert result == 4
         assert not style_called
         pd.assert_not_awaited()
-        assert store.count_pending() == 1  # row still unposted
+        assert store.count_pending("telegram") == 1  # row still unposted
 
     @pytest.mark.asyncio
     async def test_empty_store_returns_3(self, coordinator):
@@ -148,8 +148,8 @@ class TestPostingGate:
             result = await coordinator.run_posting()
 
         assert result == 1
-        assert store.count_pending() == 1
-        row = store.list_store_rows()[0]
+        assert store.count_pending("telegram") == 1
+        row = store.list_store_rows("telegram")[0]
         assert row["merge_count"] in (None, 1)  # untouched
 
     @pytest.mark.asyncio
@@ -174,7 +174,7 @@ class TestPostingGate:
 
         assert result == 0
         assert posted and "STYLED" in posted[0]
-        assert store.count_pending() == 0
+        assert store.count_pending("telegram") == 0
         row = store._conn.execute(
             "SELECT styled_at, posted_at, body FROM pending_posts"
         ).fetchone()
@@ -192,7 +192,7 @@ class TestPostingGate:
         # make it eligible.
         cold = _scored_story("Cold merged", 10.0)
         store.add_stories_to_store([cold], [])
-        cold_id = store.list_store_rows()[0]["id"]
+        cold_id = store.list_store_rows("telegram")[0]["id"]
         store._conn.execute(
             "UPDATE pending_posts SET merge_count=5 WHERE id=?", (cold_id,)
         )
@@ -220,7 +220,7 @@ class TestPostingGate:
         store.add_stories_to_store([_scored_story("Plain hot", 90.0)], [])
         merged = _scored_story("Merged hot", 90.0)
         store.add_stories_to_store([merged], [])
-        merged_id = store.list_store_rows()[-1]["id"]
+        merged_id = store.list_store_rows("telegram")[-1]["id"]
         store._conn.execute(
             "UPDATE pending_posts SET merge_count=3 WHERE id=?", (merged_id,)
         )
@@ -252,7 +252,7 @@ class TestPostingGate:
             result = await coordinator.run_posting()
 
         assert result == 4
-        assert store.count_pending() == 1
+        assert store.count_pending("telegram") == 1
 
     @pytest.mark.asyncio
     async def test_drain_returns_0_on_threshold_skip(self, coordinator, store, monkeypatch):
@@ -276,7 +276,7 @@ class TestPostingGate:
             result = await coordinator.drain_posts()
 
         assert result == 0
-        assert store.count_pending() == 0
+        assert store.count_pending("telegram") == 0
 
 
 class _frozen_dt:

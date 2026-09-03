@@ -393,7 +393,7 @@ def test_published_at_preserved_when_primary_switches():
 
 
 def _store_row(row_id: int, title: str, url: str, *, merged_urls: str | None = None) -> dict:
-    """Minimal store row shape as returned by db.list_store_rows()."""
+    """Minimal store row shape as returned by db.list_store_rows("telegram")."""
     return {
         "id": row_id,
         "title": title,

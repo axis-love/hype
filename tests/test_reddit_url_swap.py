@@ -201,7 +201,7 @@ class TestRedditLinkPostSwap:
 
         # And match_candidate_to_store: a candidate carrying the article URL
         # would match the existing row (via url equality).
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         candidate = new_candidate(
             title="Xbox Benchmark",
             url=article,
@@ -535,7 +535,7 @@ class TestSwapAfterClassification:
             raw_json={"external_url": article, "is_self": False},
         )
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         hit = match_candidate_to_store(candidate.to_dict(), rows)
         assert hit is not None, \
             "classification must match via external_url identity (pre-swap)"
