@@ -81,7 +81,11 @@ class TestRetentionPruning:
         store.add_pending_post({"title": "Old", "body": "B", "url": ""})
         old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(timespec="seconds")
         post = store.list_unposted_posts()[0]
-        store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
+        store._conn.execute(
+            "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
+            "VALUES(?,?,?,?)",
+            (post["id"], "telegram", old_ts, None),
+        )
 
         deleted = store.prune_posted_posts(max_age_days=30)
         assert deleted == 1
@@ -150,7 +154,11 @@ class TestRetentionPruning:
         for i in range(100):
             store.add_pending_post({"title": f"Old{i}", "body": "B", "url": ""})
             post = store.list_unposted_posts()[0]
-            store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
+            store._conn.execute(
+                "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
+                "VALUES(?,?,?,?)",
+                (post["id"], "telegram", old_ts, None),
+            )
 
         # Prune with small batch size.
         deleted = store.prune_posted_posts(max_age_days=30, batch_size=10)

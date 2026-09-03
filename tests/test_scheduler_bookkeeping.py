@@ -369,9 +369,13 @@ class TestRetentionConfigurable:
         store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
         post = store.list_unposted_posts()[0]
         store.mark_posted(post["id"])
-        # Set posted_at to 5 days ago.
+        # Set posted_at and delivered_at to 5 days ago.
         old_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
         store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
+        store._conn.execute(
+            "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
+            (old_ts, post["id"]),
+        )
 
         with patch.dict("os.environ", {
             "NEWS_RETENTION_POSTED_DAYS": "1",  # prune posts older than 1 day

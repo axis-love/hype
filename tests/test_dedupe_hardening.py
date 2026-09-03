@@ -99,6 +99,24 @@ def store(tmp_path: Path) -> Iterator[NewsStore]:
     s.close()
 
 
+def _mark_posted(store: NewsStore, row_id: int, posted_at: str) -> None:
+    """Mark a row as posted with a specific timestamp.
+
+    Sets posted_at on pending_posts AND inserts a 'telegram' delivery
+    row with the same timestamp, mirroring mark_posted's dual-write
+    but allowing a custom timestamp for window-testing.
+    """
+    store._conn.execute(
+        "UPDATE pending_posts SET posted_at=? WHERE id=?",
+        (posted_at, row_id),
+    )
+    store._conn.execute(
+        "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
+        "VALUES(?,?,?,?)",
+        (row_id, "telegram", posted_at, None),
+    )
+
+
 # --- AC 1: Witcher regression test ------------------------------------------
 
 
@@ -126,10 +144,7 @@ class TestWitcherRegression:
         ).fetchone()["id"]
         # Mark as posted 1 day ago.
         posted_at = _iso(1)
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (posted_at, row_id),
-        )
+        _mark_posted(store, row_id, posted_at)
 
         # Same story arrives from r/witcher — different permalink, different
         # enough title that fuzzy < 90, same external article url.
@@ -435,10 +450,7 @@ class TestMergeWindow:
 
         # Set posted_at to 30 days ago.
         old_posted = _iso(30)
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (old_posted, row_id),
-        )
+        _mark_posted(store, row_id, old_posted)
 
         # list_merge_target_rows(7) must NOT include this row.
         targets = store.list_merge_target_rows(7)
@@ -452,10 +464,7 @@ class TestMergeWindow:
         row_id = store._conn.execute(
             "SELECT id FROM pending_posts"
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (_iso(1), row_id),
-        )
+        _mark_posted(store, row_id, _iso(1))
 
         targets = store.list_merge_target_rows(7)
         ids = [r["id"] for r in targets]
@@ -487,10 +496,7 @@ class TestMergeWindow:
         row_id = store._conn.execute(
             "SELECT id FROM pending_posts WHERE title='Posted'"
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (_iso(1), row_id),
-        )
+        _mark_posted(store, row_id, _iso(1))
 
         targets = store.list_merge_target_rows(7)
         for r in targets:
@@ -518,10 +524,7 @@ class TestUnpostedOnlyMethods:
         row_b = store._conn.execute(
             "SELECT id FROM pending_posts WHERE title='B'"
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (_iso(0), row_b),
-        )
+        _mark_posted(store, row_b, _iso(0))
 
         rows = store.list_store_rows()
         titles = {r["title"] for r in rows}
@@ -537,10 +540,7 @@ class TestUnpostedOnlyMethods:
         row_b = store._conn.execute(
             "SELECT id FROM pending_posts WHERE title='B'"
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (_iso(0), row_b),
-        )
+        _mark_posted(store, row_b, _iso(0))
         assert store.count_pending() == 1
 
     def test_evict_coldest_ignores_posted(self, store):
@@ -557,10 +557,7 @@ class TestUnpostedOnlyMethods:
         cold_id = store._conn.execute(
             "SELECT id FROM pending_posts WHERE title='Cold'"
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (_iso(0), cold_id),
-        )
+        _mark_posted(store, cold_id, _iso(0))
 
         rows = store.list_store_rows()
         temps = {r["id"]: 1.0 for r in rows}
@@ -589,10 +586,7 @@ class TestMergeIntoPostedRow:
             "SELECT id FROM pending_posts"
         ).fetchone()["id"]
         posted_at = _iso(2)
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            (posted_at, row_id),
-        )
+        _mark_posted(store, row_id, posted_at)
 
         # Merge a candidate into this posted row.
         candidate = _store_story(

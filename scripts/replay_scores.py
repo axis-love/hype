@@ -100,7 +100,7 @@ def _load_store_candidates(db_path: str) -> list[dict[str, Any]]:
         )
     store = NewsStore(Path(db_path))
     try:
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
     finally:
         store.close()
 
