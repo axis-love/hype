@@ -91,7 +91,7 @@ class TestMigration4:
         row = store._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         ).fetchone()
-        assert row["version"] == 6
+        assert row["version"] == 7
 
 
 # --- add_stories_to_store -------------------------------------------------

@@ -221,9 +221,15 @@ class TestScoreColumnsMigration:
         assert rows[0]["message_id"] is None
         # Migration 6 adds origin_topic (NULL for legacy rows).
         assert rows[0]["origin_topic"] is None
+        # Migration 7 creates deliveries table. This row has posted_at
+        # NULL so backfill skips it — no delivery row should exist.
+        del_count = store2._conn.execute(
+            "SELECT COUNT(*) AS n FROM deliveries WHERE post_id=?", (rows[0]["id"],)
+        ).fetchone()
+        assert del_count["n"] == 0
         # Verify all migrations were applied.
         version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert version_row["v"] == 6
+        assert version_row["v"] == 7
         store2.close()
 
 
