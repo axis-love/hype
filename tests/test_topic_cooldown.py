@@ -30,6 +30,24 @@ from newsbot.jobs import JobCoordinator, _env_int
 from newsbot.selection import PickResult, pick_hottest
 
 
+def _mark_posted(store: NewsStore, row_id: int, posted_at: str) -> None:
+    """Mark a row as posted with a specific timestamp (dual-write).
+
+    Sets posted_at on pending_posts AND inserts a 'telegram' delivery
+    row with the same timestamp, mirroring mark_posted but allowing
+    a custom timestamp for cooldown window-testing.
+    """
+    store._conn.execute(
+        "UPDATE pending_posts SET posted_at=? WHERE id=?",
+        (posted_at, row_id),
+    )
+    store._conn.execute(
+        "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
+        "VALUES(?,?,?,?)",
+        (row_id, "telegram", posted_at, None),
+    )
+
+
 # --- selection.py test helpers (same as test_selection.py) -----------------
 
 CFG = {"lookback_hours": 48}
@@ -216,10 +234,7 @@ class TestTopicCooldown:
             rid = store._conn.execute(
                 "SELECT id FROM pending_posts WHERE title=?", (f"Gaming{i}",)
             ).fetchone()["id"]
-            store._conn.execute(
-                "UPDATE pending_posts SET posted_at=? WHERE id=?",
-                ((COOLDOWN_NOW - timedelta(hours=i + 1)).isoformat(timespec="seconds"), rid),
-            )
+            _mark_posted(store, rid, (COOLDOWN_NOW - timedelta(hours=i + 1)).isoformat(timespec="seconds"))
 
         # Insert a 4th gaming row (hot) and a non-gaming row (colder).
         gaming4 = _scored_story_topic("Gaming4 Hot", 90.0, topic="gaming")
@@ -255,10 +270,7 @@ class TestTopicCooldown:
             rid = store._conn.execute(
                 "SELECT id FROM pending_posts WHERE title=?", (f"OldGaming{i}",)
             ).fetchone()["id"]
-            store._conn.execute(
-                "UPDATE pending_posts SET posted_at=? WHERE id=?",
-                ((COOLDOWN_NOW - timedelta(hours=25 + i)).isoformat(timespec="seconds"), rid),
-            )
+            _mark_posted(store, rid, (COOLDOWN_NOW - timedelta(hours=25 + i)).isoformat(timespec="seconds"))
 
         # Insert a fresh gaming row.
         gaming_new = _scored_story_topic("FreshGaming", 90.0, topic="gaming")
@@ -291,10 +303,7 @@ class TestTopicCooldown:
         rid = store._conn.execute(
             "SELECT id FROM pending_posts WHERE title=?", ("GamingPost",)
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            ((COOLDOWN_NOW - timedelta(hours=1)).isoformat(timespec="seconds"), rid),
-        )
+        _mark_posted(store, rid, (COOLDOWN_NOW - timedelta(hours=1)).isoformat(timespec="seconds"))
 
         # Insert a NULL-topic row (hot) and a gaming row (also hot).
         null_row = _scored_story_topic("Null Topic Hot", 90.0, topic=None)
@@ -329,10 +338,7 @@ class TestTopicCooldown:
             rid = store._conn.execute(
                 "SELECT id FROM pending_posts WHERE title=?", (f"Spam{i}",)
             ).fetchone()["id"]
-            store._conn.execute(
-                "UPDATE pending_posts SET posted_at=? WHERE id=?",
-                ((COOLDOWN_NOW - timedelta(hours=i + 1)).isoformat(timespec="seconds"), rid),
-            )
+            _mark_posted(store, rid, (COOLDOWN_NOW - timedelta(hours=i + 1)).isoformat(timespec="seconds"))
 
         # Insert a fresh hot gaming row.
         fresh = _scored_story_topic("FreshGaming", 95.0, topic="gaming")
@@ -400,10 +406,7 @@ class TestCooldownLogging:
             rid = store._conn.execute(
                 "SELECT id FROM pending_posts WHERE title=?", (f"Posted{i}",)
             ).fetchone()["id"]
-            store._conn.execute(
-                "UPDATE pending_posts SET posted_at=? WHERE id=?",
-                ((COOLDOWN_NOW - timedelta(hours=i + 1)).isoformat(timespec="seconds"), rid),
-            )
+            _mark_posted(store, rid, (COOLDOWN_NOW - timedelta(hours=i + 1)).isoformat(timespec="seconds"))
 
         # A non-gaming row that will be picked.
         ai_row = _scored_story_topic("AI Story", 90.0, topic="ai")
@@ -443,10 +446,7 @@ class TestCooldownLogging:
         rid = store._conn.execute(
             "SELECT id FROM pending_posts WHERE title=?", ("GamingPosted",)
         ).fetchone()["id"]
-        store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
-            ((COOLDOWN_NOW - timedelta(hours=1)).isoformat(timespec="seconds"), rid),
-        )
+        _mark_posted(store, rid, (COOLDOWN_NOW - timedelta(hours=1)).isoformat(timespec="seconds"))
 
         # Insert only a gaming row that will be excluded (below threshold after exclusion).
         # Actually we need it above threshold so the only reason it's not picked

@@ -666,40 +666,54 @@ class NewsStore:
         "styled_at, message_id"
     )
 
-    def list_store_rows(self) -> list[dict]:
-        """Return all unposted store rows (raw material + score components)."""
+    def list_store_rows(self, channel: str = "telegram") -> list[dict]:
+        """Return store rows not yet delivered to *channel*.
+
+        Each consumer sees only its own undelivered rows: a row delivered
+        to 'girllm:gaming' is still eligible for 'telegram' and vice versa.
+        Uses the deliveries table (H2) — no posted_at filter.
+        """
         rows = self._conn.execute(
             f"SELECT {self._STORE_SELECT} FROM pending_posts "
-            "WHERE posted_at IS NULL ORDER BY created_at ASC, id ASC"
+            "WHERE id NOT IN (SELECT post_id FROM deliveries WHERE channel=?) "
+            "ORDER BY created_at ASC, id ASC",
+            (channel,),
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_merge_target_rows(self, days: int) -> list[dict]:
-        """Return rows eligible as merge targets: unposted + recently posted.
+    def list_merge_target_rows(self, channel: str | int, days: int | None = None) -> list[dict]:
+        """Return rows eligible as merge targets for *channel*.
 
-        Includes all unposted rows (posted_at IS NULL) plus posted rows
-        within the *days* window (posted_at >= cutoff). The posted_at
-        column is included so callers can tell posted targets apart from
-        unposted ones.
+        Includes all rows not yet delivered to *channel* (no delivery
+        row for this channel) plus rows delivered to *channel* within
+        the *days* window. A row delivered to a DIFFERENT channel only
+        is NOT a merge target — it might be a different story from that
+        channel's perspective.
+
+        Backward-compatible call shapes:
+          - list_merge_target_rows(7)              → channel='telegram', days=7
+          - list_merge_target_rows('telegram', 7)   → explicit channel + days
 
         Used ONLY at classification (main.py step 8) so that a story
-        arriving from a different source can merge into a recently-posted
+        arriving from a different source can merge into a recently-delivered
         row instead of being inserted as a duplicate. list_store_rows()
         stays the sole method for pick_hottest, eviction, /scores, /store
-        — those must see unposted rows only.
-
-        This is the future seam for the planned deliveries(post_id,
-        channel, delivered_at) table — do not overload posted_at
-        semantics elsewhere.
+        — those must see undelivered rows only.
         """
+        # Backward-compat: if channel is an int, it's the old days arg.
+        if isinstance(channel, int):
+            days = channel
+            channel = "telegram"
+        assert days is not None
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=max(1, days))
         ).isoformat(timespec="seconds")
         rows = self._conn.execute(
             f"SELECT {self._STORE_SELECT}, posted_at FROM pending_posts "
-            "WHERE posted_at IS NULL OR posted_at >= ? "
+            "WHERE id NOT IN (SELECT post_id FROM deliveries) "
+            "OR id IN (SELECT post_id FROM deliveries WHERE channel=? AND delivered_at >= ?) "
             "ORDER BY created_at ASC, id ASC",
-            (cutoff,),
+            (channel, cutoff),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -844,15 +858,24 @@ class NewsStore:
             (title, body, _utc_now_iso(), row_id),
         )
 
-    def evict_coldest(self, temps: dict[int, float], cap: int) -> int:
-        """Delete unposted rows with the lowest temperatures until count <= cap.
+    def evict_coldest(self, temps: dict[int, float], cap: int, *, channel: str | None = None) -> int:
+        """Delete undelivered rows with the lowest temperatures until count <= cap.
 
         temps maps row_id -> raw current temperature (computed by the caller).
-        Rows missing from temps are treated as coldest-first by id. Never
-        touches posted rows. Returns the number of rows evicted.
+        Rows missing from temps are treated as coldest-first by id.
+
+        Global eviction (decision 2026-09-03): a row with ANY delivery
+        (to ANY channel) is never evicted. This protects delivered rows
+        even when they are the coldest — a row delivered to girllm must
+        survive a telegram eviction pass.
+
+        The *channel* parameter is accepted for API symmetry but does not
+        change the eviction scope — eviction is global, not per-channel.
         """
+        # Only evict rows with no deliveries at all (global protection).
         rows = self._conn.execute(
-            "SELECT id FROM pending_posts WHERE posted_at IS NULL"
+            "SELECT id FROM pending_posts "
+            "WHERE id NOT IN (SELECT post_id FROM deliveries)"
         ).fetchall()
         count = len(rows)
         if count <= cap:
@@ -867,7 +890,8 @@ class NewsStore:
             return 0
         placeholders = ",".join("?" * len(to_evict))
         cur = self._conn.execute(
-            f"DELETE FROM pending_posts WHERE posted_at IS NULL AND id IN ({placeholders})",
+            f"DELETE FROM pending_posts WHERE id IN ({placeholders}) "
+            "AND id NOT IN (SELECT post_id FROM deliveries)",
             to_evict,
         )
         evicted = int(cur.rowcount or 0)
@@ -875,15 +899,29 @@ class NewsStore:
             log.info("evicted %d coldest store rows (cap=%d)", evicted, cap)
         return evicted
 
-    def list_posted_since(self, since_iso: str) -> list[dict]:
-        """Return posted rows with posted_at >= since_iso, oldest first.
+    def list_posted_since(self, channel: str = "telegram", since_iso: str | None = None) -> list[dict]:
+        """Return rows delivered to *channel* with delivered_at >= since_iso, oldest first.
 
-        Boundary is inclusive. Source rows for the daily summary.
+        Boundary is inclusive. Source rows for the daily summary and
+        topic cooldown. Each consumer reads its own deliveries.
         """
+        if since_iso is None:
+            # Backward-compat: caller passed only since_iso as positional.
+            # This shape is no longer used by callers but prevents a crash
+            # if old code calls list_posted_since(some_iso).
+            raise TypeError("list_posted_since(channel, since_iso) — both args required")
+        # Prefix _STORE_SELECT columns with pp. to disambiguate from
+        # deliveries columns in the JOIN.
+        select_cols = ", ".join(
+            f"pp.{c.strip()}" for c in self._STORE_SELECT.split(",")
+        )
         rows = self._conn.execute(
-            f"SELECT {self._STORE_SELECT}, body, posted_at FROM pending_posts "
-            "WHERE posted_at IS NOT NULL AND posted_at >= ? ORDER BY posted_at ASC",
-            (since_iso,),
+            f"SELECT {select_cols}, pp.body, d.delivered_at AS posted_at "
+            "FROM pending_posts pp "
+            "JOIN deliveries d ON d.post_id = pp.id "
+            "WHERE d.channel = ? AND d.delivered_at >= ? "
+            "ORDER BY d.delivered_at ASC",
+            (channel, since_iso),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -906,65 +944,81 @@ class NewsStore:
         ).fetchone()
         return dict(row) if row else None
 
-    def count_pending(self) -> int:
-        """Count unposted posts in the queue."""
+    def count_pending(self, channel: str = "telegram") -> int:
+        """Count rows not yet delivered to *channel*."""
         row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NULL"
+            "SELECT COUNT(*) AS n FROM pending_posts "
+            "WHERE id NOT IN (SELECT post_id FROM deliveries WHERE channel=?)",
+            (channel,),
         ).fetchone()
         return int(row["n"] if row else 0)
 
-    def list_unposted_posts(self) -> list[dict[str, Any]]:
-        """Return all unposted posts ordered by created_at, id (oldest first).
+    def list_unposted_posts(self, channel: str = "telegram") -> list[dict[str, Any]]:
+        """Return all rows not yet delivered to *channel*, ordered by created_at, id.
 
         Used by the /scores command to show queued posts with score breakdown.
         """
         rows = self._conn.execute(
             """
             SELECT * FROM pending_posts
-            WHERE posted_at IS NULL
+            WHERE id NOT IN (SELECT post_id FROM deliveries WHERE channel=?)
             ORDER BY created_at ASC, id ASC
-            """
+            """,
+            (channel,),
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_store_row(self, row_id: int) -> dict[str, Any] | None:
-        """Return a single unposted store row by id, or None if not found."""
+    def get_store_row(self, row_id: int, channel: str = "telegram") -> dict[str, Any] | None:
+        """Return a single row by id if not yet delivered to *channel*, or None."""
         row = self._conn.execute(
-            f"SELECT {self._STORE_SELECT}, body FROM pending_posts WHERE id=? AND posted_at IS NULL",
-            (row_id,),
+            f"SELECT {self._STORE_SELECT}, body FROM pending_posts "
+            "WHERE id=? AND id NOT IN (SELECT post_id FROM deliveries WHERE channel=?)",
+            (row_id, channel),
         ).fetchone()
         return dict(row) if row else None
 
-    def list_store_ids(self) -> list[int]:
-        """Return all unposted store row ids (for /store error hints)."""
+    def list_store_ids(self, channel: str = "telegram") -> list[int]:
+        """Return row ids not yet delivered to *channel* (for /store error hints)."""
         rows = self._conn.execute(
-            "SELECT id FROM pending_posts WHERE posted_at IS NULL ORDER BY id ASC"
+            "SELECT id FROM pending_posts "
+            "WHERE id NOT IN (SELECT post_id FROM deliveries WHERE channel=?) "
+            "ORDER BY id ASC",
+            (channel,),
         ).fetchall()
         return [int(row["id"]) for row in rows]
 
     # --- Retention / cleanup --------------------------------------------
 
-    def prune_posted_posts(self, max_age_days: int = 30, batch_size: int = 500) -> int:
-        """Delete posted posts older than max_age_days, in bounded batches.
+    def prune_delivered(self, max_age_days: int = 30, batch_size: int = 500) -> int:
+        """Delete rows whose newest delivery is older than max_age_days.
 
-        Never removes unposted posts (posted_at IS NULL).
+        A row with no deliveries is never pruned (still in the active store).
+        A row with a recent delivery to any channel survives — the newest
+        delivery determines the row's age. Removes in bounded batches.
         Returns the total count of deleted rows.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, max_age_days))).isoformat(timespec="seconds")
         total_deleted = 0
         while True:
             cur = self._conn.execute(
-                "DELETE FROM pending_posts WHERE posted_at IS NOT NULL AND posted_at < ? AND id IN "
-                "(SELECT id FROM pending_posts WHERE posted_at IS NOT NULL AND posted_at < ? LIMIT ?)",
-                (cutoff, cutoff, batch_size),
+                "DELETE FROM pending_posts WHERE id IN ("
+                "  SELECT pp.id FROM pending_posts pp"
+                "  WHERE EXISTS (SELECT 1 FROM deliveries d WHERE d.post_id = pp.id)"
+                "    AND (SELECT MAX(d2.delivered_at) FROM deliveries d2 WHERE d2.post_id = pp.id) < ?"
+                "  LIMIT ?"
+                ")",
+                (cutoff, batch_size),
             )
             deleted = int(cur.rowcount or 0)
             total_deleted += deleted
             if deleted < batch_size:
                 break
         if total_deleted:
-            log.info("Pruned %d posted posts older than %d days", total_deleted, max_age_days)
+            log.info("Pruned %d posts with deliveries older than %d days", total_deleted, max_age_days)
         return total_deleted
+
+    # Backward-compatible alias for _run_retention callers.
+    prune_posted_posts = prune_delivered
 
     def prune_seen(self, max_age_days: int = 14, batch_size: int = 500) -> int:
         """Delete seen entries older than max_age_days, in bounded batches.

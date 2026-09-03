@@ -323,7 +323,7 @@ class JobCoordinator:
             4 — threshold skip: nothing hot enough (slot consumed).
         """
         cfg = load_config(self._settings)
-        rows = self._store.list_store_rows()
+        rows = self._store.list_store_rows("telegram")
         now = datetime.now(timezone.utc)
 
         # Same-topic cooldown: exclude rows whose origin_topic has
@@ -332,7 +332,7 @@ class JobCoordinator:
         excluded_ids: set[int] = set()
         if cooldown_max > 0 and rows:
             since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
-            posted_recently = self._store.list_posted_since(since)
+            posted_recently = self._store.list_posted_since("telegram", since)
             topic_counts: dict[str, int] = {}
             for p in posted_recently:
                 topic = str(p.get("origin_topic") or "").strip()

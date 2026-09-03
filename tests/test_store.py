@@ -422,39 +422,46 @@ class TestListPostedSince:
     def test_boundary_inclusive(self, store):
         rid = _insert_legacy(store, "AtBoundary", "http://b.example.com")
         boundary = "2026-08-16T12:00:00+00:00"
+        store.mark_delivered(rid, "telegram", message_id=None)
+        # Override the delivered_at to the boundary timestamp.
         store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?", (boundary, rid)
+            "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
+            (boundary, rid),
         )
-        rows = store.list_posted_since(boundary)
+        rows = store.list_posted_since("telegram", boundary)
         assert [r["title"] for r in rows] == ["AtBoundary"]
 
     def test_excludes_older_and_unposted(self, store):
         rid_old = _insert_legacy(store, "Old", "http://old.example.com")
         _insert_legacy(store, "Unposted", "http://u.example.com")
         rid_new = _insert_legacy(store, "New", "http://new.example.com")
+        store.mark_delivered(rid_old, "telegram")
         store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
+            "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
             ("2026-08-15T00:00:00+00:00", rid_old),
         )
+        store.mark_delivered(rid_new, "telegram")
         store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
+            "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
             ("2026-08-16T13:00:00+00:00", rid_new),
         )
-        rows = store.list_posted_since("2026-08-16T00:00:00+00:00")
+        rows = store.list_posted_since("telegram", "2026-08-16T00:00:00+00:00")
         assert [r["title"] for r in rows] == ["New"]
 
     def test_ordered_by_posted_at_asc(self, store):
         r1 = _insert_legacy(store, "First", "http://1.example.com")
         r2 = _insert_legacy(store, "Second", "http://2.example.com")
+        store.mark_delivered(r2, "telegram")
         store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
+            "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
             ("2026-08-16T10:00:00+00:00", r2),
         )
+        store.mark_delivered(r1, "telegram")
         store._conn.execute(
-            "UPDATE pending_posts SET posted_at=? WHERE id=?",
+            "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
             ("2026-08-16T09:00:00+00:00", r1),
         )
-        rows = store.list_posted_since("2026-08-16T00:00:00+00:00")
+        rows = store.list_posted_since("telegram", "2026-08-16T00:00:00+00:00")
         assert [r["title"] for r in rows] == ["First", "Second"]
 
 

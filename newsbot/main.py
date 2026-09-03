@@ -328,11 +328,12 @@ async def _run_generation_pipeline(
     final = [_as_dict(item) for item in final]
 
     # 8. Classify against store (add vs merge).
-    #    Use list_merge_target_rows (unposted + recently posted) so a story
-    #    arriving from a different source can merge into a posted row
-    #    instead of being inserted as a duplicate (flow_001123).
+    #    Use list_merge_target_rows (undelivered + recently delivered to
+    #    telegram) so a story arriving from a different source can merge
+    #    into a recently-delivered row instead of being inserted as a
+    #    duplicate (flow_001123).
     merge_window_days = int(os.getenv("NEWS_MERGE_WINDOW_DAYS", "7"))
-    store_rows = store.list_merge_target_rows(merge_window_days)
+    store_rows = store.list_merge_target_rows("telegram", merge_window_days)
     items: list[dict[str, Any]] = []
     for item in final:
         hit = match_candidate_to_store(item, store_rows)
@@ -523,12 +524,12 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
 
     # 11. Eviction: trim the store back to NEWS_STORE_CAP, coldest first.
     now_utc = datetime.now(timezone.utc)
-    post_rows = store.list_store_rows()
+    post_rows = store.list_store_rows("telegram")
     temps = {r["id"]: current_temperature(r, cfg, now=now_utc) for r in post_rows}
     cap = int(os.getenv("NEWS_STORE_CAP", "36"))
     evicted = store.evict_coldest(temps, cap=cap)
     if evicted:
-        remaining_ids = {r["id"] for r in store.list_store_rows()}
+        remaining_ids = {r["id"] for r in store.list_store_rows("telegram")}
         gone = sorted(
             ((tid, t) for tid, t in temps.items() if tid not in remaining_ids),
             key=lambda kv: kv[1],
@@ -554,7 +555,7 @@ def _run_retention(store: NewsStore) -> None:
     posted_days = int(os.getenv("NEWS_RETENTION_POSTED_DAYS", "30"))
     seen_days = int(os.getenv("NEWS_RETENTION_SEEN_DAYS", "14"))
     try:
-        store.prune_posted_posts(max_age_days=posted_days)
+        store.prune_delivered(max_age_days=posted_days)
         store.prune_seen(max_age_days=seen_days)
     except Exception as exc:
         log.warning("retention cleanup failed: %s", exc)
@@ -617,7 +618,7 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
     """
     day = summary_day(now)
     since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
-    rows = store.list_posted_since(since_utc)
+    rows = store.list_posted_since("telegram", since_utc)
     if not rows:
         log.info("daily summary: no posts in the last 24h — skipping day %s", day)
         return 3
@@ -711,7 +712,7 @@ def _pick_snapshot(store: NewsStore, config: dict[str, Any]) -> tuple[Any, float
     Returns (PickResult, floor, ratio, merge_bonus, merge_cap) so callers
     (/scores, /status) share the exact same numbers the poster uses.
     """
-    rows = store.list_store_rows()
+    rows = store.list_store_rows("telegram")
     now = datetime.now(timezone.utc)
     floor = _env_float("NEWS_TEMP_FLOOR", "35")
     ratio = _env_float("NEWS_THRESHOLD_RATIO", "0.5")
@@ -733,7 +734,7 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
     from newsbot.scoring import merge_multiplier
 
     result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, config)
-    rows = [row for row in store.list_store_rows()]
+    rows = [row for row in store.list_store_rows("telegram")]
     if not rows:
         return "Store is empty."
 
@@ -785,7 +786,7 @@ def _format_store_browse(store: NewsStore, config: dict[str, Any]) -> str:
     from newsbot.scoring import merge_multiplier
 
     result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, config)
-    rows = store.list_store_rows()
+    rows = store.list_store_rows("telegram")
     if not rows:
         return "Store is empty."
 
@@ -834,9 +835,9 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
 
     Returns a helpful error with valid id hints if the row is not found.
     """
-    row = store.get_store_row(row_id)
+    row = store.get_store_row(row_id, "telegram")
     if row is None:
-        valid_ids = store.list_store_ids()
+        valid_ids = store.list_store_ids("telegram")
         if valid_ids:
             id_str = ", ".join(str(i) for i in valid_ids[:20])
             suffix = f" … ({len(valid_ids)} total)" if len(valid_ids) > 20 else ""
@@ -1160,7 +1161,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 
         async def on_status() -> str:
             cfg = load_config(settings)
-            rows = store.list_store_rows()
+            rows = store.list_store_rows("telegram")
             styled = sum(1 for row in rows if row.get("styled_at"))
             raw = len(rows) - styled
             result, floor, ratio, _, _ = _pick_snapshot(store, cfg)
@@ -1268,7 +1269,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             """
             now = local_now()
             since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
-            rows = store.list_posted_since(since_utc)
+            rows = store.list_posted_since("telegram", since_utc)
             if not rows:
                 raise RuntimeError("nothing posted in the last 24h — nothing to recap")
             cfg = load_config(settings)
