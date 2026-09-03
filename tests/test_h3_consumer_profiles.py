@@ -284,8 +284,9 @@ class TestUnknownConsumer:
 
     @pytest.mark.asyncio
     async def test_jobs_raises_on_missing_profile(self, store, monkeypatch):
-        """jobs._deliver_one raises RuntimeError if the telegram profile
-        is missing from config."""
+        """jobs._deliver_one raises ValueError naming the consumer when the
+        telegram profile is missing from config (flow_001162 item 11:
+        consumer_profile helper)."""
         from newsbot.jobs import JobCoordinator
         from core.settings_store import default_store
         from newsbot.config import load_config
@@ -298,7 +299,7 @@ class TestUnknownConsumer:
         bad_config.pop("consumers", None)
         monkeypatch.setattr("newsbot.jobs.load_config", lambda s: bad_config)
 
-        with pytest.raises(RuntimeError, match="consumer profile 'telegram'"):
+        with pytest.raises(ValueError, match="unknown consumer: telegram"):
             await coordinator._deliver_one()
 
     def test_select_for_consumer_with_empty_rows(self):

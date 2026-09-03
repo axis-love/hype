@@ -66,7 +66,7 @@ class TestMigrations:
         db_path = tmp_path / "test.sqlite"
         with NewsStore(db_path) as store:
             store.add_pending_post({"title": "T", "body": "B", "url": ""})
-            assert store.count_pending() == 1
+            assert store.count_pending("telegram") == 1
         # Connection should be closed after context exit.
         with pytest.raises(sqlite3.ProgrammingError):
             store._conn.execute("SELECT 1")
@@ -75,45 +75,45 @@ class TestMigrations:
 class TestRetentionPruning:
     """Verify retention pruning preserves active data and removes old data."""
 
-    def test_prune_posted_posts_removes_old(self, store):
+    def test_prune_delivered_removes_old(self, store):
         """Posted posts older than the cutoff should be removed."""
         # Insert and mark as posted with an old timestamp.
         store.add_pending_post({"title": "Old", "body": "B", "url": ""})
         old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(timespec="seconds")
-        post = store.list_unposted_posts()[0]
+        post = store.list_unposted_posts("telegram")[0]
         store._conn.execute(
             "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
             "VALUES(?,?,?,?)",
             (post["id"], "telegram", old_ts, None),
         )
 
-        deleted = store.prune_posted_posts(max_age_days=30)
+        deleted = store.prune_delivered(max_age_days=30)
         assert deleted == 1
-        assert store.count_pending() == 0
+        assert store.count_pending("telegram") == 0
 
-    def test_prune_posted_posts_preserves_recent(self, store):
+    def test_prune_delivered_preserves_recent(self, store):
         """Recently posted posts should NOT be removed."""
         store.add_pending_post({"title": "Recent", "body": "B", "url": ""})
         recent_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
-        post = store.list_unposted_posts()[0]
+        post = store.list_unposted_posts("telegram")[0]
         store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (recent_ts, post["id"]))
 
-        deleted = store.prune_posted_posts(max_age_days=30)
+        deleted = store.prune_delivered(max_age_days=30)
         assert deleted == 0
         # The posted post should still exist.
         rows = store._conn.execute("SELECT * FROM pending_posts").fetchall()
         assert len(rows) == 1
 
-    def test_prune_posted_posts_preserves_unposted(self, store):
-        """Unposted posts should NEVER be removed by prune_posted_posts."""
+    def test_prune_delivered_preserves_unposted(self, store):
+        """Unposted posts should NEVER be removed by prune_delivered."""
         store.add_pending_post({"title": "Unposted", "body": "B", "url": ""})
         # Set a very old created_at to try to trick the pruner.
         old_ts = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat(timespec="seconds")
         store._conn.execute("UPDATE pending_posts SET created_at=? WHERE posted_at IS NULL", (old_ts,))
 
-        deleted = store.prune_posted_posts(max_age_days=1)
+        deleted = store.prune_delivered(max_age_days=1)
         assert deleted == 0
-        assert store.count_pending() == 1
+        assert store.count_pending("telegram") == 1
 
     def test_prune_seen_removes_old(self, store):
         """Seen entries older than the cutoff should be removed."""
@@ -153,7 +153,7 @@ class TestRetentionPruning:
         old_ts = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat(timespec="seconds")
         for i in range(100):
             store.add_pending_post({"title": f"Old{i}", "body": "B", "url": ""})
-            post = store.list_unposted_posts()[0]
+            post = store.list_unposted_posts("telegram")[0]
             store._conn.execute(
                 "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
                 "VALUES(?,?,?,?)",
@@ -161,9 +161,9 @@ class TestRetentionPruning:
             )
 
         # Prune with small batch size.
-        deleted = store.prune_posted_posts(max_age_days=30, batch_size=10)
+        deleted = store.prune_delivered(max_age_days=30, batch_size=10)
         assert deleted == 100
-        assert store.count_pending() == 0
+        assert store.count_pending("telegram") == 0
 
 # --- flow_001040: persist score components in pending_posts ---
 
@@ -331,14 +331,14 @@ class TestListUnpostedPosts:
 
     def test_empty_queue(self, store):
         """Empty queue should return empty list."""
-        assert store.list_unposted_posts() == []
+        assert store.list_unposted_posts("telegram") == []
 
     def test_ordering_oldest_first(self, store):
         """Posts should be ordered by created_at, id (oldest first)."""
         store.add_pending_post({"title": "First", "body": "B", "url": ""})
         store.add_pending_post({"title": "Second", "body": "B", "url": ""})
         store.add_pending_post({"title": "Third", "body": "B", "url": ""})
-        posts = store.list_unposted_posts()
+        posts = store.list_unposted_posts("telegram")
         assert len(posts) == 3
         assert posts[0]["title"] == "First"
         assert posts[1]["title"] == "Second"
@@ -348,8 +348,8 @@ class TestListUnpostedPosts:
         """Posted posts should not appear in list_unposted_posts."""
         store.add_pending_post({"title": "Unposted", "body": "B", "url": ""})
         store.add_pending_post({"title": "AlsoUnposted", "body": "B", "url": ""})
-        post = store.list_unposted_posts()[0]
+        post = store.list_unposted_posts("telegram")[0]
         store.mark_posted(post["id"])
-        unposted = store.list_unposted_posts()
+        unposted = store.list_unposted_posts("telegram")
         assert len(unposted) == 1
         assert unposted[0]["title"] == "AlsoUnposted"

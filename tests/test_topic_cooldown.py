@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from newsbot.db import NewsStore
-from newsbot.jobs import JobCoordinator, _env_int
+from newsbot.jobs import JobCoordinator
 from newsbot.selection import PickResult, pick_hottest
 
 

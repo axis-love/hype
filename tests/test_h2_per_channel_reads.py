@@ -254,10 +254,10 @@ class TestChannelIsolation:
         _deliver(store, rid, "telegram")
 
         # No channel arg → telegram default.
-        assert store.list_store_rows() == []
-        assert store.count_pending() == 0
-        assert store.get_store_row(rid) is None
-        assert store.list_store_ids() == []
+        assert store.list_store_rows("telegram") == []
+        assert store.count_pending("telegram") == 0
+        assert store.get_store_row(rid, "telegram") is None
+        assert store.list_store_ids("telegram") == []
 
     def test_list_unposted_posts_channel_scoped(self, store):
         """list_unposted_posts(channel) respects the delivery filter."""
@@ -410,17 +410,6 @@ class TestPruneDelivered:
         deleted = store.prune_delivered(max_age_days=30, batch_size=10)
         assert deleted == 25
 
-    def test_prune_posted_posts_alias_works(self, store):
-        """prune_posted_posts is kept as an alias to prune_delivered for
-        backward compatibility with _run_retention."""
-        store.add_stories_to_store([_story()], [])
-        rid = store._conn.execute(
-            "SELECT id FROM pending_posts"
-        ).fetchone()["id"]
-        _deliver(store, rid, "telegram", delivered_at=_iso(60))
-
-        deleted = store.prune_posted_posts(max_age_days=30)
-        assert deleted == 1
 
 
 # --- AC 4: no bare posted_at IS NULL in db.py ----------------------------

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from newsbot.config import _consumer_profiles
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator, _format_recap_html_fallback, format_post_message
 
@@ -265,7 +266,7 @@ class TestJobCoordinatorSerialization:
         async def capture_deliver():
             # Yield to let any concurrent call check the admission flag.
             await asyncio.sleep(0.05)
-            unposted = store.list_unposted_posts()
+            unposted = store.list_unposted_posts("telegram")
             post = unposted[0] if unposted else None
             if post:
                 delivered_ids.append(post["id"])
@@ -304,7 +305,7 @@ class TestJobCoordinatorDrain:
             result = await coordinator.drain_posts()
 
         assert result == 0
-        assert store.count_pending() == 0
+        assert store.count_pending("telegram") == 0
 
     @pytest.mark.asyncio
     async def test_drain_empty_queue(self, coordinator):
@@ -382,7 +383,7 @@ class TestConcurrentGenerationPostingIntegration:
         assert len(delivered_titles) == 1, f"Expected 1 delivery, got {delivered_titles}"
 
         # After both jobs: 3 old + 3 new − 1 delivered = 5 pending.
-        remaining = store.count_pending()
+        remaining = store.count_pending("telegram")
         assert remaining == 5
 
     @pytest.mark.asyncio
@@ -434,7 +435,7 @@ class TestConcurrentGenerationPostingIntegration:
         assert int(posted_count["n"]) == 1
 
         # 4 posts still pending.
-        assert store.count_pending() == 4
+        assert store.count_pending("telegram") == 4
 
     @pytest.mark.asyncio
     async def test_generation_during_drain_preserves_order(self, coordinator, store):
@@ -487,7 +488,7 @@ class TestConcurrentGenerationPostingIntegration:
         assert delivered == ["Old0", "Old1", "Old2"]
 
         # New post is in the queue.
-        assert store.count_pending() == 1
+        assert store.count_pending("telegram") == 1
 
     @pytest.mark.asyncio
     async def test_concurrent_generation_no_queue_corruption(self, coordinator, store):
@@ -517,8 +518,8 @@ class TestConcurrentGenerationPostingIntegration:
         assert results.count(2) == 1
 
         # Queue has exactly 1 post (from whichever generation ran).
-        assert store.count_pending() == 1
-        post = store.list_unposted_posts()[0]
+        assert store.count_pending("telegram") == 1
+        post = store.list_unposted_posts("telegram")[0]
         assert post is not None
         assert post["title"] in ("A", "B")
 
@@ -585,7 +586,7 @@ def test_format_scores_empty_store(tmp_path):
     from newsbot.db import NewsStore
     from newsbot.main import _format_scores
     store = NewsStore(tmp_path / "test.sqlite")
-    result = _format_scores(store, {"lookback_hours": 48})
+    result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
     assert result == "Store is empty."
     store.close()
 
@@ -598,7 +599,7 @@ def test_format_scores_threshold_header_and_row(tmp_path):
     store = NewsStore(tmp_path / "test.sqlite")
     store.add_stories_to_store([scored_story("Test Post About LLMs", 150.0)], [])
 
-    result = _format_scores(store, {"lookback_hours": 48})
+    result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
     assert "Store temperatures (1 rows)" in result
     assert "Threshold:" in result
     assert "floor 35.0" in result  # default NEWS_TEMP_FLOOR
@@ -616,10 +617,10 @@ def test_format_scores_styled_flag(tmp_path):
     from tests.helpers import scored_story
     store = NewsStore(tmp_path / "test.sqlite")
     store.add_stories_to_store([scored_story("Styled One", 150.0)], [])
-    row = store.list_store_rows()[0]
+    row = store.list_store_rows("telegram")[0]
     store.set_styled_content(int(row["id"]), "Styled One", "Styled body.")
 
-    result = _format_scores(store, {"lookback_hours": 48})
+    result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
     assert "[styled]" in result
     store.close()
 
@@ -638,7 +639,7 @@ def test_format_scores_legacy_row_sinks(tmp_path):
         ("Legacy Post", "B", "https://legacy.com", "2026-07-28T10:00:00+00:00"),
     )
 
-    result = _format_scores(store, {"lookback_hours": 48})
+    result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
     assert "score unavailable" in result
     assert "Legacy Post" in result
     assert "Scored Post" in result
@@ -659,7 +660,7 @@ def test_format_scores_hottest_first(tmp_path):
         scored_story("Warm Post", 150.0),
     ], [])
 
-    result = _format_scores(store, {"lookback_hours": 48})
+    result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
     idx_hot = result.index("Hot Post")
     idx_warm = result.index("Warm Post")
     idx_cold = result.index("Cold Post")
@@ -760,7 +761,7 @@ def _seed_store_row(store, title="Test Story", score=80.0, **extra):
     from tests.helpers import scored_story
     story = scored_story(title, score)
     store.add_stories_to_store([story], [])
-    row = store.list_store_rows()[0]
+    row = store.list_store_rows("telegram")[0]
     if extra.get("styled"):
         store.set_styled_content(int(row["id"]), title, "Styled body text.")
     return int(row["id"])
@@ -771,7 +772,7 @@ class TestFormatStoreBrowse:
         from newsbot.main import _format_store_browse
         from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
 
-        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
         result = _format_store_browse(store, config)
         assert "empty" in result.lower()
 
@@ -782,7 +783,7 @@ class TestFormatStoreBrowse:
         _seed_store_row(store, "Cold Story", 50.0)
         _seed_store_row(store, "Hot Story", 300.0)
 
-        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
         result = _format_store_browse(store, config)
         assert "Hot Story" in result
         assert "Cold Story" in result
@@ -794,7 +795,7 @@ class TestFormatStoreBrowse:
 
         row_id = _seed_store_row(store, "Tale", 80.0)
 
-        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
         result = _format_store_browse(store, config)
         assert f"[{row_id}]" in result
         assert "raw" in result
@@ -806,7 +807,7 @@ class TestFormatStoreBrowse:
 
         _seed_store_row(store, "Styled", 80.0, styled=True)
 
-        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS}
+        config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
         result = _format_store_browse(store, config)
         assert "styled" in result
 

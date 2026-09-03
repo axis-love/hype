@@ -157,14 +157,14 @@ class TestWitcherRegression:
         )
 
         # list_merge_target_rows includes posted rows within the window.
-        targets = store.list_merge_target_rows(7)
+        targets = store.list_merge_target_rows("telegram", 7)
         hit = match_candidate_to_store(candidate.to_dict(), targets)
 
         assert hit is not None, "must match the posted row via external_url"
         assert hit["id"] == row_id
 
         # Row must NOT appear in list_store_rows (unposted only).
-        unposted = store.list_store_rows()
+        unposted = store.list_store_rows("telegram")
         assert all(r["id"] != row_id for r in unposted), \
             "posted row must not appear in list_store_rows"
 
@@ -205,7 +205,7 @@ class TestExternalUrlCandidateToRow:
             raw_json={"external_url": article_url},
         )
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         hit = match_candidate_to_store(candidate.to_dict(), rows)
         assert hit is not None
         assert _canonical_url(hit["url"]) == _canonical_url(article_url)
@@ -240,7 +240,7 @@ class TestRowSideExternalUrl:
             source_name="The Verge",
         )
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         hit = match_candidate_to_store(candidate.to_dict(), rows)
         assert hit is not None
 
@@ -263,7 +263,7 @@ class TestRowSideExternalUrl:
             source_name="Other",
         )
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         # Must not crash, must not match (malformed raw_json -> no ext key).
         hit = match_candidate_to_store(candidate.to_dict(), rows)
         assert hit is None
@@ -453,7 +453,7 @@ class TestMergeWindow:
         _mark_posted(store, row_id, old_posted)
 
         # list_merge_target_rows(7) must NOT include this row.
-        targets = store.list_merge_target_rows(7)
+        targets = store.list_merge_target_rows("telegram", 7)
         assert all(r["id"] != row_id for r in targets), \
             "row posted 30 days ago must not be a merge target (window=7)"
 
@@ -466,7 +466,7 @@ class TestMergeWindow:
         ).fetchone()["id"]
         _mark_posted(store, row_id, _iso(1))
 
-        targets = store.list_merge_target_rows(7)
+        targets = store.list_merge_target_rows("telegram", 7)
         ids = [r["id"] for r in targets]
         assert row_id in ids, "row posted 1 day ago must be a merge target (window=7)"
 
@@ -478,7 +478,7 @@ class TestMergeWindow:
             "SELECT id FROM pending_posts"
         ).fetchone()["id"]
 
-        targets = store.list_merge_target_rows(1)
+        targets = store.list_merge_target_rows("telegram", 1)
         ids = [r["id"] for r in targets]
         assert row_id in ids
 
@@ -498,7 +498,7 @@ class TestMergeWindow:
         ).fetchone()["id"]
         _mark_posted(store, row_id, _iso(1))
 
-        targets = store.list_merge_target_rows(7)
+        targets = store.list_merge_target_rows("telegram", 7)
         for r in targets:
             assert "posted_at" in r, "posted_at must be in the result dict"
         posted_row = next(r for r in targets if r["id"] == row_id)
@@ -526,7 +526,7 @@ class TestUnpostedOnlyMethods:
         ).fetchone()["id"]
         _mark_posted(store, row_b, _iso(0))
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         titles = {r["title"] for r in rows}
         assert titles == {"A"}, "list_store_rows must show unposted only"
 
@@ -541,7 +541,7 @@ class TestUnpostedOnlyMethods:
             "SELECT id FROM pending_posts WHERE title='B'"
         ).fetchone()["id"]
         _mark_posted(store, row_b, _iso(0))
-        assert store.count_pending() == 1
+        assert store.count_pending("telegram") == 1
 
     def test_evict_coldest_ignores_posted(self, store):
         from newsbot.scoring import engagement
@@ -559,7 +559,7 @@ class TestUnpostedOnlyMethods:
         ).fetchone()["id"]
         _mark_posted(store, cold_id, _iso(0))
 
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         temps = {r["id"]: 1.0 for r in rows}
         evicted = store.evict_coldest(temps, cap=0)
         assert evicted == 1  # the one unposted row evicted

@@ -2,7 +2,7 @@
 import pytest
 from typing import Any
 
-from newsbot.config import DEFAULT_TOPIC_BOOST
+from newsbot.config import DEFAULT_TOPIC_BOOST, _consumer_profiles
 from newsbot.scoring import topic_bonus
 
 
@@ -87,6 +87,7 @@ class TestConfigValidation:
             "llm_max_tokens_filter": 8000,
             "llm_max_tokens_digest": 8000,
             "style_prompt": "",
+            "consumers": _consumer_profiles(),
         }
         base.update(overrides)
         return base
@@ -307,6 +308,7 @@ class TestNestedListValidation:
             "item_prune_hours": 48, "llm_temperature": 0.4,
             "llm_max_tokens_filter": 8000, "llm_max_tokens_digest": 8000,
             "style_prompt": "",
+            "consumers": _consumer_profiles(),
         }
         base.update(overrides)
         return base

@@ -19,7 +19,7 @@ from typing import Any
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from lm_client import LMClient
-from newsbot.config import load_config
+from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore
 from newsbot.images import extract_article_media
 from newsbot.richmd import (
@@ -54,24 +54,6 @@ def _build_lm_client() -> LMClient:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
-
-
-def _env_float(name: str, default: str) -> float:
-    """Read a float env var, falling back (with a warning) on bad values."""
-    try:
-        return float(os.getenv(name, default))
-    except ValueError:
-        log.warning("invalid float for %s — falling back to %s", name, default)
-        return float(default)
-
-
-def _env_int(name: str, default: str) -> int:
-    """Read an int env var, falling back (with a warning) on bad values."""
-    try:
-        return int(os.getenv(name, default))
-    except ValueError:
-        log.warning("invalid int for %s — falling back to %s", name, default)
-        return int(default)
 
 
 def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
@@ -326,9 +308,10 @@ class JobCoordinator:
         rows = self._store.list_store_rows("telegram")
         now = datetime.now(timezone.utc)
 
-        profile = cfg.get("consumers", {}).get("telegram")
-        if profile is None:
-            raise RuntimeError("consumer profile 'telegram' not found in config")
+        # consumer_profile raises ValueError("unknown consumer: X") if the
+        # telegram profile is missing — one lookup shared with the H4 API
+        # key -> consumer mapping.
+        profile = consumer_profile(cfg, "telegram")
 
         # Fetch this consumer's recent deliveries for per-consumer cooldown.
         since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
@@ -337,20 +320,6 @@ class JobCoordinator:
         result = select_for_consumer(
             rows, deliveries_for_channel, profile, cfg, now=now,
         )
-
-        # Count cooldown-excluded for logging.
-        cooldown_max = int(profile.get("cooldown_max", 0))
-        excluded_count = 0
-        if cooldown_max > 0 and rows:
-            topic_counts: dict[str, int] = {}
-            for p in deliveries_for_channel:
-                topic = str(p.get("origin_topic") or "").strip()
-                if topic:
-                    topic_counts[topic] = topic_counts.get(topic, 0) + 1
-            for row in rows:
-                topic = str(row.get("origin_topic") or "").strip()
-                if topic and topic_counts.get(topic, 0) >= cooldown_max:
-                    excluded_count += 1
 
         if result.reason == "empty":
             log.debug("store empty — nothing to post")
@@ -362,7 +331,7 @@ class JobCoordinator:
                 "threshold": round(result.threshold, 2),
                 "median": round(result.median, 2),
                 "hottest": round(result.hottest, 2),
-                "cooldown_excluded": excluded_count,
+                "cooldown_excluded": len(result.excluded_ids),
             }))
             self._last_skip_reason = "below_threshold"
             return 4
@@ -410,7 +379,7 @@ class JobCoordinator:
             "chosen_id": row_id,
             "raw_temp": round(raw_temp, 2),
             "merge_count": row.get("merge_count") or 1,
-            "cooldown_excluded": excluded_count,
+            "cooldown_excluded": len(result.excluded_ids),
         }))
 
         markdown = render_post(

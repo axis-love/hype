@@ -51,7 +51,7 @@ def _seed_posted_row(store: NewsStore, title: str = "Posted story") -> None:
     from tests.helpers import scored_story
 
     store.add_stories_to_store([scored_story(title, 80.0)], [])
-    row = store.list_store_rows()[0]
+    row = store.list_store_rows("telegram")[0]
     store.set_styled_content(int(row["id"]), title, "Styled body text.")
     store.mark_posted(int(row["id"]))
 

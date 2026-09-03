@@ -339,7 +339,7 @@ def test_store_mode_does_not_crash():
 
     Regression test for the review bug where store mode used hand-rolled
     SQL against a 'store' table that didn't exist (the real table is
-    'pending_posts'). Now uses NewsStore.list_store_rows() — the same
+    'pending_posts'). Now uses NewsStore.list_store_rows("telegram") — the same
     accessor the poster uses.
     """
     tmpdir = tempfile.mkdtemp()

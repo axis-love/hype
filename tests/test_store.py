@@ -104,7 +104,7 @@ class TestAddStoriesToStore:
 
         inserted = store.add_stories_to_store([_story()], [])
         assert inserted == 1
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         titles = {r["title"] for r in rows}
         assert titles == {"Old1", "Old2", "Story A"}
 
@@ -180,7 +180,7 @@ class TestAddStoriesToStore:
         finally:
             store._conn = original
         assert not store.is_seen("http://s.example.com", "S")
-        assert store.count_pending() == 0
+        assert store.count_pending("telegram") == 0
 
     def test_returns_inserted_count(self, store):
         stories = [_story(title=f"S{i}", url=f"https://a.example.com/{i}") for i in range(4)]
@@ -195,12 +195,12 @@ class TestListStoreRows:
         rid = _insert_legacy(store, "Posted", "http://p.example.com")
         store.mark_posted(rid)
         store.add_stories_to_store([_story()], [])
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         assert [r["title"] for r in rows] == ["Story A"]
 
     def test_includes_required_fields(self, store):
         store.add_stories_to_store([_story()], [])
-        row = store.list_store_rows()[0]
+        row = store.list_store_rows("telegram")[0]
         for key in (
             "id", "title", "url", "snippet", "source_name", "raw_json", "category",
             "source", "published_at", "upvotes", "comments", "stars", "reposts",
@@ -379,12 +379,12 @@ class TestEvictColdest:
     def test_removes_only_coldest_until_cap(self, store):
         for i in range(5):
             store.add_stories_to_store([_story(title=f"S{i}", url=f"https://a.example.com/{i}")], [])
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         # Row i gets temperature i*10 → S0 coldest, S4 hottest.
         temps = {r["id"]: float(i * 10) for i, r in enumerate(rows)}
         evicted = store.evict_coldest(temps, cap=3)
         assert evicted == 2
-        remaining = {r["title"] for r in store.list_store_rows()}
+        remaining = {r["title"] for r in store.list_store_rows("telegram")}
         assert remaining == {"S2", "S3", "S4"}
 
     def test_never_touches_posted_rows(self, store):
@@ -393,7 +393,7 @@ class TestEvictColdest:
         store.add_stories_to_store(
             [_story(title=f"S{i}", url=f"https://a.example.com/{i}") for i in range(3)], []
         )
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         temps = {r["id"]: 1.0 for r in rows}
         temps[rid] = 0.0  # posted row would be "coldest" — must survive
         evicted = store.evict_coldest(temps, cap=2)
@@ -405,9 +405,9 @@ class TestEvictColdest:
 
     def test_noop_when_under_cap(self, store):
         store.add_stories_to_store([_story()], [])
-        rows = store.list_store_rows()
+        rows = store.list_store_rows("telegram")
         assert store.evict_coldest({rows[0]["id"]: 5.0}, cap=5) == 0
-        assert len(store.list_store_rows()) == 1
+        assert len(store.list_store_rows("telegram")) == 1
 
     def test_ignores_temps_for_unknown_ids(self, store):
         store.add_stories_to_store([_story()], [])
