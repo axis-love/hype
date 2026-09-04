@@ -350,6 +350,7 @@ each consumer sees only its own undelivered rows.
 |----------|---------|--------|-------|-------|----------|-----|
 | telegram | `telegram` | all | `NEWS_TEMP_FLOOR` (35) | `NEWS_THRESHOLD_RATIO` (0.5) | `NEWS_TOPIC_COOLDOWN_MAX` (3) | `NEWS_MAX_CANDIDATES` (20) |
 | girllm | `girllm` | gaming, gamedev, ai | `HYPE_CONSUMER_GIRLLM_FLOOR` (25) | `HYPE_CONSUMER_GIRLLM_RATIO` (0.3) | `HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX` (2) | `HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES` (5) |
+| blog | `blog` | science, new_research, ai | `HYPE_CONSUMER_BLOG_FLOOR` (55) | `HYPE_CONSUMER_BLOG_RATIO` (0.8) | `HYPE_CONSUMER_BLOG_COOLDOWN_MAX` (3) | `HYPE_CONSUMER_BLOG_MAX_CANDIDATES` (5) |
 
 Eviction is global (`evict_coldest` never deletes a row with ANY
 delivery in any channel — delivered rows are protected).

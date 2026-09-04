@@ -101,7 +101,7 @@ async def _get_client(app):
 def _make_app(
     store: NewsStore,
     *,
-    api_keys: str = "girllm:secret-key,blog:blog-key",
+    api_keys: str = "girllm:secret-key,blog:blog-key,unknown:unknown-key",
 ) -> "aiohttp.web.Application":
     """Build the API app with the given key map.
 
@@ -154,18 +154,18 @@ class TestAuthRejection:
     @pytest.mark.asyncio
     async def test_unknown_consumer_returns_403(self, store):
         """A valid key whose consumer has no profile in config returns 403."""
-        # 'blog' is a valid key but has no consumer profile in the default
-        # _consumer_profiles() (only telegram + girllm exist).
+        # 'unknown' is a valid key but has no consumer profile in the default
+        # _consumer_profiles() (only telegram + girllm + blog exist).
         app = _make_app(store)
         client = await _get_client(app)
         try:
             resp = await client.get(
                 "/api/v1/items",
-                headers={"Authorization": "Bearer blog-key"},
+                headers={"Authorization": "Bearer unknown-key"},
             )
             assert resp.status == 403
             body = await resp.json()
-            assert "blog" in body.get("error", "").lower()
+            assert "unknown" in body.get("error", "").lower()
         finally:
             await client.close()
 
@@ -211,6 +211,47 @@ class TestItemsRanking:
             items = data["items"]
             assert len(items) == 1
             assert items[0]["title"] == "Gaming"
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_items_topic_filtered_for_blog(self, store):
+        """Blog only sees science/new_research/ai rows, not gaming.
+
+        Mirrors the girllm topic-filter test above but for the blog
+        consumer profile (H7). Seeds one story per blog topic plus a
+        gaming story that must be excluded.
+        """
+        stories = [
+            _story("Science Paper", "https://sci.example.com",
+                   origin_topic="science"),
+            _story("AI Breakthrough", "https://ai.example.com",
+                   origin_topic="ai"),
+            _story("New Research", "https://nr.example.com",
+                   origin_topic="new_research"),
+            _story("Gaming News", "https://g.example.com",
+                   origin_topic="gaming"),
+        ]
+        _seed_store(store, stories)
+        app = _make_app(store)
+        client = await _get_client(app)
+        try:
+            resp = await client.get(
+                "/api/v1/items?limit=10",
+                headers={"Authorization": "Bearer blog-key"},
+            )
+            assert resp.status == 200
+            items = (await resp.json())["items"]
+            # Blog topics = science, new_research, ai — gaming excluded.
+            titles = {item["title"] for item in items}
+            assert "Gaming News" not in titles
+            assert "Science Paper" in titles
+            assert "AI Breakthrough" in titles
+            assert "New Research" in titles
+            # Every returned item's origin_topic must be a blog topic.
+            blog_topics = {"science", "new_research", "ai"}
+            for item in items:
+                assert item["origin_topic"] in blog_topics
         finally:
             await client.close()
 
@@ -612,8 +653,8 @@ class TestPortDisabled:
 
     def test_parse_api_keys_basic(self):
         """_parse_api_keys parses 'consumer:key,consumer2:key2' format."""
-        keys = _parse_api_keys("girllm:abc123,blog:def456")
-        assert keys == {"abc123": "girllm", "def456": "blog"}
+        keys = _parse_api_keys("girllm:abc123,blog:def456,unknown:xyz789")
+        assert keys == {"abc123": "girllm", "def456": "blog", "xyz789": "unknown"}
 
     def test_parse_api_keys_empty(self):
         """Empty string returns empty dict."""
