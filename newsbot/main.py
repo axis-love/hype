@@ -42,6 +42,7 @@ from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
 from newsbot.bot_commands import BotCommandHandler
+from newsbot.api import start_api
 from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot, summary_day, DEFAULT_GEN_HOURS
 from newsbot.collectors import (
     hackernews,
@@ -1337,6 +1338,28 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             await _scheduler_summary_iteration(coordinator, store, settings)
             await asyncio.sleep(60)
 
+    # --- H4 consumer API (optional) ---
+    # Started on the same event loop — no threads, no second DB
+    # connection. Shares the existing NewsStore. Disabled unless
+    # HYPE_API_PORT is set; --once mode never reaches _scheduled_loop.
+    api_runner = None
+    api_port_str = os.getenv("HYPE_API_PORT", "").strip()
+    if api_port_str:
+        try:
+            api_port = int(api_port_str)
+        except ValueError:
+            log.error("HYPE_API_PORT=%r is not a valid port — API disabled", api_port_str)
+            api_port = 0
+        if api_port > 0:
+            try:
+                api_runner = await start_api(store, api_port, settings=settings)
+            except OSError as exc:
+                log.error(
+                    "H4 consumer API failed to start on port %d — API disabled: %s",
+                    api_port, exc,
+                )
+                api_runner = None
+
     tasks = [
         asyncio.create_task(generation_loop()),
         asyncio.create_task(posting_loop()),
@@ -1350,6 +1373,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
     except asyncio.CancelledError:
         log.info("shutting down")
     finally:
+        if api_runner is not None:
+            await api_runner.cleanup()
         if bot_handler:
             await bot_handler.close()
         store.close()

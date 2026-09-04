@@ -200,3 +200,37 @@ class TestMarkPostedAtomicity:
             (rid,),
         ).fetchone()
         assert d["n"] == 1
+
+
+class TestStoreEncapsulation:
+    """is_delivered and schema_version encapsulate _conn access (H4 NIT)."""
+
+    def test_is_delivered_false_before_delivery(self, store):
+        store.add_stories_to_store([_story()], [])
+        rid = store._conn.execute(
+            "SELECT id FROM pending_posts"
+        ).fetchone()["id"]
+        assert store.is_delivered(rid, "telegram") is False
+
+    def test_is_delivered_true_after_delivery(self, store):
+        store.add_stories_to_store([_story()], [])
+        rid = store._conn.execute(
+            "SELECT id FROM pending_posts"
+        ).fetchone()["id"]
+        store.mark_delivered(rid, "telegram")
+        assert store.is_delivered(rid, "telegram") is True
+
+    def test_is_delivered_channel_specific(self, store):
+        """Delivery to one channel does not register as delivered to another."""
+        store.add_stories_to_store([_story()], [])
+        rid = store._conn.execute(
+            "SELECT id FROM pending_posts"
+        ).fetchone()["id"]
+        store.mark_delivered(rid, "telegram")
+        assert store.is_delivered(rid, "telegram") is True
+        assert store.is_delivered(rid, "girllm") is False
+
+    def test_schema_version_is_int(self, store):
+        v = store.schema_version()
+        assert isinstance(v, int)
+        assert v >= 8

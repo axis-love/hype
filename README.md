@@ -162,6 +162,8 @@ each story costs at most one styling LLM call.
 | `NEWS_TOPIC_COOLDOWN_MAX` | Max posts per `origin_topic` in the last 24h before that topic is excluded from posting (default 3, 0 disables) |
 | `ADMIN_USER_ID` | Telegram user ID allowed to send bot commands (optional) |
 | `LOG_LEVEL` | `INFO` (default) / `DEBUG` |
+| `HYPE_API_PORT` | Port for the H4 consumer HTTP API. Unset = disabled (default). When set, consumers fetch ranked items and record deliveries via aiohttp on the same event loop. |
+| `HYPE_API_KEYS` | Comma-separated `consumer:key` pairs (e.g. `girllm:abc,blog:def`). Each key is a bearer token; consumers must have a profile in config. |
 
 ## Configuration
 

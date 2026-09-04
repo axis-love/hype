@@ -237,7 +237,7 @@ class TestScoreColumnsMigration:
         assert del_count["n"] == 0
         # Verify all migrations were applied.
         version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert version_row["v"] == 7
+        assert version_row["v"] == 8
         store2.close()
 
 
