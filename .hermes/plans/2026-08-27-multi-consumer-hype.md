@@ -143,10 +143,9 @@ Each consumer:
    delivery.
 
 The `origin_topic` / `matched_topics` fields on each row
-(selection.py:254-264, scoring.py:263-270) enable per-consumer topic
-filtering: a consumer can pass `excluded_ids` for rows whose
-`origin_topic` doesn't match its scope (e.g. the blog excludes
-`origin_topic="gaming"`).
+(scoring.py:252-270) enable per-consumer topic filtering: a consumer
+can pass `excluded_ids` for rows whose `origin_topic` doesn't match its
+scope (e.g. the blog excludes `origin_topic="gaming"`).
 
 ### Config profile shape
 
@@ -308,3 +307,72 @@ NEWS_THRESHOLD_RATIO=0.8
 The maintainer should try one tuning for a week, audit the posts, and
 adjust. The env is read on every `_deliver_one` call (jobs.py:348-349),
 so changes take effect on the next posting slot after restart.
+
+## 7. Decisions 2026-09-03
+
+All six §5 open questions are resolved. Implementation followed these
+decisions in flow_001139 (H2) → flow_001141 (H4).
+
+1. **Independent selection per consumer.** Each consumer selects
+independently from the full store — not "reuse the channel's pick"
+and not "only unposted-to-Telegram rows." `select_for_consumer`
+(selection.py) applies the consumer's own topic filter, cooldown,
+floor, and ratio to a topic-filtered row list. The median is
+computed over the consumer's scope only (design note §4).
+
+2. **No consumer styling.** Consumers do not get their own LLM styler
+in this repo. The API returns raw store items (title, snippet, url,
+score). The consumer styles for its own medium (girllm styles a hot
+take; the blog styles a blog post) using its own LLM. Hype's
+styling LLM (Pass B) is Telegram-only.
+
+3. **API runs in-process.** One process, one event loop. The API
+(aiohttp) starts inside `_scheduled_loop` when `HYPE_API_PORT` is
+set — no separate process, no second DB connection, no thread. It
+shares the existing `NewsStore` and reads config via `load_config`
+on each request so it always sees current settings.
+
+4. **Blog is a profile only — no dedicated pipeline.** The blog
+consumer has a profile in `_consumer_profiles()` (channel, topics,
+floor, ratio, cooldown, max_candidates). It does not have its own
+collector, its own topic pack, or its own generation cycle. It
+reads from the shared store and filters by `origin_topic`.
+
+5. **Global eviction with delivered rows protected.** `evict_coldest`
+is global — it never deletes a row with ANY delivery in ANY
+channel. A row delivered to girllm but not to Telegram is
+protected from eviction. This was chosen over per-consumer
+eviction (each consumer evicts from its own undelivered set) for
+simplicity: a single eviction pass, no coordination.
+
+6. **Deliveries table built now.** Migration 7 created the
+`deliveries(post_id, channel, delivered_at, message_id)` table
+with backfill from `posted_at`. Migration 8 added `external_ref`
+(nullable, first-INSERT-wins). All read paths use `channel`
+parameters (default `'telegram'`). The design note's original
+"build when the second consumer arrives" guidance was overtaken —
+the table was needed for H2 per-channel reads and H4 consumer
+API before a second consumer shipped.
+
+## 8. Deployment Decisions 2026-09-05
+
+**Context:** Anton confirmed the deployment topology for the consumer
+API (flow_001143 note, 2026-09-05).
+
+- **Hype stays on Nyx's server.** Same-host consumers (GirlLM) use
+the loopback port (`127.0.0.1:<HYPE_API_PORT>`).
+- **No public hostname, reverse proxy, or TLS yet.** The API is not
+exposed externally at this stage.
+- **Hype does not move to the axis server** and does not join the
+GPUBox tailnet.
+- **Remote consumers (later):** when a remote consumer exists (e.g. a
+blog writer hosted in Singapore), expose the API via a vhost on
+Nyx's own server plus a DNS record, using the same bearer keys.
+Consumers read `HYPE_API_URL` from env so this is a config change.
+- **Bind vs publish:** the server binds `0.0.0.0` inside the
+container; `compose.yml` publishes on `127.0.0.1` only — reachable
+from the host but not from outside.
+- **Item ordering:** items are ordered by effective temperature (raw
+temperature x merge multiplier) while the `temperature` field in the
+API response is the raw temperature. The merge multiplier is
+applied at ranking time, not stored in the field.
