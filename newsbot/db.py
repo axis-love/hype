@@ -284,6 +284,20 @@ def _migration_7(cur: sqlite3.Cursor) -> None:
     )
 
 
+@_migration(8, "Add external_ref to deliveries for consumer delivery tracking")
+def _migration_8(cur: sqlite3.Cursor) -> None:
+    """Add the ``external_ref`` column to the deliveries table.
+
+    Stores an opaque caller-supplied reference (e.g. a message ID or
+    post URL from the consumer's own system) for each delivery. Nullable
+    because existing rows pre-date the column and the API only started
+    requiring it in H4. The first POST wins (INSERT OR IGNORE) — a
+    repeat delivery for the same (post_id, channel) does NOT overwrite
+    the original ref.
+    """
+    cur.execute("ALTER TABLE deliveries ADD COLUMN external_ref TEXT")
+
+
 class NewsStore:
     """CRUD wrapper for news-bot tables."""
 
@@ -509,12 +523,21 @@ class NewsStore:
             return None
         return int(cur.lastrowid)
 
-    def mark_delivered(self, post_id: int, channel: str, message_id: int | None = None) -> bool:
+    def mark_delivered(
+        self,
+        post_id: int,
+        channel: str,
+        message_id: int | None = None,
+        external_ref: str | None = None,
+    ) -> bool:
         """Record a delivery of a post to a specific channel (idempotent).
 
-        Returns False (no row created) if post_id does not exist in
+        Raises ``ValueError`` if post_id does not exist in
         pending_posts. This is the per-consumer delivery marker — callers
         pass their own channel name (e.g. 'telegram', 'girllm:gaming').
+        ``external_ref`` is an opaque caller-supplied reference persisted
+        on first insert only (INSERT OR IGNORE — a repeat call does NOT
+        overwrite the original ref).
         """
         row = self._conn.execute(
             "SELECT 1 FROM pending_posts WHERE id=?", (post_id,)
@@ -522,11 +545,26 @@ class NewsStore:
         if row is None:
             raise ValueError(f"mark_delivered: post_id {post_id} does not exist")
         self._conn.execute(
-            "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
-            "VALUES(?,?,?,?)",
-            (post_id, channel, _utc_now_iso(), message_id),
+            "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id, external_ref) "
+            "VALUES(?,?,?,?,?)",
+            (post_id, channel, _utc_now_iso(), message_id, external_ref),
         )
         return True
+
+    def is_delivered(self, post_id: int, channel: str) -> bool:
+        """Return True if a delivery row exists for (post_id, channel)."""
+        row = self._conn.execute(
+            "SELECT 1 FROM deliveries WHERE post_id=? AND channel=?",
+            (post_id, channel),
+        ).fetchone()
+        return row is not None
+
+    def schema_version(self) -> int:
+        """Return the highest applied migration version (0 if none)."""
+        row = self._conn.execute(
+            "SELECT MAX(version) AS v FROM schema_version"
+        ).fetchone()
+        return int(row["v"]) if row and row["v"] is not None else 0
 
     def mark_posted(self, post_id: int, message_id: int | None = None) -> None:
         """Mark a pending post as posted (Telegram delivery, atomic dual-write).
@@ -551,9 +589,9 @@ class NewsStore:
                     (now, post_id),
                 )
             cur.execute(
-                "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
-                "VALUES(?,?,?,?)",
-                (post_id, "telegram", now, message_id),
+                "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id, external_ref) "
+                "VALUES(?,?,?,?,?)",
+                (post_id, "telegram", now, message_id, None),
             )
             cur.execute("COMMIT")
         except Exception:
