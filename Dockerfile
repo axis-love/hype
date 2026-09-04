@@ -21,6 +21,11 @@ RUN pip install --no-cache-dir --constraint constraints.txt "." \
 RUN mkdir -p /app/data \
     && chown -R appuser:appuser /app
 
+# Consumer API port (documentation only — compose publishes it on
+# 127.0.0.1; the server binds 0.0.0.0 inside the container).
+ARG HYPE_API_PORT=8079
+EXPOSE ${HYPE_API_PORT}
+
 USER appuser
 
 CMD ["python", "-m", "newsbot.main"]
