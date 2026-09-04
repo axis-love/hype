@@ -7,6 +7,11 @@ services:
       dockerfile: Dockerfile
     init: true
     restart: unless-stopped
+    # Consumer API is published on loopback only — same-host consumers
+    # (GirlLM) reach it at 127.0.0.1:$HYPE_API_PORT; nothing is exposed
+    # publicly. Inside the container the server binds 0.0.0.0.
+    ports:
+      - "127.0.0.1:${HYPE_API_PORT:-8079}:${HYPE_API_PORT:-8079}"
     volumes:
       - ./state/data:/app/data
     environment:
@@ -31,3 +36,11 @@ services:
       NEWS_MERGE_BONUS: ${NEWS_MERGE_BONUS:-0.2}
       NEWS_MERGE_CAP: ${NEWS_MERGE_CAP:-2.0}
       ADMIN_USER_ID: ${ADMIN_USER_ID:-}
+      # ── Consumer API (H4) ──
+      # Unset HYPE_API_PORT disables the API entirely.
+      HYPE_API_PORT: ${HYPE_API_PORT:-}
+      HYPE_API_KEYS: ${HYPE_API_KEYS:-}
+      HYPE_CONSUMER_GIRLLM_FLOOR: ${HYPE_CONSUMER_GIRLLM_FLOOR:-25}
+      HYPE_CONSUMER_GIRLLM_RATIO: ${HYPE_CONSUMER_GIRLLM_RATIO:-0.3}
+      HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX: ${HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX:-2}
+      HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES: ${HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES:-5}
