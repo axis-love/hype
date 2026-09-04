@@ -112,6 +112,9 @@ def _consumer_profiles() -> dict[str, dict[str, Any]]:
     telegram: mirrors today's env knobs (NEWS_TEMP_FLOOR etc.).
     girllm: reads HYPE_CONSUMER_GIRLLM_* env with sane defaults
             (floor 25, ratio 0.3, cooldown 2, max_candidates 5).
+    blog: reads HYPE_CONSUMER_BLOG_* env with sane defaults
+          (floor 55, ratio 0.8, cooldown 3, max_candidates 5).
+          Topics: science, new_research, ai.
     """
     tg_floor = float(os.getenv("NEWS_TEMP_FLOOR", "35"))
     tg_ratio = float(os.getenv("NEWS_THRESHOLD_RATIO", "0.5"))
@@ -136,6 +139,16 @@ def _consumer_profiles() -> dict[str, dict[str, Any]]:
             "cooldown_max": int(os.getenv("HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX", "2")),
             "max_candidates": int(os.getenv("HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES", "5")),
             "topics": ["gaming", "gamedev", "ai"],
+        },
+        "blog": {
+            "channel": "blog",
+            "floor": float(os.getenv("HYPE_CONSUMER_BLOG_FLOOR", "55")),
+            "ratio": float(os.getenv("HYPE_CONSUMER_BLOG_RATIO", "0.8")),
+            "merge_bonus": float(os.getenv("NEWS_MERGE_BONUS", "0.2")),
+            "merge_cap": float(os.getenv("NEWS_MERGE_CAP", "2.0")),
+            "cooldown_max": int(os.getenv("HYPE_CONSUMER_BLOG_COOLDOWN_MAX", "3")),
+            "max_candidates": int(os.getenv("HYPE_CONSUMER_BLOG_MAX_CANDIDATES", "5")),
+            "topics": ["science", "new_research", "ai"],
         },
     }
 
