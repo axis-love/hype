@@ -236,22 +236,123 @@ older than configurable thresholds are pruned:
 | `NEWS_RETENTION_SEEN_DAYS` | 14 | Days to keep seen entries |
 | `NEWS_RETENTION_DIGEST_DAYS` | 90 | Days to keep old digests |
 
-## Reusing the engine (girllm, blog writer)
+## Consumer API (H4)
 
-The store and pick logic are deliberately consumer-agnostic. Other
-agents (girllm hot takes, the blog writer) can consume the same store
-instead of re-collecting:
+Other agents (girllm hot takes, the blog writer) consume the same
+store instead of re-collecting. The API runs in-process on the
+scheduler's event loop (aiohttp) — no second DB connection, no
+separate process. Started automatically when `HYPE_API_PORT` is set
+and `HYPE_API_KEYS` is non-empty.
 
-- Read candidates with `NewsStore.list_store_rows()` and pick with
-  `newsbot.selection.pick_hottest()` — the same pure function the
-  Telegram poster uses. Style the winner for your own medium with
-  `summarizer.llm_style_posts()`.
-- `posted_at` marks delivery **to the Telegram channel only**. It is
-  not a global "consumed" flag — other consumers may still pick a
-  TG-posted row.
-- Multi-consumer cursors (per-consumer "seen" tracking) are planned as
-  the migration-5 `deliveries` table; until then, consumers track
-  their own consumption.
+### Deployment topology
+
+Hype stays on Nyx's server. Same-host consumers (GirlLM) use the
+loopback port (`127.0.0.1:<HYPE_API_PORT>`). No public hostname,
+reverse proxy, or TLS yet. Hype does not move to the axis server and
+does not join the GPUBox tailnet.
+
+When a remote consumer exists (e.g. a blog writer hosted in
+Singapore), the API will be exposed via a vhost on Nyx's own server
+plus a DNS record, using the same bearer keys. Consumers read
+`HYPE_API_URL` from env so switching from loopback to a public hostname
+is a config change, not a code change.
+
+The server binds `0.0.0.0` inside the container; `compose.yml`
+publishes on `127.0.0.1` only — so the port is reachable from the
+host but not from outside.
+
+### Authentication
+
+`HYPE_API_KEYS` maps `consumer:key` pairs (comma-separated). Each key
+is a bearer token. The API resolves `Authorization: Bearer <token>`
+to a consumer name, then looks up that consumer's profile in
+`config.py`.
+
+- **401 Unauthorized** — missing `Authorization` header, malformed
+  header, or the token doesn't match any key in `HYPE_API_KEYS`.
+- **403 Forbidden** — the token is valid but the consumer name has no
+  profile in `_consumer_profiles()` (e.g. a key was added to
+  `HYPE_API_KEYS` without a matching profile section).
+
+`/healthz` is exempt from auth — it's a liveness probe.
+
+### Endpoints
+
+**GET /healthz** — liveness probe, no auth required.
+
+```bash
+curl http://127.0.0.1:${HYPE_API_PORT}/healthz
+# {"ok": true, "schema_version": 8}
+```
+
+**GET /api/v1/items?limit=N** — ranked eligible items for the
+bearer's consumer profile. Items are topic-filtered, cooldown-excluded,
+and ranked by effective temperature (raw temperature x merge
+multiplier) descending. The `temperature` field in the response is the
+raw temperature; the ranking applies the merge multiplier on top.
+`limit` is capped by the profile's `max_candidates`.
+
+```bash
+curl -H "Authorization: Bearer ${HYPE_API_KEY}" \
+     "http://127.0.0.1:${HYPE_API_PORT}/api/v1/items?limit=5"
+# {"items": [{"id": 1, "title": "...", ...}, ...]}
+```
+
+**POST /api/v1/deliveries** — record a delivery. Idempotent: a repeat
+POST returns 200 with `already_delivered: true`; the first `external_ref`
+persists (INSERT OR IGNORE). Unknown `item_id` returns 404.
+
+```bash
+curl -X POST -H "Authorization: Bearer ${HYPE_API_KEY}" \
+     -H "Content-Type: application/json" \
+     -d '{"item_id": 42, "external_ref": "msg-001"}' \
+     http://127.0.0.1:${HYPE_API_PORT}/api/v1/deliveries
+# {"ok": true, "already_delivered": false}
+```
+
+### Item JSON shape
+
+Every item in the `GET /api/v1/items` response:
+
+```json
+{
+  "id": 42,
+  "title": "Story title",
+  "snippet": "One-line summary from the LLM filter pass",
+  "url": "https://example.com/story",
+  "source_name": "r/gaming",
+  "origin_topic": "gaming",
+  "matched_topics": ["gaming"],
+  "temperature": 82.5,
+  "upvotes": 120,
+  "comments": 34,
+  "published_at": "2026-09-05T08:00:00+00:00",
+  "merge_count": 2,
+  "collected_at": "2026-09-05T09:00:00+00:00"
+}
+```
+
+`temperature` is the raw hype score; items are ranked by
+`temperature * merge_multiplier(merge_count)` descending (the merge
+multiplier is `min(1 + (merge_count - 1) * merge_bonus, merge_cap)`).
+A row already delivered to the caller's channel is excluded from the
+response.
+
+### Per-consumer profiles
+
+Each consumer profile lives in `_consumer_profiles()` in
+`newsbot/config.py`. A profile carries its own selection knobs
+(floor, ratio, cooldown, max_candidates) and an optional topic filter.
+The `deliveries` table (migration 7) tracks per-consumer delivery so
+each consumer sees only its own undelivered rows.
+
+| Consumer | Channel | Topics | Floor | Ratio | Cooldown | Max |
+|----------|---------|--------|-------|-------|----------|-----|
+| telegram | `telegram` | all | `NEWS_TEMP_FLOOR` (35) | `NEWS_THRESHOLD_RATIO` (0.5) | `NEWS_TOPIC_COOLDOWN_MAX` (3) | `NEWS_MAX_CANDIDATES` (20) |
+| girllm | `girllm` | gaming, gamedev, ai | `HYPE_CONSUMER_GIRLLM_FLOOR` (25) | `HYPE_CONSUMER_GIRLLM_RATIO` (0.3) | `HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX` (2) | `HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES` (5) |
+
+Eviction is global (`evict_coldest` never deletes a row with ANY
+delivery in any channel — delivered rows are protected).
 
 ## Layout
 
