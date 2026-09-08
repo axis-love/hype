@@ -32,12 +32,12 @@ def _utc_now_iso() -> str:
 class TestMigrationApplies:
     """Migration 7 applies on a fresh DB and on a v6 DB with posted rows."""
 
-    def test_fresh_db_schema_version_8(self, store):
-        """A fresh DB should reach schema_version 8 after init."""
+    def test_fresh_db_schema_version_9(self, store):
+        """A fresh DB should reach schema_version 9 after init."""
         row = store._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert row["v"] == 8
+        assert row["v"] == 9
 
     def test_deliveries_table_exists(self, store):
         """The deliveries table should exist after migration 7."""
@@ -118,7 +118,7 @@ class TestMigrationApplies:
         version_row = store2._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 8
+        assert version_row["v"] == 9
 
         # Backfill: 3 posted rows should have 'telegram' deliveries.
         del_count = store2._conn.execute(

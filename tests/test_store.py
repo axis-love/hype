@@ -91,7 +91,7 @@ class TestMigration4:
         row = store._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         ).fetchone()
-        assert row["version"] == 8
+        assert row["version"] == 9
 
 
 # --- add_stories_to_store -------------------------------------------------
@@ -355,7 +355,8 @@ class TestSetStyledContent:
         rid = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
         store.set_styled_content(rid, "Styled Title", "Styled body.")
         row = store._conn.execute("SELECT * FROM pending_posts WHERE id=?", (rid,)).fetchone()
-        assert row["title"] == "Styled Title"
+        assert row["title"] == "Story A"
+        assert row["styled_title"] == "Styled Title"
         assert row["body"] == "Styled body."
         assert row["styled_at"] is not None
         # styled_at must be valid UTC ISO-8601.
