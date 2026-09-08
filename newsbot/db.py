@@ -18,8 +18,10 @@ Store semantics (migration 4 / v2):
 
   ``body`` stays NOT NULL (SQLite cannot relax NOT NULL without a table
   rebuild), so new raw rows insert ``body=''``. The poster fills ``body`` +
-  ``styled_at`` when it styles the winner. The marker for "raw, not yet
-  styled" is therefore ``body='' AND styled_at IS NULL``.
+  ``styled_title`` + ``styled_at`` when it styles the winner (migration 9).
+  ``title`` is immutable after insert — the Pass A English headline.
+  Telegram display uses ``COALESCE(styled_title, title)``. The marker for
+  "raw, not yet styled" is therefore ``body='' AND styled_at IS NULL``.
 
   ``posted_at`` means "delivered to the Telegram channel" — nothing else.
   The ``deliveries`` table (migration 7) is the per-consumer delivery
@@ -296,6 +298,70 @@ def _migration_8(cur: sqlite3.Cursor) -> None:
     the original ref.
     """
     cur.execute("ALTER TABLE deliveries ADD COLUMN external_ref TEXT")
+
+
+@_migration(9, "Immutable title: styled_title column; restore raw titles")
+def _migration_9(cur: sqlite3.Cursor) -> None:
+    """Stop overwriting title at Telegram pick time.
+
+    Adds ``styled_title`` (NULL until the styler runs). For rows already
+    styled, copy the current ``title`` (the Russian/Telegram headline)
+    into ``styled_title`` and restore ``title`` from ``raw_json`` or
+    ``seen.title`` by URL. Unstyled rows are untouched. Idempotent: the
+    version table skips a second run.
+    """
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN styled_title TEXT")
+    rows = cur.execute(
+        "SELECT id, title, url, raw_json FROM pending_posts WHERE styled_at IS NOT NULL"
+    ).fetchall()
+    unrestored = 0
+    for row in rows:
+        rid = int(row["id"])
+        cur.execute(
+            "UPDATE pending_posts SET styled_title=? WHERE id=? AND styled_title IS NULL",
+            (row["title"], rid),
+        )
+        restored = _title_from_raw_json(row["raw_json"])
+        if not restored:
+            url = str(row["url"] or "").strip()
+            if url:
+                seen = cur.execute(
+                    "SELECT title FROM seen WHERE url=? LIMIT 1", (url,)
+                ).fetchone()
+                if seen and seen["title"]:
+                    restored = str(seen["title"]).strip() or None
+        if restored:
+            cur.execute("UPDATE pending_posts SET title=? WHERE id=?", (restored, rid))
+        else:
+            unrestored += 1
+    if unrestored:
+        log.warning(
+            "migration 9: %d styled rows could not restore original title",
+            unrestored,
+        )
+
+
+def _title_from_raw_json(raw: Any) -> str | None:
+    """Best-effort Pass A headline from a collector payload."""
+    if not raw:
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+    for key in ("title", "headline", "news_item_title"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def display_title(row: dict[str, Any]) -> str:
+    """Telegram/recap headline: styled_title if set, else the raw title."""
+    return str(row.get("styled_title") or row.get("title") or "")
 
 
 class NewsStore:
@@ -716,7 +782,7 @@ class NewsStore:
         return len(post_rows)
 
     _STORE_SELECT = (
-        "id, title, url, snippet, source_name, raw_json, category, "
+        "id, title, styled_title, url, snippet, source_name, raw_json, category, "
         "source, published_at, upvotes, comments, stars, reposts, "
         "crosspost_count, penalty, lookback_hours, "
         "score_at_queue, engagement_score, recency_at_queue, "
@@ -897,13 +963,14 @@ class NewsStore:
         )
 
     def set_styled_content(self, row_id: int, title: str, body: str) -> None:
-        """Fill the styled title/body and stamp styled_at (UTC ISO).
+        """Fill styled_title/body and stamp styled_at (UTC ISO).
 
-        Called by the poster after styling the picked winner. Clears the
-        raw-not-yet-styled marker (body='' AND styled_at IS NULL).
+        Called by the poster after styling the picked winner. Never
+        overwrites ``title`` (Pass A English headline, migration 9).
+        Clears the raw-not-yet-styled marker (body='' AND styled_at IS NULL).
         """
         self._conn.execute(
-            "UPDATE pending_posts SET title=?, body=?, styled_at=? WHERE id=?",
+            "UPDATE pending_posts SET styled_title=?, body=?, styled_at=? WHERE id=?",
             (title, body, _utc_now_iso(), row_id),
         )
 

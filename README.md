@@ -332,6 +332,10 @@ Every item in the `GET /api/v1/items` response:
 }
 ```
 
+`title` is the raw Pass A English headline. It is never overwritten after insert.
+Telegram's rewritten headline lives in `styled_title` (null until the styler
+runs). Recap and Telegram renderers display `COALESCE(styled_title, title)`.
+
 `temperature` is the raw hype score; items are ranked by
 `temperature * merge_multiplier(merge_count)` descending (the merge
 multiplier is `min(1 + (merge_count - 1) * merge_bonus, merge_cap)`).

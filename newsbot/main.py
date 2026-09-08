@@ -66,7 +66,7 @@ COLLECTORS: dict[str, Any] = {
     "trends": trends,
 }
 from newsbot.config import consumer_profile, load_config
-from newsbot.db import NewsStore, _as_dict
+from newsbot.db import NewsStore, display_title, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
 from newsbot.jobs import (
     JobCoordinator,
@@ -564,10 +564,11 @@ def _run_retention(store: NewsStore) -> None:
 def _recap_input_items(rows: list[dict]) -> list[dict[str, Any] | Candidate]:
     """Build the item list llm_daily_summary receives, from posted store rows.
 
-    Rows carry the STYLED content actually posted: set_styled_content
-    overwrites title/body before posting, so for styled rows these fields
-    are exactly what the channel saw. Legacy rows posted before styling
-    (body empty, styled_at NULL) fall back to the raw snippet.
+    Rows carry the STYLED content actually posted: ``styled_title`` +
+    ``body`` after set_styled_content. ``title`` is the immutable Pass A
+    English headline. Recap/Telegram display uses COALESCE(styled_title,
+    title). Legacy rows posted before styling (body empty, styled_at NULL)
+    fall back to the raw snippet.
     """
     items: list[dict[str, Any] | Candidate] = []
     for row in rows:
@@ -575,7 +576,7 @@ def _recap_input_items(rows: list[dict]) -> list[dict[str, Any] | Candidate]:
         if not body:
             body = (row.get("snippet") or "").strip()
         items.append({
-            "title": row.get("title") or "",
+            "title": display_title(row),
             "body": body,
             "category": row.get("category") or "",
             "url": row.get("url") or "",
@@ -762,7 +763,7 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
         reverse=True,
     )
     for i, row in enumerate(ordered, start=1):
-        title = (row.get("title") or "")[:60]
+        title = display_title(row)[:60]
         raw_temp = result.temps.get(row["id"], 0.0)
         if row.get("engagement_score") is None:
             lines.append(f"{i}. score unavailable — queued before scoring update")
@@ -809,7 +810,7 @@ def _format_store_browse(store: NewsStore, config: dict[str, Any]) -> str:
     lines = [f"Store browse ({len(rows)} rows, hottest first):", ""]
 
     for i, row in enumerate(ordered, start=1):
-        title = (row.get("title") or "(untitled)")[:60]
+        title = display_title(row)[:60]
         raw_temp = result.temps.get(row["id"], 0.0)
         mult = merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap)
         effective = raw_temp * mult
@@ -855,9 +856,13 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
 
     lines = [f"Store row {row_id}", ""]
 
-    title = row.get("title") or "(untitled)"
+    title = display_title(row) or "(untitled)"
     flag = "styled" if row.get("styled_at") else "raw"
     lines.append(f"Title: {title}")
+    raw_title = str(row.get("title") or "")
+    styled = str(row.get("styled_title") or "")
+    if styled and styled != raw_title:
+        lines.append(f"Raw title: {raw_title}")
     lines.append(f"State: {flag}")
     lines.append("")
 
