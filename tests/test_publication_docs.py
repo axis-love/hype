@@ -106,6 +106,35 @@ class TestDocumentationCorrectness:
         assert "NEWS_INTERVAL_HOURS" not in content
         assert "NEWS_POST_INTERVAL_MINUTES" not in content
 
+    def test_compose_forwards_every_hype_consumer_env(self):
+        """Every HYPE_CONSUMER_* var in env.example must be in compose.yml.
+
+        docker compose only injects listed environment keys; --env-file
+        drives substitution, not container env. Missing passthrough
+        silently ignores .env tuning (H7 review).
+        """
+        import re
+
+        with open("deploy/docker/env.example") as f:
+            env_example = f.read()
+        with open("deploy/docker/compose.yml") as f:
+            compose = f.read()
+        names = re.findall(r"^(HYPE_CONSUMER_[A-Z0-9_]+)=", env_example, re.M)
+        assert names, "env.example should declare HYPE_CONSUMER_* vars"
+        missing = [name for name in names if name not in compose]
+        assert not missing, (
+            "compose.yml missing passthrough for "
+            + ", ".join(missing)
+        )
+
+    def test_readme_api_starts_on_port_not_keys(self):
+        """API starts when HYPE_API_PORT is set; empty keys 401, not disable."""
+        with open("README.md") as f:
+            content = f.read()
+        assert "and `HYPE_API_KEYS` is non-empty" not in content
+        assert "HYPE_API_PORT" in content
+        assert "401" in content
+
     def test_readme_documents_digest_not_run(self):
         """README should document /digest and /post, not obsolete /run."""
         with open("README.md") as f:
