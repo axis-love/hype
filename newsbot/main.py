@@ -52,7 +52,6 @@ from newsbot.collectors import (
     huggingface_papers,
     trends,
 )
-from newsbot.collectors.base import Candidate
 
 # Registry: source key -> collector module. Each module exposes
 # ``async def collect(config: dict) -> list[Candidate]``.
@@ -66,7 +65,7 @@ COLLECTORS: dict[str, Any] = {
     "trends": trends,
 }
 from newsbot.config import consumer_profile, load_config
-from newsbot.db import NewsStore, _as_dict
+from newsbot.db import NewsStore
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
 from newsbot.jobs import (
     JobCoordinator,
@@ -326,7 +325,7 @@ async def _run_generation_pipeline(
 
     # 7. Diverse top-N.
     final = select_diverse_top_items(kept, cfg["max_final_news"])
-    final = [_as_dict(item) for item in final]
+    final = list(final)
 
     # 8. Classify against store (add vs merge).
     #    Use list_merge_target_rows (undelivered + recently delivered to
@@ -562,14 +561,14 @@ def _run_retention(store: NewsStore) -> None:
         log.warning("retention cleanup failed: %s", exc)
 
 
-def _recap_input_items(rows: list[dict]) -> list[dict[str, Any] | Candidate]:
+def _recap_input_items(rows: list[dict]) -> list[dict[str, Any]]:
     """Build the item list llm_daily_summary receives, from posted store rows.
 
     Prefers the channel copy on the delivery (styled_title / styled_body /
     message_id). A legacy delivery without styled columns falls back to
     the engine title + summary.
     """
-    items: list[dict[str, Any] | Candidate] = []
+    items: list[dict[str, Any]] = []
     for row in rows:
         styled_body = str(row.get("styled_body") or "").strip()
         summary = str(row.get("summary") or "").strip()
@@ -586,7 +585,7 @@ def _recap_input_items(rows: list[dict]) -> list[dict[str, Any] | Candidate]:
     return items
 
 
-def _format_recap_input_sheet(items: list[dict[str, Any] | Candidate]) -> str:
+def _format_recap_input_sheet(items: list[dict[str, Any]]) -> str:
     """Render the /recap input sheet: exactly what the LLM receives.
 
     Item count, 24h window, and per item: title, category, source,

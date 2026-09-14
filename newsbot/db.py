@@ -46,17 +46,6 @@ from newsbot.scoring import engagement
 
 log = logging.getLogger(__name__)
 
-#: Story/candidate input: plain dicts or collector Candidate dataclasses
-#: (same union shape used by summarizer.py).
-_StoryLike = dict[str, Any] | Candidate
-
-
-def _as_dict(item: _StoryLike) -> dict[str, Any]:
-    """Normalize a story/candidate to a plain dict (Candidate.to_dict())."""
-    if isinstance(item, Candidate):
-        return item.to_dict()
-    return item
-
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -699,12 +688,11 @@ class NewsStore:
     # --- pending_posts as raw-story store (migration 4 / v2) -----------
 
     def add_stories_to_store(
-        self, stories: Sequence[_StoryLike], seen_items: Sequence[_StoryLike]
+        self, stories: Sequence[Candidate], seen_items: Sequence[Candidate]
     ) -> int:
         """Append RAW stories to the store and mark seen_items, atomically.
 
-        Accepts plain dicts or collector Candidate dataclasses (both carry
-        the same fields; Candidates are normalized via to_dict()).
+        Accepts Candidate dicts from collectors / Pass A.
 
         Persists story['short_summary'] as summary. Every score-component
         column is persisted from story['score_breakdown']. NO delete of
@@ -720,7 +708,7 @@ class NewsStore:
 
             post_rows = []
             for raw_story in stories:
-                story = _as_dict(raw_story)
+                story = raw_story
                 bd = story.get("score_breakdown") or {}
                 raw_json = story.get("raw_json")
                 if raw_json is not None and not isinstance(raw_json, str):
@@ -781,7 +769,7 @@ class NewsStore:
                 (str(item.get("url") or "").strip() or None,
                  str(item.get("title") or "").strip().lower() or None,
                  now)
-                for item in map(_as_dict, seen_items)
+                for item in seen_items
                 if str(item.get("url") or "").strip() or str(item.get("title") or "").strip()
             ]
             if seen_rows:
@@ -857,7 +845,7 @@ class NewsStore:
         return [dict(row) for row in rows]
 
     def merge_into_store_row(
-        self, row_id: int, candidate: _StoryLike, extra_urls: str | list[str]
+        self, row_id: int, candidate: Candidate, extra_urls: str | list[str]
     ) -> None:
         """Merge a duplicate candidate into an existing store row.
 
@@ -884,7 +872,6 @@ class NewsStore:
         ).fetchone()
         if row is None:
             raise ValueError(f"merge_into_store_row: no such row id={row_id}")
-        candidate = _as_dict(candidate)
         bd = candidate.get("score_breakdown") or {}
 
         def _field_max(column: str, candidate_key: str) -> int:

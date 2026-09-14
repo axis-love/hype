@@ -1,14 +1,9 @@
 """Canonical Candidate shape and shared normalization helpers.
 
-A Candidate is a normalized news item. Collectors return Candidate
-dataclass instances (via new_candidate or from_dict). Downstream stages
-(scoring, dedupe, summarizer) consume candidates via the .to_dict()
-method or direct attribute access.
-
-The dataclass provides:
-  - Typed fields with defaults (no more silent key typos)
-  - Validation at construction time (empty title/source raises)
-  - to_dict() / from_dict() for backward-compatible dict interop
+A Candidate is a TypedDict — a runtime dict with typed keys. Collectors
+return dicts from new_candidate(). Downstream stages consume them as
+plain dicts. validate_candidate() runs the construction-time checks that
+used to live on the dataclass.
 """
 
 from __future__ import annotations
@@ -16,9 +11,8 @@ from __future__ import annotations
 import html
 import math
 import re
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, TypedDict
 
 
 # --- Source identifier validation ---
@@ -37,7 +31,7 @@ VALID_SOURCE_KEYS: frozenset[str] = frozenset({
 })
 
 #: Alias normalization: maps alternative names to canonical source IDs.
-#: Used by Candidate so collectors can emit either form (e.g. "hackernews"
+#: Used by new_candidate so collectors can emit either form (e.g. "hackernews"
 #: in config vs "hn" in Candidate.source).
 _SOURCE_ALIASES: dict[str, str] = {
     "hackernews": "hn",
@@ -68,338 +62,117 @@ def _normalize_source_id(src: str) -> str:
     return canonical
 
 
-@dataclass
-class Candidate:
-    """A normalized news candidate from any source.
+class Candidate(TypedDict, total=False):
+    """A normalized news candidate from any source. Runtime type is dict."""
 
-    Typed model replacing the previous dict-with-many-optional-fields.
-    All collectors produce Candidate instances; downstream stages can
-    use .to_dict() for backward compatibility with dict-based code.
-    """
-    # Required identity fields.
     title: str
     url: str
-    source: str          # 'hn' | 'reddit' | 'github' | 'rss' | etc.
-    source_name: str     # Human label, e.g. 'r/LocalLLaMA', 'OpenAI blog'
+    source: str
+    source_name: str
+    source_type: str
+    snippet: str | None
+    published_at: str | None
+    score: float
+    upvotes: int | None
+    comments: int | None
+    stars: int | None
+    forks: int | None
+    reposts: int | None
+    upvote_ratio: float | None
+    velocity: float | None
+    category: str | None
+    raw_text: str | None
+    extracted_text: str | None
+    crosspost_count: int
+    raw_json: dict[str, Any] | None
+    candidate_id: str | None
+    importance: int | None
+    reason: str | None
+    short_summary: str | None
+    penalty: float
+    contributing_sources: list[str]
+    contributing_urls: list[str]
+    score_breakdown: dict[str, Any] | None
 
-    # Optional fields with defaults.
-    source_type: str = ""
-    snippet: Optional[str] = None
-    published_at: Optional[str] = None
-    score: float = 0.0
-    upvotes: Optional[int] = None
-    comments: Optional[int] = None
-    stars: Optional[int] = None
-    forks: Optional[int] = None
-    reposts: Optional[int] = None
-    upvote_ratio: Optional[float] = None
-    velocity: Optional[float] = None
-    category: Optional[str] = None
-    raw_text: Optional[str] = None
-    extracted_text: Optional[str] = None
-    crosspost_count: int = 1
-    raw_json: Optional[dict[str, Any]] = None
 
-    # LLM-assigned fields (filled by summarizer).
-    candidate_id: Optional[str] = None
-    importance: Optional[int] = None
-    reason: Optional[str] = None
-    short_summary: Optional[str] = None
+_KNOWN_CANDIDATE_FIELDS = frozenset(Candidate.__annotations__)
 
-    # Dedup/scoring fields (filled by dedupe.py).
-    penalty: float = 1.0
-    contributing_sources: list[str] = field(default_factory=list, repr=False)
-    contributing_urls: list[str] = field(default_factory=list, repr=False)
-    _source_names_set: set[str] = field(default_factory=set, repr=False)
 
-    # Scoring breakdown (filled by scoring.score_all, used by /scores command).
-    score_breakdown: Optional[dict[str, Any]] = None
-
-    def __post_init__(self) -> None:
-        """Validate required fields and engagement values at construction time."""
-        if not self.title:
-            raise ValueError("Candidate requires a non-empty title")
-        if not self.source:
-            raise ValueError("Candidate requires a non-empty source")
-        # Validate and normalize source ID.
-        self.source = _normalize_source_id(self.source)
-        if not self.source_name:
-            raise ValueError("Candidate requires a non-empty source_name")
-        if not self.url:
-            raise ValueError("Candidate requires a non-empty url")
-        # Validate URL scheme.
-        url_str = str(self.url).strip()
-        if not url_str:
-            raise ValueError("Candidate requires a non-empty url")
-        if not (url_str.startswith("http://") or url_str.startswith("https://")):
-            raise ValueError(
-                f"Candidate.url must have http:// or https:// scheme, got {url_str!r}"
-            )
-        if not self.source_type:
-            self.source_type = self.source
-        # Validate engagement types: reject strings, booleans, NaN, infinity.
-        for fname in ("upvotes", "comments", "stars", "forks", "reposts",
-                      "crosspost_count"):
-            val = getattr(self, fname)
-            if val is not None:
-                # Reject booleans (isinstance(True, int) is True in Python).
-                if isinstance(val, bool):
-                    raise ValueError(
-                        f"Candidate.{fname} must be numeric, got bool: {val}"
-                    )
-                if not isinstance(val, (int, float)):
-                    raise ValueError(
-                        f"Candidate.{fname} must be numeric, got {type(val).__name__}"
-                    )
-                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-                    raise ValueError(f"Candidate.{fname} must be finite, got {val}")
-        # Validate engagement values are non-negative (if provided).
-        for fname in ("upvotes", "comments", "stars", "forks", "reposts"):
-            val = getattr(self, fname)
-            if val is not None and val < 0:
-                raise ValueError(f"Candidate.{fname} must be non-negative, got {val}")
-        # Validate score and penalty.
-        if isinstance(self.score, bool) or not isinstance(self.score, (int, float)):
-            raise ValueError(f"Candidate.score must be numeric, got {type(self.score).__name__}")
-        if isinstance(self.score, float) and (math.isnan(self.score) or math.isinf(self.score)):
-            raise ValueError(f"Candidate.score must be finite, got {self.score}")
-        if self.score < 0:
-            raise ValueError(f"Candidate.score must be non-negative, got {self.score}")
-        if isinstance(self.penalty, bool) or not isinstance(self.penalty, (int, float)):
-            raise ValueError(f"Candidate.penalty must be numeric, got {type(self.penalty).__name__}")
-        if isinstance(self.penalty, float) and (math.isnan(self.penalty) or math.isinf(self.penalty)):
-            raise ValueError(f"Candidate.penalty must be finite, got {self.penalty}")
-        if self.penalty < 0:
-            raise ValueError(f"Candidate.penalty must be non-negative, got {self.penalty}")
-        # Validate upvote_ratio.
-        if self.upvote_ratio is not None:
-            if isinstance(self.upvote_ratio, bool) or not isinstance(self.upvote_ratio, (int, float)):
-                raise ValueError(f"Candidate.upvote_ratio must be numeric, got {type(self.upvote_ratio).__name__}")
-            if not (0.0 <= float(self.upvote_ratio) <= 1.0):
-                raise ValueError(f"Candidate.upvote_ratio must be in [0,1], got {self.upvote_ratio}")
-        # Validate timestamp format (if provided).
-        if self.published_at is not None:
-            ts = str(self.published_at).strip()
-            if ts:
-                try:
-                    parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                except ValueError:
-                    raise ValueError(
-                        f"Candidate.published_at must be valid ISO 8601, got {ts!r}"
-                    )
-                if parsed.year < 2000 or parsed.year > 2100:
-                    raise ValueError(
-                        f"Candidate.published_at year {parsed.year} out of range [2000, 2100]"
-                    )
-
-    # --- dict-like compatibility for downstream code ---
-
-    def __getitem__(self, key: str) -> Any:
-        """Dict-like access for backward compatibility.
-
-        Checks instance attributes first (including internal tracking fields
-        set by dedupe), then falls back to to_dict().
-        """
-        # Check instance attributes first (covers internal fields like
-        # _source_names_set, _primary_preference, _per_source_eng).
-        if hasattr(self, key):
-            return getattr(self, key)
-        # Fall back to dict for known fields.
-        d = self.to_dict()
-        if key in d:
-            return d[key]
-        raise KeyError(key)
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Dict-like .get() for backward compatibility.
-
-        Checks instance attributes first, then to_dict().
-        """
-        if hasattr(self, key):
-            return getattr(self, key)
-        d = self.to_dict()
-        return d.get(key, default)
-
-    def __contains__(self, key: str) -> bool:
-        """Dict-like 'in' check for backward compatibility.
-
-        Checks instance attributes first (covers internal tracking fields
-        set by dedupe like _per_source_eng, _primary_preference), then
-        falls back to to_dict() for known dataclass fields.
-        """
-        if hasattr(self, key):
-            return True
-        return key in self.to_dict()
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        """Dict-like assignment for backward compatibility with mutation code.
-
-        Sets the attribute on the dataclass instance. Rejects unknown
-        fields to catch typos — the same validation as from_dict.
-        Allows internal tracking fields used by dedupe (prefixed with _).
-        """
-        if not isinstance(key, str):
-            raise TypeError(f"Candidate key must be string, got {type(key).__name__}")
-        # Allow internal dedupe tracking fields (prefixed with _).
-        if key.startswith("_"):
-            setattr(self, key, value)
-            return
-        if key not in _KNOWN_CANDIDATE_FIELDS:
-            raise ValueError(
-                f"Cannot set unknown Candidate field {key!r} — possible typo. "
-                f"Known: {', '.join(sorted(_KNOWN_CANDIDATE_FIELDS))}"
-            )
-        setattr(self, key, value)
-
-    def keys(self) -> list[str]:
-        """Return keys for dict() compatibility.
-
-        This makes dict(candidate) work correctly — Python's dict() constructor
-        calls keys() then __getitem__ for each key.
-        """
-        return list(_KNOWN_CANDIDATE_FIELDS)
-
-    def pop(self, key: str, default: Any = None) -> Any:
-        """Dict-like pop for backward compatibility.
-
-        Returns the attribute value and deletes it from the instance.
-        """
-        if hasattr(self, key):
-            val = getattr(self, key)
-            try:
-                delattr(self, key)
-            except AttributeError:
-                pass
-            return val
-        return default
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert to a dict compatible with existing pipeline code.
-
-        Returns fresh copies of mutable fields (raw_json, contributing_sources)
-        so callers can't mutate the Candidate's internal state via the dict.
-        """
-        import copy
-        return {
-            "title": self.title,
-            "url": self.url,
-            "source": self.source,
-            "source_name": self.source_name,
-            "source_type": self.source_type,
-            "snippet": self.snippet,
-            "published_at": self.published_at,
-            "score": self.score,
-            "upvotes": self.upvotes,
-            "comments": self.comments,
-            "stars": self.stars,
-            "forks": self.forks,
-            "reposts": self.reposts,
-            "upvote_ratio": self.upvote_ratio,
-            "velocity": self.velocity,
-            "category": self.category,
-            "raw_text": self.raw_text,
-            "extracted_text": self.extracted_text,
-            "crosspost_count": self.crosspost_count,
-            "raw_json": copy.deepcopy(self.raw_json) if self.raw_json else None,
-            "candidate_id": self.candidate_id,
-            "importance": self.importance,
-            "reason": self.reason,
-            "short_summary": self.short_summary,
-            "penalty": self.penalty,
-            "contributing_sources": list(self.contributing_sources),
-            "contributing_urls": list(self.contributing_urls),
-            "score_breakdown": dict(self.score_breakdown) if self.score_breakdown else None,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any] | "Candidate") -> "Candidate":
-        """Create a Candidate from a dict or another Candidate.
-
-        Rejects unknown fields — typos and invalid keys raise ValueError.
-        Accepts both plain dicts and Candidate instances (via to_dict()).
-        """
-        if isinstance(d, Candidate):
-            d = d.to_dict()
-        unknown = set(d.keys()) - _KNOWN_CANDIDATE_FIELDS
-        if unknown:
-            raise ValueError(
-                f"Unknown Candidate fields: {sorted(unknown)}. "
-                f"Known: {sorted(_KNOWN_CANDIDATE_FIELDS)}"
-            )
-
-        def _numeric_or_none(val: Any, field_name: str) -> Any:
-            """Extract numeric value or None, rejecting strings and booleans."""
-            if val is None:
-                return None
-            if isinstance(val, bool):
-                raise ValueError(f"Candidate.{field_name} must be numeric, got bool: {val}")
-            if isinstance(val, (int, float)):
-                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-                    raise ValueError(f"Candidate.{field_name} must be finite, got {val}")
-                return val
-            # Reject strings that look numeric — require actual int/float.
-            raise ValueError(
-                f"Candidate.{field_name} must be numeric, got {type(val).__name__}: {val!r}"
-            )
-
-        def _float_or_none(val: Any, field_name: str) -> Any:
-            """Extract float or None."""
-            if val is None:
-                return None
-            if isinstance(val, bool):
-                raise ValueError(f"Candidate.{field_name} must be numeric, got bool: {val}")
-            if isinstance(val, (int, float)):
-                if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
-                    raise ValueError(f"Candidate.{field_name} must be finite, got {val}")
-                return float(val)
-            raise ValueError(
-                f"Candidate.{field_name} must be numeric, got {type(val).__name__}: {val!r}"
-            )
-
-        return cls(
-            title=d.get("title", ""),
-            url=d.get("url", ""),
-            source=d.get("source", ""),
-            source_name=d.get("source_name", ""),
-            source_type=d.get("source_type", d.get("source", "")),
-            snippet=d.get("snippet"),
-            published_at=d.get("published_at"),
-            score=_float_or_none(d.get("score"), "score") if d.get("score") is not None else 0.0,
-            upvotes=_numeric_or_none(d.get("upvotes"), "upvotes"),
-            comments=_numeric_or_none(d.get("comments"), "comments"),
-            stars=_numeric_or_none(d.get("stars"), "stars"),
-            forks=_numeric_or_none(d.get("forks"), "forks"),
-            reposts=_numeric_or_none(d.get("reposts"), "reposts"),
-            upvote_ratio=_float_or_none(d.get("upvote_ratio"), "upvote_ratio"),
-            velocity=_float_or_none(d.get("velocity"), "velocity"),
-            category=d.get("category"),
-            raw_text=d.get("raw_text"),
-            extracted_text=d.get("extracted_text"),
-            crosspost_count=int(_numeric_or_none(d.get("crosspost_count"), "crosspost_count")) if d.get("crosspost_count") is not None else 1,
-            raw_json=d.get("raw_json"),
-            candidate_id=d.get("candidate_id"),
-            importance=_numeric_or_none(d.get("importance"), "importance"),
-            reason=d.get("reason"),
-            short_summary=d.get("short_summary"),
-            penalty=_float_or_none(d.get("penalty"), "penalty") if d.get("penalty") is not None else 1.0,
-            contributing_sources=list(d.get("contributing_sources") or []),
-            contributing_urls=list(d.get("contributing_urls") or []),
-            score_breakdown=d.get("score_breakdown"),
+def validate_candidate(d: dict[str, Any]) -> None:
+    """Validate required fields and engagement values. Mutates source/source_type."""
+    if not d.get("title"):
+        raise ValueError("Candidate requires a non-empty title")
+    if not d.get("source"):
+        raise ValueError("Candidate requires a non-empty source")
+    d["source"] = _normalize_source_id(str(d.get("source") or ""))
+    if not d.get("source_name"):
+        raise ValueError("Candidate requires a non-empty source_name")
+    url_str = str(d.get("url") or "").strip()
+    if not url_str:
+        raise ValueError("Candidate requires a non-empty url")
+    if not (url_str.startswith("http://") or url_str.startswith("https://")):
+        raise ValueError(
+            f"Candidate.url must have http:// or https:// scheme, got {url_str!r}"
         )
-
-
-_TAG_RE = re.compile(r"<[^>]+>")
-_WS_RE = re.compile(r"\s+")
-
-
-_KNOWN_CANDIDATE_FIELDS = frozenset({
-    "title", "url", "source", "source_name", "source_type",
-    "snippet", "published_at", "score", "score_breakdown", "upvotes", "comments",
-    "stars", "forks", "reposts", "upvote_ratio", "velocity",
-    "category", "raw_text", "extracted_text", "crosspost_count",
-    "raw_json", "candidate_id", "importance", "reason",
-    "short_summary", "penalty", "contributing_sources", "contributing_urls",
-})
+    d["url"] = url_str
+    if not d.get("source_type"):
+        d["source_type"] = d["source"]
+    for fname in ("upvotes", "comments", "stars", "forks", "reposts",
+                  "crosspost_count"):
+        val = d.get(fname)
+        if val is not None:
+            if isinstance(val, bool):
+                raise ValueError(
+                    f"Candidate.{fname} must be numeric, got bool: {val}"
+                )
+            if not isinstance(val, (int, float)):
+                raise ValueError(
+                    f"Candidate.{fname} must be numeric, got {type(val).__name__}"
+                )
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                raise ValueError(f"Candidate.{fname} must be finite, got {val}")
+    for fname in ("upvotes", "comments", "stars", "forks", "reposts"):
+        val = d.get(fname)
+        if val is not None and val < 0:
+            raise ValueError(f"Candidate.{fname} must be non-negative, got {val}")
+    score = d.get("score", 0.0)
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise ValueError(f"Candidate.score must be numeric, got {type(score).__name__}")
+    if isinstance(score, float) and (math.isnan(score) or math.isinf(score)):
+        raise ValueError(f"Candidate.score must be finite, got {score}")
+    if score < 0:
+        raise ValueError(f"Candidate.score must be non-negative, got {score}")
+    penalty = d.get("penalty", 1.0)
+    if isinstance(penalty, bool) or not isinstance(penalty, (int, float)):
+        raise ValueError(f"Candidate.penalty must be numeric, got {type(penalty).__name__}")
+    if isinstance(penalty, float) and (math.isnan(penalty) or math.isinf(penalty)):
+        raise ValueError(f"Candidate.penalty must be finite, got {penalty}")
+    if penalty < 0:
+        raise ValueError(f"Candidate.penalty must be non-negative, got {penalty}")
+    upvote_ratio = d.get("upvote_ratio")
+    if upvote_ratio is not None:
+        if isinstance(upvote_ratio, bool) or not isinstance(upvote_ratio, (int, float)):
+            raise ValueError(
+                f"Candidate.upvote_ratio must be numeric, got {type(upvote_ratio).__name__}"
+            )
+        if not (0.0 <= float(upvote_ratio) <= 1.0):
+            raise ValueError(
+                f"Candidate.upvote_ratio must be in [0,1], got {upvote_ratio}"
+            )
+    published_at = d.get("published_at")
+    if published_at is not None:
+        ts = str(published_at).strip()
+        if ts:
+            try:
+                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError(
+                    f"Candidate.published_at must be valid ISO 8601, got {ts!r}"
+                )
+            if parsed.year < 2000 or parsed.year > 2100:
+                raise ValueError(
+                    f"Candidate.published_at year {parsed.year} out of range [2000, 2100]"
+                )
 
 
 def new_candidate(
@@ -410,31 +183,64 @@ def new_candidate(
     source_name: str,
     **extra: Any,
 ) -> Candidate:
-    """Build a validated Candidate instance.
-
-    Returns a Candidate (not a dict). The Candidate supports dict-like
-    access via __getitem__ and .get() for backward compatibility.
+    """Build a validated Candidate dict.
 
     Unknown fields raise ValueError — typos are caught at construction.
     Invalid engagement values raise ValueError — no catch-and-continue.
     """
-    # Build kwargs for Candidate constructor, filtering to known fields.
-    known_extra = {}
-    for k, v in extra.items():
+    for k in extra:
         if k not in _KNOWN_CANDIDATE_FIELDS:
             raise ValueError(
                 f"new_candidate: unknown field {k!r} — possible typo. "
                 f"Known: {', '.join(sorted(_KNOWN_CANDIDATE_FIELDS))}"
             )
-        known_extra[k] = v
+    d: dict[str, Any] = {
+        "title": title,
+        "url": url,
+        "source": source,
+        "source_name": source_name,
+        "source_type": extra.get("source_type") or "",
+        "snippet": None,
+        "published_at": None,
+        "score": 0.0,
+        "upvotes": None,
+        "comments": None,
+        "stars": None,
+        "forks": None,
+        "reposts": None,
+        "upvote_ratio": None,
+        "velocity": None,
+        "category": None,
+        "raw_text": None,
+        "extracted_text": None,
+        "crosspost_count": 1,
+        "raw_json": None,
+        "candidate_id": None,
+        "importance": None,
+        "reason": None,
+        "short_summary": None,
+        "penalty": 1.0,
+        "contributing_sources": [],
+        "contributing_urls": [],
+        "score_breakdown": None,
+    }
+    d.update(extra)
+    if d.get("score") is None:
+        d["score"] = 0.0
+    if d.get("penalty") is None:
+        d["penalty"] = 1.0
+    if d.get("crosspost_count") is None:
+        d["crosspost_count"] = 1
+    if d.get("contributing_sources") is None:
+        d["contributing_sources"] = []
+    if d.get("contributing_urls") is None:
+        d["contributing_urls"] = []
+    validate_candidate(d)
+    return d  # type: ignore[return-value]
 
-    return Candidate(
-        title=title,
-        url=url,
-        source=source,
-        source_name=source_name,
-        **known_extra,
-    )
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
 
 
 def strip_html(text: str) -> str:

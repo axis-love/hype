@@ -208,7 +208,7 @@ class TestRedditLinkPostSwap:
             source="rss",
             source_name="IGN",
         )
-        hit = match_candidate_to_store(candidate.to_dict(), rows)
+        hit = match_candidate_to_store(candidate, rows)
         assert hit is not None, \
             "re-collected article URL must match the existing row"
 
@@ -429,7 +429,7 @@ class TestMergedCandidateSwap:
             },
         )
 
-        merged = dedupe_and_merge([a.to_dict(), b.to_dict()])
+        merged = dedupe_and_merge([a, b])
         assert len(merged) == 1
         # The reddit permalink won the primary (higher engagement).
         assert merged[0]["url"] == permalink
@@ -536,6 +536,6 @@ class TestSwapAfterClassification:
         )
 
         rows = store.list_store_rows("telegram")
-        hit = match_candidate_to_store(candidate.to_dict(), rows)
+        hit = match_candidate_to_store(candidate, rows)
         assert hit is not None, \
             "classification must match via external_url identity (pre-swap)"

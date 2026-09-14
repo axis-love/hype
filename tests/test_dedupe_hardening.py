@@ -149,7 +149,7 @@ class TestWitcherRegression:
 
         # list_merge_target_rows includes posted rows within the window.
         targets = store.list_merge_target_rows("telegram", 7)
-        hit = match_candidate_to_store(candidate.to_dict(), targets)
+        hit = match_candidate_to_store(candidate, targets)
 
         assert hit is not None, "must match the posted row via external_url"
         assert hit["id"] == row_id
@@ -198,7 +198,7 @@ class TestExternalUrlCandidateToRow:
         )
 
         rows = store.list_store_rows("telegram")
-        hit = match_candidate_to_store(candidate.to_dict(), rows)
+        hit = match_candidate_to_store(candidate, rows)
         assert hit is not None
         assert _canonical_url(hit["url"]) == _canonical_url(article_url)
 
@@ -233,7 +233,7 @@ class TestRowSideExternalUrl:
         )
 
         rows = store.list_store_rows("telegram")
-        hit = match_candidate_to_store(candidate.to_dict(), rows)
+        hit = match_candidate_to_store(candidate, rows)
         assert hit is not None
 
     def test_malformed_row_raw_json_degrades_silently(self, store):
@@ -257,7 +257,7 @@ class TestRowSideExternalUrl:
 
         rows = store.list_store_rows("telegram")
         # Must not crash, must not match (malformed raw_json -> no ext key).
-        hit = match_candidate_to_store(candidate.to_dict(), rows)
+        hit = match_candidate_to_store(candidate, rows)
         assert hit is None
 
     def test_row_external_url_helper_tolerant(self):
@@ -316,7 +316,7 @@ class TestContributingUrlsPersistence:
             upvotes=2000,
             raw_json={"external_url": "https://example.com/big-ai-news-article"},
         )
-        merged = dedupe_and_merge([a.to_dict(), b.to_dict()])
+        merged = dedupe_and_merge([a, b])
         assert len(merged) == 1
         assert "contributing_urls" in merged[0]
         # The absorbed candidate's url must be in contributing_urls.
@@ -367,7 +367,7 @@ class TestContributingUrlsPersistence:
             source="reddit",
             source_name="r/technology",
         )
-        merged = dedupe_and_merge([a.to_dict(), b.to_dict()])
+        merged = dedupe_and_merge([a, b])
         assert len(merged) == 1
 
         story = _store_story(
@@ -404,7 +404,7 @@ class TestContributingUrlsPersistence:
             source="reddit",
             source_name="r/science",
         )
-        merged = dedupe_and_merge([a.to_dict(), b.to_dict()])
+        merged = dedupe_and_merge([a, b])
 
         story = _store_story(title=merged[0]["title"], url=merged[0]["url"])
         story["contributing_urls"] = merged[0]["contributing_urls"]
