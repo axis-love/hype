@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from newsbot.db import NewsStore
-from newsbot.main import _run_generation
+from newsbot.generation import _run_generation
 from newsbot.outcome import Outcome
 
 
@@ -65,15 +65,15 @@ def _story(title: str, url: str, upvotes: int = 100, hours_old: float = 2.0) -> 
 
 def _patch_pipeline(monkeypatch, cfg, stories, keep_ids):
     """Patch the collection/filter side of _run_generation deterministically."""
-    monkeypatch.setattr("newsbot.main.load_config", lambda s: cfg)
-    monkeypatch.setattr("newsbot.main._set_pre_merge_weights", lambda w: None)
+    monkeypatch.setattr("newsbot.generation.load_config", lambda s: cfg)
+    monkeypatch.setattr("newsbot.generation._set_pre_merge_weights", lambda w: None)
 
     async def mock_collect_all(_cfg):
         return [dict(s) for s in stories]
 
-    monkeypatch.setattr("newsbot.main.collect_all", mock_collect_all)
-    monkeypatch.setattr("newsbot.main.filter_seen", lambda items, store: items)
-    monkeypatch.setattr("newsbot.main.dedupe_and_merge", lambda items: items)
+    monkeypatch.setattr("newsbot.generation.collect_all", mock_collect_all)
+    monkeypatch.setattr("newsbot.generation.filter_seen", lambda items, store: items)
+    monkeypatch.setattr("newsbot.generation.dedupe_and_merge", lambda items: items)
 
     # Real scoring runs here (deterministic, no network).
 
@@ -85,9 +85,9 @@ def _patch_pipeline(monkeypatch, cfg, stories, keep_ids):
             if it.get("candidate_id") in keep_ids
         ]
 
-    monkeypatch.setattr("newsbot.main.llm_filter", mock_llm_filter)
-    monkeypatch.setattr("newsbot.main.select_diverse_top_items", lambda items, n: items[:n])
-    monkeypatch.setattr("newsbot.main._build_filter_lm_client", lambda: MagicMock())
+    monkeypatch.setattr("newsbot.generation.llm_filter", mock_llm_filter)
+    monkeypatch.setattr("newsbot.generation.select_diverse_top_items", lambda items, n: items[:n])
+    monkeypatch.setattr("newsbot.llm.build_lm_client", lambda *a, **k: MagicMock())
 
 
 class TestAdditiveGeneration:
@@ -204,12 +204,15 @@ class TestAdditiveGeneration:
             style_called["n"] += 1
             raise AssertionError("styler must not run in generation")
 
-        monkeypatch.setattr(m, "llm_style_posts", exploding_style)
+        monkeypatch.setattr("newsbot.summarizer.llm_style_posts", exploding_style)
 
-        def exploding_client():
-            raise AssertionError("_build_lm_client must not run in generation")
+        def exploding_client(role="style", *a, **k):
+            if role == "style":
+                raise AssertionError("style client must not run in generation")
+            from unittest.mock import MagicMock
+            return MagicMock()
 
-        monkeypatch.setattr(m, "_build_lm_client", exploding_client)
+        monkeypatch.setattr("newsbot.llm.build_lm_client", exploding_client)
 
         store = MagicMock()
         store.is_seen_batch.return_value = set()
@@ -249,7 +252,7 @@ class TestRunGenerationPipeline:
 
     async def test_funnel_counts_correct(self, store, monkeypatch):
         """Funnel: collected → unseen → deduped → above_min → filter → kept → final."""
-        from newsbot.main import _run_generation_pipeline
+        from newsbot.generation import _run_generation_pipeline
 
         stories = [
             _story("Story A", "https://a.example.com/1", upvotes=200),
@@ -270,7 +273,7 @@ class TestRunGenerationPipeline:
 
     async def test_items_classified_add_vs_merge(self, store, monkeypatch):
         """Items that match an existing store row are 'merge', others 'add'."""
-        from newsbot.main import _run_generation_pipeline
+        from newsbot.generation import _run_generation_pipeline
 
         # Pre-seed a row that will match one of the candidates.
         original = _story("Existing", "https://existing.example.com/1", upvotes=100)
@@ -297,14 +300,14 @@ class TestRunGenerationPipeline:
         assert merge_item["merge_row_id"] == row_id
 
     async def test_returns_none_on_empty_collection(self, store, monkeypatch):
-        from newsbot.main import _run_generation_pipeline
+        from newsbot.generation import _run_generation_pipeline
 
         _patch_pipeline(monkeypatch, _make_cfg(), [], keep_ids=set())
         result = await _run_generation_pipeline(store, _make_cfg())
         assert result is None
 
     async def test_returns_none_when_llm_keeps_zero(self, store, monkeypatch):
-        from newsbot.main import _run_generation_pipeline
+        from newsbot.generation import _run_generation_pipeline
 
         stories = [_story("Story A", "https://a.example.com/1")]
         _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids=set())
@@ -313,7 +316,7 @@ class TestRunGenerationPipeline:
 
     async def test_no_db_writes(self, store, monkeypatch):
         """Pipeline must not write to the store — row count and seen unchanged."""
-        from newsbot.main import _run_generation_pipeline
+        from newsbot.generation import _run_generation_pipeline
 
         # Pre-seed one row so we can verify it's untouched.
         original = _story("Seed", "https://seed.example.com/1", upvotes=100)
@@ -349,7 +352,7 @@ class TestFormatDryRunReport:
     """_format_dry_run_report renders funnel + per-item classification."""
 
     def test_renders_funnel_and_items(self):
-        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+        from newsbot.admin_views import _format_dry_run_report, GenerationPipelineResult
 
         result = GenerationPipelineResult(
             collected=74, unseen=41, deduped=33, above_min_score=20,
@@ -374,7 +377,7 @@ class TestFormatDryRunReport:
         assert "row 42" in report
 
     def test_failed_collectors_shown(self):
-        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+        from newsbot.admin_views import _format_dry_run_report, GenerationPipelineResult
 
         result = GenerationPipelineResult(
             collected=10, unseen=10, deduped=10, above_min_score=5,
@@ -387,7 +390,7 @@ class TestFormatDryRunReport:
         assert "github" in report
 
     def test_empty_items_just_funnel(self):
-        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+        from newsbot.admin_views import _format_dry_run_report, GenerationPipelineResult
 
         result = GenerationPipelineResult(
             collected=0, unseen=0, deduped=0, above_min_score=0,
@@ -401,7 +404,7 @@ class TestFormatDryRunReport:
 
     def test_dry_run_report_has_no_fenced_markdown_when_empty(self):
         """The base report has no fenced markdown block when items is empty."""
-        from newsbot.main import _format_dry_run_report, GenerationPipelineResult
+        from newsbot.admin_views import _format_dry_run_report, GenerationPipelineResult
 
         result = GenerationPipelineResult(
             collected=5, unseen=5, deduped=5, above_min_score=3,

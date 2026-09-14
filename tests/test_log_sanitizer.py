@@ -2,6 +2,7 @@
 import logging
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -212,9 +213,9 @@ class TestCoordinatorRedaction:
         """When post_digest raises with bot token in URL, coordinator must redact it."""
         from newsbot.jobs import JobCoordinator
         from newsbot.outcome import Outcome
-        from tests.helpers import scored_story, echo_style
+        from tests.helpers import coord_drain, coord_gen, coord_post, scored_story, echo_style
 
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         store.add_stories_to_store([scored_story("T", 90.0)], [])
 
         token = "123456789:AAExxxxxxxxxxxxxxxxxxxx"
@@ -223,11 +224,11 @@ class TestCoordinatorRedaction:
             raise Exception(f"Request to https://api.telegram.org/bot{token}/sendMessage failed")
 
         with patch.dict("os.environ", {"BOT_TOKEN": token, "NEWS_CHANNEL_ID": "@test"}):
-            with patch("newsbot.jobs.post_digest", side_effect=fake_post), \
-                 patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-                 patch("newsbot.jobs._build_lm_client", return_value=object()):
+            with patch("newsbot.poster.post_digest", side_effect=fake_post), \
+                 patch("newsbot.poster.llm_style_posts", new=echo_style), \
+                 patch("newsbot.llm.build_lm_client", return_value=object()):
                 with caplog.at_level(logging.ERROR):
-                    result = await coordinator.run_posting()
+                    result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.FAILED
         # Bot token must NOT appear in any log record
@@ -295,7 +296,7 @@ class TestBotCommandSanitization:
             bot_token="test",
             admin_user_id="123",
             settings=None,
-            on_digest=on_digest,
+            actions=SimpleNamespace(digest=on_digest),
         )
 
         # Mock _send to capture messages.

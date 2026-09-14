@@ -11,7 +11,7 @@ import pytest
 
 from newsbot.api import create_api_app
 from newsbot.db import NewsStore
-from newsbot.main import _recap_input_items
+from newsbot.recap import _recap_input_items
 from newsbot.summarizer import FILTER_SYSTEM
 from tests.helpers import scored_story
 from tests.test_h4_api import NOW, _get_client, _make_app, _seed_store, _story

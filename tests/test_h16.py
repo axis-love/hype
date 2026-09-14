@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from newsbot.jobs import _row_to_styler_input
-from newsbot.main import _row_to_styler_input as preview_helper
+from newsbot.poster import _row_to_styler_input
 from newsbot.summarizer import llm_style_posts
 
 
@@ -59,7 +58,9 @@ async def test_styler_prompt_uses_summary_not_snippet() -> None:
 
 
 def test_preview_uses_same_helper() -> None:
-    assert preview_helper is _row_to_styler_input
-    # No second shaping function in main.py.
+    from newsbot.admin import AdminActions
+    import inspect
+    src = inspect.getsource(AdminActions.preview)
+    assert "_row_to_styler_input" in src
     text = Path("newsbot/main.py").read_text()
-    assert text.count("_row_to_styler_input") >= 1
+    assert "_row_to_styler_input" not in text

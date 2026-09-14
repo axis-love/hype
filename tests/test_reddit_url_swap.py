@@ -28,7 +28,7 @@ from newsbot.dedupe import (
     dedupe_and_merge,
     match_candidate_to_store,
 )
-from newsbot.main import _swap_reddit_link_post_url
+from newsbot.generation import _swap_reddit_link_post_url
 
 
 # --- helpers ---------------------------------------------------------------

@@ -14,7 +14,8 @@ import pytest
 from newsbot.collectors.base import Candidate
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
-from newsbot.main import _run_summary, _scheduler_summary_iteration
+from newsbot.recap import _run_summary
+from newsbot.main import _scheduler_summary_iteration
 from newsbot.outcome import Outcome
 from newsbot.telegram_poster import RichSendRejected
 
@@ -60,7 +61,7 @@ class TestRunSummary:
     @pytest.mark.asyncio
     async def test_zero_posted_rows_skips(self, store, settings):
         """Nothing posted in 24h → skip (3), no LLM call, no delivery."""
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock) as mock_llm:
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock) as mock_llm:
             result = await _run_summary(store, settings, NOW)
 
         assert result == Outcome.NOTHING_TO_DO
@@ -77,11 +78,11 @@ class TestRunSummary:
             captured["markdown"] = markdown
             return [{"ok": True, "result": {"message_id": 1}}]
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "Daily recap",
                                  "items": [{"title": "Big launch today", "url": "https://x.io", "message_id": None}]}), \
-             patch("newsbot.main.post_rich_message", side_effect=fake_post_rich_message), \
-             patch("newsbot.main._build_lm_client", return_value=object()), \
+             patch("newsbot.recap.post_rich_message", side_effect=fake_post_rich_message), \
+             patch("newsbot.llm.build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
@@ -96,7 +97,7 @@ class TestRunSummary:
         """LLM returning nothing → failure (1), day not recorded."""
         _seed_posted_row(store)
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock, return_value=None):
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock, return_value=None):
             result = await _run_summary(store, settings, NOW)
 
         assert result == Outcome.FAILED
@@ -113,11 +114,11 @@ class TestRunSummary:
         async def exploding_html(message, **kwargs):
             raise RuntimeError("Telegram down")
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}), \
-             patch("newsbot.main.post_rich_message", side_effect=exploding_rich), \
-             patch("newsbot.main.post_digest", side_effect=exploding_html), \
-             patch("newsbot.main._build_lm_client", return_value=object()), \
+             patch("newsbot.recap.post_rich_message", side_effect=exploding_rich), \
+             patch("newsbot.recap.post_digest", side_effect=exploding_html), \
+             patch("newsbot.llm.build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
@@ -130,11 +131,11 @@ class TestRunSummary:
         _seed_posted_row(store)
         store.add_summary(DAY, "first", "model", 1)
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}), \
-             patch("newsbot.main.post_rich_message", new_callable=AsyncMock,
+             patch("newsbot.recap.post_rich_message", new_callable=AsyncMock,
                     return_value=[{"ok": True}]), \
-             patch("newsbot.main._build_lm_client", return_value=object()), \
+             patch("newsbot.llm.build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
@@ -145,7 +146,7 @@ class TestRunSummary:
 class TestSchedulerSummaryIteration:
     @pytest.mark.asyncio
     async def test_before_13_is_idle(self, store, settings):
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         result = await _scheduler_summary_iteration(
             coordinator, store, settings, now=NOW.replace(hour=12, minute=59),
@@ -157,14 +158,14 @@ class TestSchedulerSummaryIteration:
     @pytest.mark.asyncio
     async def test_success_consumes_day(self, store, settings):
         """After 13:00 with posted rows, the day key is written."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         _seed_posted_row(store)
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}), \
-             patch("newsbot.main.post_rich_message", new_callable=AsyncMock,
+             patch("newsbot.recap.post_rich_message", new_callable=AsyncMock,
                     return_value=[{"ok": True}]), \
-             patch("newsbot.main._build_lm_client", return_value=object()), \
+             patch("newsbot.llm.build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
@@ -174,7 +175,7 @@ class TestSchedulerSummaryIteration:
     @pytest.mark.asyncio
     async def test_empty_day_consumes_day(self, store, settings):
         """Nothing posted → skip (3) still consumes the day."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
@@ -184,14 +185,14 @@ class TestSchedulerSummaryIteration:
     @pytest.mark.asyncio
     async def test_double_run_same_day_noop(self, store, settings):
         """Second run for the same day is a no-op (no second LLM call)."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         _seed_posted_row(store)
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock,
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock,
                    return_value={"title": "T", "items": []}) as mock_llm, \
-             patch("newsbot.main.post_rich_message", new_callable=AsyncMock,
+             patch("newsbot.recap.post_rich_message", new_callable=AsyncMock,
                     return_value=[{"ok": True}]), \
-             patch("newsbot.main._build_lm_client", return_value=object()), \
+             patch("newsbot.llm.build_lm_client", return_value=object()), \
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result1 = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
             result2 = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
@@ -202,10 +203,10 @@ class TestSchedulerSummaryIteration:
     @pytest.mark.asyncio
     async def test_failure_leaves_day_unconsumed(self, store, settings):
         """LLM failure leaves the day unconsumed — retries on next tick."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         _seed_posted_row(store)
 
-        with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock, return_value=None):
+        with patch("newsbot.recap.llm_daily_summary", new_callable=AsyncMock, return_value=None):
             result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.FAILED
@@ -242,7 +243,7 @@ class TestRecapInputItemsFallback:
     """_recap_input_items prefers styled body, falls back to snippet for legacy rows."""
 
     def test_styled_row_uses_styled_body(self):
-        from newsbot.main import _recap_input_items
+        from newsbot.recap import _recap_input_items
 
         rows = [{"title": "English title", "styled_title": "Styled post",
                  "styled_body": "  Styled body here.  ",
@@ -256,7 +257,7 @@ class TestRecapInputItemsFallback:
         assert items[0]["message_id"] == 7
 
     def test_legacy_row_with_empty_body_falls_back_to_snippet(self):
-        from newsbot.main import _recap_input_items
+        from newsbot.recap import _recap_input_items
 
         rows = [{"title": "Legacy post", "styled_title": "", "styled_body": "",
                  "summary": "  Raw snippet only.  ",
@@ -267,7 +268,7 @@ class TestRecapInputItemsFallback:
         assert items[0]["title"] == "Legacy post"
 
     def test_row_with_neither_body_nor_snippet_yields_empty(self):
-        from newsbot.main import _recap_input_items
+        from newsbot.recap import _recap_input_items
 
         rows = [{"title": "Bare", "body": "", "snippet": "",
                  "category": "", "url": "", "source": "", "posted_at": "",
@@ -280,7 +281,7 @@ class TestFormatRecapInputSheet:
     """_format_recap_input_sheet renders count, titles, and meta bits."""
 
     def test_sheet_contains_count_and_titles(self):
-        from newsbot.main import _format_recap_input_sheet
+        from newsbot.recap import _format_recap_input_sheet
 
         items: list[dict[str, Any] | Candidate] = [
             {"title": "First post", "category": "AI", "source": "hn",
@@ -296,7 +297,7 @@ class TestFormatRecapInputSheet:
         assert "Hardware | ph" in sheet
 
     def test_sheet_handles_untitled_and_missing_meta(self):
-        from newsbot.main import _format_recap_input_sheet
+        from newsbot.recap import _format_recap_input_sheet
 
         items: list[dict[str, Any] | Candidate] = [{"title": "", "category": "", "source": "hn",
                   "posted_at": ""}]

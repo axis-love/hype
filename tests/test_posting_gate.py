@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from newsbot.db import NewsStore
-from tests.helpers import insert_story
+from tests.helpers import coord_drain, coord_gen, coord_post, insert_story
 from newsbot.jobs import JobCoordinator
 from newsbot.outcome import Outcome
 
@@ -41,7 +41,7 @@ def settings():
 
 @pytest.fixture
 def coordinator(store, settings) -> JobCoordinator:
-    return JobCoordinator(store, settings)
+    return JobCoordinator()
 
 
 NOW = datetime(2026, 8, 17, 12, 0, 0, tzinfo=timezone.utc)
@@ -88,9 +88,9 @@ def _scored_story(title: str, engagement: float, *, merge_count: int = 1,
 
 class TestPostingGate:
     @pytest.mark.asyncio
-    async def test_hottest_picked_and_delivered(self, coordinator, store, monkeypatch):
+    async def test_hottest_picked_and_delivered(self, coordinator, store, settings, monkeypatch):
         """Hottest eligible row is styled and delivered; row marked posted."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store(
             [_scored_story("Cold story", 40.0), _scored_story("Hot story", 90.0)],
             [],
@@ -101,9 +101,9 @@ class TestPostingGate:
             calls.append(items)
             return [{"title": "STYLED", "body": "Styled body"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert len(calls) == 1  # styled exactly one row, at pick time
@@ -112,9 +112,9 @@ class TestPostingGate:
         assert rows[0]["title"] == "Cold story"
 
     @pytest.mark.asyncio
-    async def test_below_threshold_returns_4_nothing_posted(self, coordinator, store, monkeypatch):
+    async def test_below_threshold_returns_4_nothing_posted(self, coordinator, store, settings, monkeypatch):
         """All rows below floor -> 4, nothing styled or posted."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store([_scored_story("Lukewarm", 10.0)], [])
 
         style_called = []
@@ -123,9 +123,9 @@ class TestPostingGate:
             style_called.append(1)
             return [{"title": "X", "body": "Y"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs.post_digest", new=AsyncMock()) as pd:
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.poster.post_digest", new=AsyncMock()) as pd:
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.BELOW_THRESHOLD
         assert not style_called
@@ -133,21 +133,21 @@ class TestPostingGate:
         assert store.count_pending("telegram") == 1  # row still unposted
 
     @pytest.mark.asyncio
-    async def test_empty_store_returns_3(self, coordinator):
-        assert await coordinator.run_posting() == Outcome.NOTHING_TO_DO
+    async def test_empty_store_returns_3(self, coordinator, store, settings):
+        assert await coord_post(coordinator, store, settings) == Outcome.NOTHING_TO_DO
 
     @pytest.mark.asyncio
-    async def test_styler_failure_returns_1_row_stays_raw(self, coordinator, store, monkeypatch):
+    async def test_styler_failure_returns_1_row_stays_raw(self, coordinator, store, settings, monkeypatch):
         """Styler returns [] -> 1; row stays raw and unposted (retryable)."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store([_scored_story("Hot story", 90.0)], [])
 
         async def failing_style(items, lm, **kw):
             return []
 
-        with patch("newsbot.jobs.llm_style_posts", new=failing_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.llm_style_posts", new=failing_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.FAILED
         assert store.count_pending("telegram") == 1
@@ -155,9 +155,9 @@ class TestPostingGate:
         assert row["merge_count"] in (None, 1)  # untouched
 
     @pytest.mark.asyncio
-    async def test_success_fills_styled_at_and_marks_posted(self, coordinator, store, monkeypatch):
+    async def test_success_fills_styled_at_and_marks_posted(self, coordinator, store, settings, monkeypatch):
         """Successful delivery fills styled_at, marks posted."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store([_scored_story("Hot story", 90.0)], [])
 
         async def fake_style(items, lm, **kw):
@@ -168,11 +168,11 @@ class TestPostingGate:
         async def fake_digest(message, **kw):
             posted.append(message)
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()), \
-             patch("newsbot.jobs.post_digest", new=fake_digest), \
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()), \
+             patch("newsbot.poster.post_digest", new=fake_digest), \
              patch.dict("os.environ", {"BOT_TOKEN": "t", "NEWS_CHANNEL_ID": "c"}):
-            result = await coordinator.run_posting()
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert posted and "STYLED" in posted[0]
@@ -185,10 +185,10 @@ class TestPostingGate:
 
     @pytest.mark.asyncio
     async def test_merge_multiplier_changes_ranking_not_eligibility(
-        self, coordinator, store, monkeypatch
+        self, coordinator, store, settings, monkeypatch
     ):
         """Merge boost lifts a row's RANK only; a cold merged row stays gated."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         # Cold row (below floor) with many merges — multiplier must NOT
         # make it eligible.
         cold = _scored_story("Cold merged", 10.0)
@@ -207,17 +207,17 @@ class TestPostingGate:
             picked.append(items[0].get("title"))
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert picked == ["Hot plain"]  # cold merged row never eligible
 
     @pytest.mark.asyncio
-    async def test_merge_multiplier_breaks_ranking_tie(self, coordinator, store, monkeypatch):
+    async def test_merge_multiplier_breaks_ranking_tie(self, coordinator, store, settings, monkeypatch):
         """Equal temps: the merged row outranks the plain one (ranking only)."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store([_scored_story("Plain hot", 90.0)], [])
         merged = _scored_story("Merged hot", 90.0)
         store.add_stories_to_store([merged], [])
@@ -233,17 +233,17 @@ class TestPostingGate:
             picked.append(items[0].get("title"))
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert picked == ["Merged hot"]
 
     @pytest.mark.asyncio
-    async def test_legacy_null_score_row_never_selected(self, coordinator, store, monkeypatch):
+    async def test_legacy_null_score_row_never_selected(self, coordinator, store, settings, monkeypatch):
         """Legacy row (engagement_score NULL) has temp 0.0 -> never eligible."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store._conn.execute(
             "INSERT INTO pending_posts(title, url, created_at) VALUES(?,?,?)",
             ("Legacy", "https://legacy.example.com", NOW.isoformat()),
@@ -252,32 +252,32 @@ class TestPostingGate:
         async def fake_style(items, lm, **kw):
             raise AssertionError("styler must not run for a below-threshold legacy row")
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style):
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.llm_style_posts", new=fake_style):
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.BELOW_THRESHOLD
         assert store.count_pending("telegram") == 1
 
     @pytest.mark.asyncio
-    async def test_drain_returns_0_on_threshold_skip(self, coordinator, store, monkeypatch):
+    async def test_drain_returns_0_on_threshold_skip(self, coordinator, store, settings, monkeypatch):
         """drain_posts treats 4 as terminal success (healthy 'nothing hot')."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store([_scored_story("Lukewarm", 10.0)], [])
-        result = await coordinator.drain_posts()
+        result = await coord_drain(coordinator, store, settings)
         assert result == Outcome.OK
 
     @pytest.mark.asyncio
-    async def test_drain_stops_on_empty_after_posting(self, coordinator, store, monkeypatch):
+    async def test_drain_stops_on_empty_after_posting(self, coordinator, store, settings, monkeypatch):
         """drain posts the hot row, then hits empty -> 0."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(NOW))
         store.add_stories_to_store([_scored_story("Hot story", 90.0)], [])
 
         async def fake_style(items, lm, **kw):
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
-            result = await coordinator.drain_posts()
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
+            result = await coord_drain(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert store.count_pending("telegram") == 0
