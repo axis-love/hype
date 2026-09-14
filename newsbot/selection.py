@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -27,6 +27,49 @@ class PickResult:
     hottest: float
     temps: dict[int, float]  # row_id -> raw current temp (reusable for eviction / /scores)
     excluded_ids: frozenset[int] = frozenset()  # rows removed from the eligible set before pick (e.g. same-topic cooldown)
+    eligible: list[dict[str, Any]] = field(default_factory=list)  # winner-first ranked eligible rows
+
+
+def rank_eligible(
+    rows: list[dict[str, Any]],
+    config: dict[str, Any],
+    *,
+    now: datetime,
+    floor: float,
+    ratio: float,
+    merge_bonus: float,
+    merge_cap: float,
+    excluded_ids: set[int] | None = None,
+) -> tuple[list[dict[str, Any]], dict[int, float], float, float, float]:
+    """Rank store rows that clear the temperature threshold.
+
+    Returns ``(eligible_sorted, temps, threshold, median, hottest)``.
+    Sort key: ``temps[id] * merge_multiplier(merge_count)`` descending,
+    then ``id`` ascending. Excluded and below-threshold rows are absent
+    from the eligible list; they still participate in temps/median.
+    """
+    temps = {row["id"]: current_temperature(row, config, now=now) for row in rows}
+    if not rows:
+        return [], temps, 0.0, 0.0, 0.0
+
+    median = statistics.median(temps.values())
+    hottest = max(temps.values())
+    threshold = max(floor, ratio * median)
+
+    eligible = [
+        row for row in rows
+        if temps[row["id"]] >= threshold
+        and (excluded_ids is None or row["id"] not in excluded_ids)
+    ]
+    eligible.sort(
+        key=lambda row: (
+            -(temps[row["id"]] * merge_multiplier(
+                row.get("merge_count"), bonus=merge_bonus, cap=merge_cap,
+            )),
+            row["id"],
+        ),
+    )
+    return eligible, temps, threshold, median, hottest
 
 
 def pick_hottest(
@@ -44,9 +87,9 @@ def pick_hottest(
 
     temps = current_temperature per row; threshold = max(floor, ratio *
     median(temps)); eligible = raw temp >= threshold AND row id NOT in
-    excluded_ids; winner = max of eligible by raw_temp * merge_multiplier.
-    The merge multiplier affects RANKING only — it never makes a
-    below-threshold row eligible.
+    excluded_ids; winner = eligible[0] after ranking by raw_temp *
+    merge_multiplier (then id). The merge multiplier affects RANKING
+    only — it never makes a below-threshold row eligible.
 
     Excluded rows still participate in temps/median (threshold stays
     comparable across slots) but are removed from the ELIGIBLE set.
@@ -54,28 +97,27 @@ def pick_hottest(
     "below_threshold" (PickResult fields stay stable). The caller
     computes the exclusion set — selection.py stays dependency-free.
     """
-    temps = {row["id"]: current_temperature(row, config, now=now) for row in rows}
     excl = frozenset(excluded_ids or ())
-    if not rows:
-        return PickResult(row=None, reason="empty", threshold=0.0, median=0.0, hottest=0.0, temps=temps, excluded_ids=excl)
-
-    median = statistics.median(temps.values())
-    hottest = max(temps.values())
-    threshold = max(floor, ratio * median)
-
-    eligible = [
-        row for row in rows
-        if temps[row["id"]] >= threshold
-        and (excluded_ids is None or row["id"] not in excluded_ids)
-    ]
-    if not eligible:
-        return PickResult(row=None, reason="below_threshold", threshold=threshold, median=median, hottest=hottest, temps=temps, excluded_ids=excl)
-
-    winner = max(
-        eligible,
-        key=lambda row: temps[row["id"]] * merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap),
+    eligible, temps, threshold, median, hottest = rank_eligible(
+        rows, config, now=now, floor=floor, ratio=ratio,
+        merge_bonus=merge_bonus, merge_cap=merge_cap,
+        excluded_ids=excluded_ids,
     )
-    return PickResult(row=winner, reason="picked", threshold=threshold, median=median, hottest=hottest, temps=temps, excluded_ids=excl)
+    if not rows:
+        return PickResult(
+            row=None, reason="empty", threshold=0.0, median=0.0, hottest=0.0,
+            temps=temps, excluded_ids=excl, eligible=[],
+        )
+    if not eligible:
+        return PickResult(
+            row=None, reason="below_threshold", threshold=threshold,
+            median=median, hottest=hottest, temps=temps, excluded_ids=excl,
+            eligible=[],
+        )
+    return PickResult(
+        row=eligible[0], reason="picked", threshold=threshold, median=median,
+        hottest=hottest, temps=temps, excluded_ids=excl, eligible=eligible,
+    )
 
 
 def select_for_consumer(

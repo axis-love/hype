@@ -9,6 +9,7 @@ import pytest
 from newsbot.config import _consumer_profiles
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator, _format_recap_html_fallback, format_post_message
+from newsbot.outcome import Outcome
 from tests.helpers import insert_story
 
 
@@ -47,7 +48,7 @@ class TestJobCoordinatorSerialization:
             nonlocal call_count
             call_count += 1
             await asyncio.sleep(0.1)
-            return 0
+            return Outcome.OK
 
         # Launch two concurrently.
         results = await asyncio.gather(
@@ -55,8 +56,8 @@ class TestJobCoordinatorSerialization:
             coordinator.run_generation(slow_gen),
         )
         # One should succeed (0), one should be skipped (2).
-        assert results.count(0) == 1
-        assert results.count(2) == 1
+        assert results.count(Outcome.OK) == 1
+        assert results.count(Outcome.BUSY) == 1
         assert call_count == 1
 
     @pytest.mark.asyncio
@@ -68,16 +69,16 @@ class TestJobCoordinatorSerialization:
         # Mock the actual delivery to be slow.
         async def slow_deliver(*args, **kwargs):
             await asyncio.sleep(0.1)
-            return 0
+            return Outcome.OK
 
-        with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver, return_value=0):
+        with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver, return_value=Outcome.OK):
             results = await asyncio.gather(
                 coordinator.run_posting(),
                 coordinator.run_posting(),
             )
         # One should succeed (0), one should be skipped (2).
-        assert results.count(0) == 1
-        assert results.count(2) == 1
+        assert results.count(Outcome.OK) == 1
+        assert results.count(Outcome.BUSY) == 1
 
     @pytest.mark.asyncio
     async def test_generation_and_posting_cannot_overlap(self, coordinator):
@@ -91,7 +92,7 @@ class TestJobCoordinatorSerialization:
             gen_started.set()
             await asyncio.sleep(0.05)
             gen_done.set()
-            return 0
+            return Outcome.OK
 
         # Add a pending post.
         insert_story(coordinator._store, "T", "")
@@ -100,7 +101,7 @@ class TestJobCoordinatorSerialization:
             post_started.set()
             await asyncio.sleep(0.05)
             post_done.set()
-            return 0
+            return Outcome.OK
 
         with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver):
             await asyncio.gather(
@@ -127,7 +128,7 @@ class TestJobCoordinatorSerialization:
 
         # Second call should succeed — lock was released.
         result = await coordinator.run_generation(lambda: asyncio.sleep(0))
-        assert result == 0
+        assert result == Outcome.OK
 
     @pytest.mark.asyncio
     async def test_posting_lock_released_on_exception(self, coordinator):
@@ -142,9 +143,9 @@ class TestJobCoordinatorSerialization:
                 await coordinator.run_posting()
 
         # Should be able to call again — lock was released.
-        with patch.object(coordinator, "_deliver_one", return_value=0):
+        with patch.object(coordinator, "_deliver_one", return_value=Outcome.OK):
             result = await coordinator.run_posting()
-        assert result == 0
+        assert result == Outcome.OK
 
     @pytest.mark.asyncio
     async def test_multiple_gen_queued_behind_post_only_one_runs(self, coordinator):
@@ -157,12 +158,12 @@ class TestJobCoordinatorSerialization:
 
         async def slow_deliver(*args, **kwargs):
             await post_can_finish.wait()
-            return 0
+            return Outcome.OK
 
         async def gen_fn():
             nonlocal gen_call_count
             gen_call_count += 1
-            return 0
+            return Outcome.OK
 
         with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver):
             post_task = asyncio.create_task(coordinator.run_posting())
@@ -177,13 +178,13 @@ class TestJobCoordinatorSerialization:
             await asyncio.sleep(0.02)
 
             gen2_result = await coordinator.run_generation(gen_fn)
-            assert gen2_result == 2  # skipped because gen1 already set the flag
+            assert gen2_result == Outcome.BUSY  # skipped because gen1 already set the flag
 
             # Release posting so gen1 can proceed.
             post_can_finish.set()
             await post_task
             gen1_result = await gen1_task
-            assert gen1_result == 0
+            assert gen1_result == Outcome.OK
 
         # Only one generation actually ran.
         assert gen_call_count == 1
@@ -197,12 +198,12 @@ class TestJobCoordinatorSerialization:
 
         async def slow_gen():
             await gen_can_finish.wait()
-            return 0
+            return Outcome.OK
 
         async def fast_deliver(*args, **kwargs):
             nonlocal deliver_call_count
             deliver_call_count += 1
-            return 0
+            return Outcome.OK
 
         insert_story(coordinator._store, "T", "")
 
@@ -217,14 +218,14 @@ class TestJobCoordinatorSerialization:
             await asyncio.sleep(0.02)
 
             post2_result = await coordinator.run_posting()
-            assert post2_result == 2  # skipped
+            assert post2_result == Outcome.BUSY  # skipped
 
             # Release generation so post1 can proceed.
             gen_can_finish.set()
             gen_result = await gen_task
-            assert gen_result == 0
+            assert gen_result == Outcome.OK
             post1_result = await post1_task
-            assert post1_result == 0
+            assert post1_result == Outcome.OK
 
         # Only one posting actually ran.
         assert deliver_call_count == 1
@@ -234,10 +235,10 @@ class TestJobCoordinatorSerialization:
         """Coordinator state returns to idle after a timeout."""
         async def slow_gen():
             await asyncio.sleep(10)
-            return 0
+            return Outcome.OK
 
         result = await coordinator.run_generation(slow_gen, timeout=0.05)
-        assert result == 1  # timeout
+        assert result == Outcome.FAILED  # timeout
         assert coordinator.generation_running is False
 
     @pytest.mark.asyncio
@@ -245,7 +246,7 @@ class TestJobCoordinatorSerialization:
         """Coordinator state returns to idle after task cancellation."""
         async def slow_gen():
             await asyncio.sleep(10)
-            return 0
+            return Outcome.OK
 
         task = asyncio.create_task(coordinator.run_generation(slow_gen))
         await asyncio.sleep(0.05)
@@ -272,7 +273,7 @@ class TestJobCoordinatorSerialization:
             if post:
                 delivered_ids.append(post["id"])
                 store.mark_posted(post["id"])
-            return 0
+            return Outcome.OK
 
         with patch.object(coordinator, "_deliver_one", new=capture_deliver):
             results = await asyncio.gather(
@@ -281,8 +282,8 @@ class TestJobCoordinatorSerialization:
             )
 
         # One should succeed (0), one should be skipped (2).
-        assert results.count(0) == 1
-        assert results.count(2) == 1
+        assert results.count(Outcome.OK) == 1
+        assert results.count(Outcome.BUSY) == 1
         # No duplicate delivery.
         assert len(delivered_ids) == 1
 
@@ -305,14 +306,14 @@ class TestJobCoordinatorDrain:
             os.environ.pop("NEWS_CHANNEL_ID", None)
             result = await coordinator.drain_posts()
 
-        assert result == 0
+        assert result == Outcome.OK
         assert store.count_pending("telegram") == 0
 
     @pytest.mark.asyncio
     async def test_drain_empty_queue(self, coordinator):
         """Drain with empty queue should return 0."""
         result = await coordinator.drain_posts()
-        assert result == 0
+        assert result == Outcome.OK
 
 
 class TestConcurrentGenerationPostingIntegration:
@@ -356,7 +357,7 @@ class TestConcurrentGenerationPostingIntegration:
 
         async def gen_fn():
             store.add_stories_to_store(new_posts, seen_items)
-            return 0
+            return Outcome.OK
 
         with patch("newsbot.jobs.post_rich_message", new=slow_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
@@ -371,9 +372,9 @@ class TestConcurrentGenerationPostingIntegration:
                 post_result = await post_task
 
         # Generation should succeed.
-        assert gen_result == 0
+        assert gen_result == Outcome.OK
         # Posting should succeed (delivered one post).
-        assert post_result == 0
+        assert post_result == Outcome.OK
 
         # No title should appear more than once — no duplicate delivery.
         assert len(delivered_titles) == len(set(delivered_titles)), \
@@ -426,8 +427,8 @@ class TestConcurrentGenerationPostingIntegration:
                     )
 
         # Only one should succeed (0), others skipped (2).
-        assert results.count(0) == 1
-        assert results.count(2) == 2
+        assert results.count(Outcome.OK) == 1
+        assert results.count(Outcome.BUSY) == 2
 
         # Exactly 1 post was marked posted.
         posted_count = store._conn.execute(
@@ -466,7 +467,7 @@ class TestConcurrentGenerationPostingIntegration:
 
         async def gen_fn():
             store.add_stories_to_store(new_posts, seen_items)
-            return 0
+            return Outcome.OK
 
         with patch("newsbot.jobs.post_rich_message", new=tracking_post_rich), \
              patch("newsbot.jobs.llm_style_posts", new=echo_style), \
@@ -482,8 +483,8 @@ class TestConcurrentGenerationPostingIntegration:
                 drain_result = await drain_task
                 gen_result = await gen_task
 
-        assert drain_result == 0
-        assert gen_result == 0
+        assert drain_result == Outcome.OK
+        assert gen_result == Outcome.OK
 
         # All 3 old posts were delivered in order (no reordering).
         assert delivered == ["Old0", "Old1", "Old2"]
@@ -503,11 +504,11 @@ class TestConcurrentGenerationPostingIntegration:
         async def gen_a():
             await asyncio.sleep(0.02)
             store.add_stories_to_store(posts_a, seen_a)
-            return 0
+            return Outcome.OK
 
         async def gen_b():
             store.add_stories_to_store(posts_b, seen_b)
-            return 0
+            return Outcome.OK
 
         results = await asyncio.gather(
             coordinator.run_generation(gen_a),
@@ -515,8 +516,8 @@ class TestConcurrentGenerationPostingIntegration:
         )
 
         # One succeeds (0), one skipped (2).
-        assert results.count(0) == 1
-        assert results.count(2) == 1
+        assert results.count(Outcome.OK) == 1
+        assert results.count(Outcome.BUSY) == 1
 
         # Queue has exactly 1 post (from whichever generation ran).
         assert store.count_pending("telegram") == 1
@@ -724,7 +725,7 @@ class TestSendMessageIdPersistence:
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "-1001234567890"}):
                 result = await coordinator.run_posting()
 
-        assert result == 0
+        assert result == Outcome.OK
         row = store._conn.execute(
             "SELECT message_id FROM deliveries WHERE channel='telegram'"
         ).fetchone()
@@ -745,7 +746,7 @@ class TestSendMessageIdPersistence:
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
                 result = await coordinator.run_posting()
 
-        assert result == 0
+        assert result == Outcome.OK
         row = store._conn.execute(
             "SELECT message_id FROM deliveries WHERE channel='telegram'"
         ).fetchone()

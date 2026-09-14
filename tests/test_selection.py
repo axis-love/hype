@@ -129,3 +129,39 @@ def test_eligible_row_exactly_at_threshold_is_picked():
     result = _pick(rows)
     assert result.reason == "picked"
     assert result.threshold == 35.0
+
+
+def test_eligible_sorted_winner_first_excludes_gated_rows():
+    """PickResult.eligible is winner-first; excluded and below-threshold rows absent."""
+    # threshold = max(35, 0.5 * median([100, 80, 70, 10])) = max(35, 37.5) = 37.5
+    # Eligible without exclusion: 100, 80, 70. Row 4 (10) is below threshold.
+    # Row 2 (80) is excluded. Winner-first: 1 (100), then 3 (70).
+    rows = [
+        _row(1, 100.0),
+        _row(2, 80.0),
+        _row(3, 70.0),
+        _row(4, 10.0),
+    ]
+    result = _pick(rows, excluded_ids={2})
+    assert result.reason == "picked"
+    assert [r["id"] for r in result.eligible] == [1, 3]
+    assert result.row is result.eligible[0]
+    assert result.row["id"] == 1
+    assert 2 not in {r["id"] for r in result.eligible}
+    assert 4 not in {r["id"] for r in result.eligible}
+
+
+def test_eligible_merge_multiplier_then_id_tiebreak():
+    """Sort key is temp × merge_multiplier desc, then id asc."""
+    # Equal raw temps: higher merge_count ranks first.
+    # Equal effective score: lower id wins.
+    rows = [
+        _row(3, 80.0, merge_count=1),
+        _row(1, 80.0, merge_count=1),
+        _row(2, 80.0, merge_count=6),
+    ]
+    result = _pick(rows)
+    assert result.reason == "picked"
+    assert [r["id"] for r in result.eligible] == [2, 1, 3]
+    assert result.row is result.eligible[0]
+    assert result.row["id"] == 2

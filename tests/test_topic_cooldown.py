@@ -27,6 +27,7 @@ import pytest
 
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
+from newsbot.outcome import Outcome
 from newsbot.selection import PickResult, pick_hottest
 
 
@@ -243,7 +244,7 @@ class TestTopicCooldown:
             os.environ.pop("NEWS_CHANNEL_ID", None)
             result = await coordinator.run_posting()
 
-        assert result == 0
+        assert result == Outcome.OK
         # Gaming4 must NOT be picked (3 gaming posts in 24h, cooldown=3).
         # AI News (colder, non-gaming) should be picked instead.
         assert picked == ["AI News"], f"expected AI News picked, got {picked}"
@@ -278,7 +279,7 @@ class TestTopicCooldown:
             os.environ.pop("NEWS_CHANNEL_ID", None)
             result = await coordinator.run_posting()
 
-        assert result == 0
+        assert result == Outcome.OK
         assert picked == ["FreshGaming"], \
             "old posts (>24h) should not trigger cooldown"
 
@@ -312,7 +313,7 @@ class TestTopicCooldown:
             os.environ.pop("NEWS_CHANNEL_ID", None)
             result = await coordinator.run_posting()
 
-        assert result == 0
+        assert result == Outcome.OK
         # NULL-topic row must NOT be excluded (it's the hottest at 90).
         assert picked == ["Null Topic Hot"]
 
@@ -346,7 +347,7 @@ class TestTopicCooldown:
             os.environ.pop("NEWS_CHANNEL_ID", None)
             result = await coordinator.run_posting()
 
-        assert result == 0
+        assert result == Outcome.OK
         assert picked == ["FreshGaming"], \
             "cooldown=0 must not exclude any rows"
 

@@ -15,6 +15,7 @@ from newsbot.collectors.base import Candidate
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
 from newsbot.main import _run_summary, _scheduler_summary_iteration
+from newsbot.outcome import Outcome
 from newsbot.telegram_poster import RichSendRejected
 
 TZ = ZoneInfo("Asia/Bangkok")
@@ -62,7 +63,7 @@ class TestRunSummary:
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock) as mock_llm:
             result = await _run_summary(store, settings, NOW)
 
-        assert result == 3
+        assert result == Outcome.NOTHING_TO_DO
         assert not mock_llm.called
 
     @pytest.mark.asyncio
@@ -84,7 +85,7 @@ class TestRunSummary:
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
-        assert result == 0
+        assert result == Outcome.OK
         assert "Daily recap" in captured["markdown"]
         recorded = store.get_summary_for_day(DAY)
         assert recorded is not None
@@ -98,7 +99,7 @@ class TestRunSummary:
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock, return_value=None):
             result = await _run_summary(store, settings, NOW)
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert store.get_summary_for_day(DAY) is None
 
     @pytest.mark.asyncio
@@ -120,7 +121,7 @@ class TestRunSummary:
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert store.get_summary_for_day(DAY) is None
 
     @pytest.mark.asyncio
@@ -137,7 +138,7 @@ class TestRunSummary:
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _run_summary(store, settings, NOW)
 
-        assert result == 0  # UNIQUE violation tolerated
+        assert result == Outcome.OK  # UNIQUE violation tolerated
         assert store.get_summary_for_day(DAY)["summary_text"] == "first"
 
 
@@ -150,7 +151,7 @@ class TestSchedulerSummaryIteration:
             coordinator, store, settings, now=NOW.replace(hour=12, minute=59),
         )
 
-        assert result == 0
+        assert result == Outcome.OK
         assert settings.get("scheduler", "last_summary_day", default="") == ""
 
     @pytest.mark.asyncio
@@ -167,7 +168,7 @@ class TestSchedulerSummaryIteration:
              patch.dict("os.environ", {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
             result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
-        assert result == 0
+        assert result == Outcome.OK
         assert settings.get("scheduler", "last_summary_day") == DAY
 
     @pytest.mark.asyncio
@@ -177,7 +178,7 @@ class TestSchedulerSummaryIteration:
 
         result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
-        assert result == 3
+        assert result == Outcome.NOTHING_TO_DO
         assert settings.get("scheduler", "last_summary_day") == DAY
 
     @pytest.mark.asyncio
@@ -195,7 +196,7 @@ class TestSchedulerSummaryIteration:
             result1 = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
             result2 = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
-        assert result1 == 0 and result2 == 0
+        assert result1 == Outcome.OK and result2 == Outcome.OK
         assert mock_llm.call_count == 1
 
     @pytest.mark.asyncio
@@ -207,7 +208,7 @@ class TestSchedulerSummaryIteration:
         with patch("newsbot.main.llm_daily_summary", new_callable=AsyncMock, return_value=None):
             result = await _scheduler_summary_iteration(coordinator, store, settings, now=NOW)
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_summary_day", default="") == ""
 
 

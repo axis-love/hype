@@ -211,6 +211,7 @@ class TestCoordinatorRedaction:
     async def test_post_one_redacts_bot_token(self, store, settings, caplog):
         """When post_digest raises with bot token in URL, coordinator must redact it."""
         from newsbot.jobs import JobCoordinator
+        from newsbot.outcome import Outcome
         from tests.helpers import scored_story, echo_style
 
         coordinator = JobCoordinator(store, settings)
@@ -228,7 +229,7 @@ class TestCoordinatorRedaction:
                 with caplog.at_level(logging.ERROR):
                     result = await coordinator.run_posting()
 
-        assert result == 1
+        assert result == Outcome.FAILED
         # Bot token must NOT appear in any log record
         for record in caplog.records:
             assert token not in record.getMessage(), f"Bot token leaked in log: {record.getMessage()}"

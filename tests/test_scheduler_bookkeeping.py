@@ -21,6 +21,7 @@ import pytest
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
 from newsbot.main import _scheduler_gen_iteration, _scheduler_post_iteration
+from newsbot.outcome import Outcome
 from tests.helpers import insert_story
 
 TZ = ZoneInfo("Asia/Bangkok")
@@ -56,12 +57,12 @@ class TestSchedulerGenIteration:
         """Success writes scheduler.last_gen_slot = the due slot."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=0):
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.OK):
             result = await _scheduler_gen_iteration(
                 coordinator, store, settings, [5, 17], now=NOW,
             )
 
-        assert result == 0
+        assert result == Outcome.OK
         assert settings.get("scheduler", "last_gen_slot") == "2026-08-16T05"
 
     @pytest.mark.asyncio
@@ -76,14 +77,14 @@ class TestSchedulerGenIteration:
         async def gen_fn(*args):
             nonlocal called
             called = True
-            return 0
+            return Outcome.OK
 
         with patch("newsbot.main._run_generation", side_effect=gen_fn):
             result = await _scheduler_gen_iteration(
                 coordinator, store, settings, [5, 17], now=NOW,
             )
 
-        assert result == 0
+        assert result == Outcome.OK
         assert not called
 
     @pytest.mark.asyncio
@@ -91,12 +92,12 @@ class TestSchedulerGenIteration:
         """Failure leaves the slot unconsumed so the next tick retries."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=1):
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.FAILED):
             result = await _scheduler_gen_iteration(
                 coordinator, store, settings, [5, 17], now=NOW,
             )
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_gen_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -104,12 +105,12 @@ class TestSchedulerGenIteration:
         """No-progress (3) leaves the slot unconsumed."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=3):
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.NOTHING_TO_DO):
             result = await _scheduler_gen_iteration(
                 coordinator, store, settings, [5, 17], now=NOW,
             )
 
-        assert result == 3
+        assert result == Outcome.NOTHING_TO_DO
         assert settings.get("scheduler", "last_gen_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -122,7 +123,7 @@ class TestSchedulerGenIteration:
             coordinator, store, settings, [5, 17], now=NOW,
         )
 
-        assert result == 2
+        assert result == Outcome.BUSY
         assert settings.get("scheduler", "last_gen_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -138,7 +139,7 @@ class TestSchedulerGenIteration:
                 coordinator, store, settings, [5, 17], now=NOW,
             )
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_gen_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -153,7 +154,7 @@ class TestSchedulerGenIteration:
         async def gen_fn(*args):
             nonlocal runs
             runs += 1
-            return 0
+            return Outcome.OK
 
         with patch("newsbot.main._run_generation", side_effect=gen_fn):
             result = await _scheduler_gen_iteration(
@@ -164,7 +165,7 @@ class TestSchedulerGenIteration:
                 coordinator, store, settings, [5, 17], now=NOW,
             )
 
-        assert result == 0 and result2 == 0
+        assert result == Outcome.OK and result2 == Outcome.OK
         assert runs == 1
         assert settings.get("scheduler", "last_gen_slot") == "2026-08-16T05"
 
@@ -173,7 +174,7 @@ class TestSchedulerGenIteration:
         """At 03:00 the most recent due slot is yesterday's 17:00."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=0):
+        with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.OK):
             await _scheduler_gen_iteration(
                 coordinator, store, settings, [5, 17],
                 now=datetime(2026, 8, 16, 3, 0, tzinfo=TZ),
@@ -186,7 +187,7 @@ class TestSchedulerGenIteration:
         """Retention runs on success, failure, no-progress, and exception."""
         coordinator = JobCoordinator(store, settings)
 
-        for gen_result in (0, 1, 3):
+        for gen_result in (Outcome.OK, Outcome.FAILED, Outcome.NOTHING_TO_DO):
             fresh = MockSettings()  # unconsumed slot each round
             with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=gen_result):
                 with patch("newsbot.main._run_retention") as mock_ret:
@@ -213,10 +214,10 @@ class TestSchedulerPostIteration:
     async def test_success_consumes_slot(self, store, settings):
         coordinator = JobCoordinator(store, settings)
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=0):
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
             result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 0
+        assert result == Outcome.OK
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T14"
 
     @pytest.mark.asyncio
@@ -224,12 +225,12 @@ class TestSchedulerPostIteration:
         """Odd hours have no post slot — idle, nothing invoked."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=0) as mock_deliver:
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(
                 coordinator, settings, now=NOW.replace(hour=13),
             )
 
-        assert result == 0
+        assert result == Outcome.OK
         assert not mock_deliver.called
         assert settings.get("scheduler", "last_post_slot", default="") == ""
 
@@ -238,10 +239,10 @@ class TestSchedulerPostIteration:
         coordinator = JobCoordinator(store, settings)
         settings.set("scheduler", "last_post_slot", "2026-08-16T14")
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=0) as mock_deliver:
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 0
+        assert result == Outcome.OK
         assert not mock_deliver.called
 
     @pytest.mark.asyncio
@@ -249,10 +250,10 @@ class TestSchedulerPostIteration:
         """Failure (1) → retry within the hour; slot not consumed."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=1):
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.FAILED):
             result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_post_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -263,7 +264,7 @@ class TestSchedulerPostIteration:
 
         result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 2
+        assert result == Outcome.BUSY
         assert settings.get("scheduler", "last_post_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -273,7 +274,7 @@ class TestSchedulerPostIteration:
 
         result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 3
+        assert result == Outcome.NOTHING_TO_DO
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T14"
 
     @pytest.mark.asyncio
@@ -281,10 +282,10 @@ class TestSchedulerPostIteration:
         """Code 4 (nothing hot enough) consumes the slot — healthy skip."""
         coordinator = JobCoordinator(store, settings)
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=4):
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.BELOW_THRESHOLD):
             result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 4
+        assert result == Outcome.BELOW_THRESHOLD
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T14"
 
     @pytest.mark.asyncio
@@ -297,7 +298,7 @@ class TestSchedulerPostIteration:
         with patch.object(coordinator, "_deliver_one", side_effect=exploding_deliver):
             result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 1
+        assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_post_slot", default="") == ""
 
     @pytest.mark.asyncio
@@ -308,15 +309,15 @@ class TestSchedulerPostIteration:
         coordinator = JobCoordinator(store, settings)
 
         # now = 15:30 odd hour → idle even though 14:00 slot was never consumed.
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=0) as mock_deliver:
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(
                 coordinator, settings, now=NOW.replace(hour=15),
             )
-        assert result == 0
+        assert result == Outcome.OK
         assert not mock_deliver.called
 
         # next even hour fires exactly once, for the new slot.
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=0):
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
             await _scheduler_post_iteration(
                 coordinator, settings, now=NOW.replace(hour=16),
             )
@@ -328,10 +329,10 @@ class TestSchedulerPostIteration:
         coordinator = JobCoordinator(store, settings)
         settings.set("scheduler", "last_post_slot", "2026-08-16T14")
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=0) as mock_deliver:
+        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
 
-        assert result == 0
+        assert result == Outcome.OK
         assert not mock_deliver.called
 
 
@@ -437,4 +438,4 @@ class TestMarkPostedFailure:
                 result = await coordinator._deliver_one()
 
         # Delivery succeeded but bookkeeping failed → report failure.
-        assert result == 1
+        assert result == Outcome.FAILED

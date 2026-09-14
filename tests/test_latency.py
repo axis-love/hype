@@ -119,6 +119,7 @@ class TestSafeTimeout:
     async def test_generation_timeout_returns_failure(self):
         """Generation timeout should return 1 (failure), not hang."""
         from newsbot.jobs import JobCoordinator
+        from newsbot.outcome import Outcome
         from pathlib import Path
         from newsbot.db import NewsStore
 
@@ -131,10 +132,10 @@ class TestSafeTimeout:
 
         async def slow_gen():
             await asyncio.sleep(100)
-            return 0
+            return Outcome.OK
 
         result = await coordinator.run_generation(slow_gen, timeout=0.05)
-        assert result == 1  # timeout = failure
+        assert result == Outcome.FAILED  # timeout = failure
 
     @pytest.mark.asyncio
     async def test_collector_semaphore_bounds_concurrency(self):

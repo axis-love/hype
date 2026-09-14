@@ -41,7 +41,7 @@ from core.log_sanitizer import redact_exception
 from core.settings_store import SettingsStore, default_store
 from lm_client import LMClient
 
-from newsbot.bot_commands import BotCommandHandler
+from newsbot.bot_commands import BotCommandHandler, outcome_message
 from newsbot.api import start_api
 from newsbot.clock import gen_slots, latest_due_gen_slot, local_now, post_slot, summary_day, DEFAULT_GEN_HOURS
 from newsbot.collectors import (
@@ -74,6 +74,7 @@ from newsbot.jobs import (
     _row_to_styler_input,
     format_post_message,
 )
+from newsbot.outcome import Outcome
 from newsbot.images import extract_article_media
 from newsbot.richmd import render_post, render_post_blocks, render_recap, signature_for
 from newsbot.selection import select_diverse_candidates, select_for_consumer
@@ -422,7 +423,7 @@ def _swap_reddit_link_post_url(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
+async def _run_generation(store: NewsStore, settings: SettingsStore) -> Outcome:
     """Generation cycle: collect → filter → score → LLM filter → store.
 
     v2 additive pipeline: digest fills the store with RAW scored stories
@@ -431,11 +432,11 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     keeps any merges already applied; nothing is ever bulk-deleted.
 
     Returns:
-        0 — success: store updated (rows appended and/or merged), survivors
+        OK — success: store updated (rows appended and/or merged), survivors
             marked seen. Empty appends with non-empty merges still count
             as success.
-        1 — failure: an error occurred (DB, LLM exception, etc.).
-        3 — no-progress: nothing to do (empty collection, all seen, LLM
+        FAILED — an error occurred (DB, LLM exception, etc.).
+        NOTHING_TO_DO — nothing to do (empty collection, all seen, LLM
             filter empty). Distinct from success so the scheduler can
             decide whether to advance the timestamp.
     """
@@ -446,7 +447,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
     pipeline = await _run_generation_pipeline(store, cfg)
     if pipeline is None:
         log.warning("generation pipeline produced nothing; keeping existing queue")
-        return 3
+        return Outcome.NOTHING_TO_DO
 
     log.info(
         "generation funnel: collected %d → unseen %d → deduped %d → above_min %d → filter %d → kept %d → final %d",
@@ -519,7 +520,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
         inserted = store.add_stories_to_store(to_add, seen_items=seen_items)
     except sqlite3.Error as exc:
         log.error("additive store insert failed: %s — merges already applied", exc)
-        return 1
+        return Outcome.FAILED
     log.info("appended %d raw stories (%d merged into existing rows)", inserted, len(merges))
 
     # 11. Eviction: trim the store back to NEWS_STORE_CAP, coldest first.
@@ -538,7 +539,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> int:
             title = next((r["title"] for r in post_rows if r["id"] == tid), "?")
             log.info("evicted coldest row %d (%s, temp=%.2f)", tid, title, t)
 
-    return 0
+    return Outcome.OK
 
 
 def _run_retention(store: NewsStore) -> None:
@@ -606,13 +607,13 @@ def _format_recap_input_sheet(items: list[dict[str, Any] | Candidate]) -> str:
     return "\n".join(lines)
 
 
-async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime) -> int:
+async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime) -> Outcome:
     """Build and deliver the daily recap of the last 24h of posted news.
 
     Returns:
-        0 — summary generated, delivered, and recorded.
-        1 — failure (LLM or delivery) — day NOT consumed, retry next tick.
-        3 — skipped: nothing posted in the window. Day IS consumed —
+        OK — summary generated, delivered, and recorded.
+        FAILED — LLM or delivery failure — day NOT consumed, retry next tick.
+        NOTHING_TO_DO — nothing posted in the window. Day IS consumed —
             there is nothing to recap and retrying would be pointless.
     """
     day = summary_day(now)
@@ -620,7 +621,7 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
     rows = store.list_posted_since("telegram", since_utc)
     if not rows:
         log.info("daily summary: no posts in the last 24h — skipping day %s", day)
-        return 3
+        return Outcome.NOTHING_TO_DO
 
     cfg = load_config(settings)
     items = _recap_input_items(rows)
@@ -631,10 +632,10 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         )
     except Exception as exc:
         log.error("daily summary LLM call failed: %s", redact_exception(exc))
-        return 1
+        return Outcome.FAILED
     if not result:
         log.error("daily summary LLM returned nothing — will retry")
-        return 1
+        return Outcome.FAILED
 
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
@@ -660,17 +661,17 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
                 await post_digest(html_fallback, bot_token=bot_token, chat_id=chat_id)
             except Exception as exc:
                 log.error("daily summary HTML fallback also failed — will retry: %s", redact_exception(exc))
-                return 1
+                return Outcome.FAILED
         except Exception as exc:
             log.error("daily summary delivery failed — will retry: %s", redact_exception(exc))
-            return 1
+            return Outcome.FAILED
 
     try:
         store.add_summary(day, markdown, os.getenv("LM_MODEL", ""), len(items))
     except Exception as db_exc:
         # day UNIQUE constraint fires on a re-delivery — not an error for us.
         log.warning("daily summary already recorded for %s: %s", day, redact_exception(db_exc))
-    return 0
+    return Outcome.OK
 
 
 async def _scheduler_summary_iteration(
@@ -679,7 +680,7 @@ async def _scheduler_summary_iteration(
     settings: SettingsStore,
     *,
     now: datetime | None = None,
-) -> int:
+) -> Outcome:
     """One iteration of the daily summary scheduler.
 
     Fires once per local day, the first tick at or after 13:00.
@@ -690,18 +691,18 @@ async def _scheduler_summary_iteration(
     if now is None:
         now = local_now()
     if now.hour < 13:
-        return 0  # not yet
+        return Outcome.OK  # not yet
 
     day = summary_day(now)
     last_summary_day = settings.get("scheduler", "last_summary_day", default="") or ""
     if last_summary_day == day:
-        return 0  # already ran today
+        return Outcome.OK  # already ran today
 
     result = await coordinator.run_summary(lambda: _run_summary(store, settings, now))
-    if result in (0, 3):
+    if result is Outcome.OK or result is Outcome.NOTHING_TO_DO:
         settings.set("scheduler", "last_summary_day", day)
     else:
-        log.warning("daily summary did not succeed (code=%d) — will retry for day %s", result, day)
+        log.warning("daily summary did not succeed (%s) — will retry for day %s", result, day)
     return result
 
 
@@ -980,7 +981,7 @@ async def _scheduler_gen_iteration(
     *,
     now: datetime | None = None,
     timeout: float = 0,
-) -> int:
+) -> Outcome:
     """One iteration of the wall-clock generation scheduler.
 
     Slot-based: ``NEWS_GEN_HOURS`` names the hours (local wall clock) when a
@@ -993,10 +994,10 @@ async def _scheduler_gen_iteration(
     unset so the next tick retries the same slot.
 
     Returns:
-        0 — idle (slot already consumed) or success.
-        1 — generation failed, slot NOT consumed.
-        2 — generation skipped (already running), slot NOT consumed.
-        3 — generation no-progress, slot NOT consumed.
+        OK — idle (slot already consumed) or success.
+        FAILED — generation failed, slot NOT consumed.
+        BUSY — generation skipped (already running), slot NOT consumed.
+        NOTHING_TO_DO — generation no-progress, slot NOT consumed.
 
     Runs retention cleanup regardless of outcome.
     """
@@ -1006,24 +1007,24 @@ async def _scheduler_gen_iteration(
     last_gen_slot = settings.get("scheduler", "last_gen_slot", default="") or ""
 
     if last_gen_slot == due_slot:
-        return 0  # this slot already ran — idle
+        return Outcome.OK  # this slot already ran — idle
 
     log.info("generation cycle starting (slot=%s, now=%s)", due_slot, now.isoformat())
     gen_success = False
-    result = 1
+    result = Outcome.FAILED
     try:
         result = await coordinator.run_generation(
             lambda: _run_generation(store, settings),
             timeout=timeout,
         )
-        if result == 0:
+        if result is Outcome.OK:
             gen_success = True
-        elif result == 2:
+        elif result is Outcome.BUSY:
             log.info("generation skipped — already in progress")
-        elif result == 3:
+        elif result is Outcome.NOTHING_TO_DO:
             log.info("generation no-progress — will retry on next tick")
         else:
-            log.error("generation failed (code=%d)", result)
+            log.error("generation failed (%s)", result)
     except Exception as exc:
         log.error("generation cycle failed: %s", redact_exception(exc))
     finally:
@@ -1036,7 +1037,7 @@ async def _scheduler_gen_iteration(
     else:
         log.warning("generation did not succeed — will retry slot %s on next tick", due_slot)
 
-    return 0 if gen_success else result
+    return Outcome.OK if gen_success else result
 
 
 async def _scheduler_post_iteration(
@@ -1044,43 +1045,41 @@ async def _scheduler_post_iteration(
     settings: SettingsStore,
     *,
     now: datetime | None = None,
-) -> int:
+) -> Outcome:
     """One iteration of the wall-clock posting scheduler.
 
     Slot-based: post slots fall on even hours (local wall clock), key
     ``YYYY-MM-DDTHH``. Never backfills: a slot missed during downtime is
     gone once the hour ends. Consuming the slot:
 
-        success (0), empty store (3), threshold skip (4) → key written.
-        failure (1) or busy (2) → key NOT written → retry within the hour.
+        OK, NOTHING_TO_DO, BELOW_THRESHOLD → key written.
+        FAILED or BUSY → key NOT written → retry within the hour.
 
-    Returns the coordinator result code unchanged.
+    Returns the coordinator Outcome unchanged.
     """
     if now is None:
         now = local_now()
     slot = post_slot(now)
     if slot is None:
-        return 0  # odd hour — no post slot
+        return Outcome.OK  # odd hour — no post slot
 
     last_post_slot = settings.get("scheduler", "last_post_slot", default="") or ""
     if last_post_slot == slot:
-        return 0  # this slot already ran — idle
+        return Outcome.OK  # this slot already ran — idle
 
     post_success = False
-    result = 1
+    result = Outcome.FAILED
     try:
         result = await coordinator.run_posting()
-        if result == 0:
+        if result.consumes_slot:
             post_success = True
-        elif result == 2:
+            if result is not Outcome.OK:
+                # Empty store / nothing hot enough — a healthy slot skip.
+                log.debug("posting slot %s consumed by skip (%s)", slot, result)
+        elif result is Outcome.BUSY:
             log.info("posting skipped — already in progress")
-        elif result in (3, 4):
-            # Empty store / nothing hot enough — a healthy slot skip. The
-            # slot IS consumed (no retry storm; cadence preserved).
-            post_success = True
-            log.debug("posting slot %s consumed by skip (code=%d)", slot, result)
         else:
-            log.error("posting failed (code=%d)", result)
+            log.error("posting failed (%s)", result)
     except Exception as exc:
         log.error("posting cycle failed: %s", redact_exception(exc))
 
@@ -1122,12 +1121,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             )
             # Run retention after manual /digest too (same as scheduled).
             _run_retention(store)
-            if result == 2:
-                raise RuntimeError("generation already in progress — skipped")
-            if result == 3:
-                raise RuntimeError("no new posts generated (empty collection, all seen, or LLM returned nothing)")
-            if result == 1:
-                raise RuntimeError("generation failed — check logs for details")
+            msg = outcome_message("digest", result)
+            if msg:
+                raise RuntimeError(msg)
 
         async def on_digest_dry() -> str:
             """Dry-run: run the pipeline through the generation lock, no DB writes."""
@@ -1155,24 +1151,19 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             async def _dry_wrapped():
                 r = await _dry_run()
                 dry_result.append(r)
-                return 0
+                return Outcome.OK
             rc = await coordinator.run_generation(_dry_wrapped, timeout=GENERATION_TIMEOUT_SECONDS)
-            if rc == 2:
-                raise RuntimeError("generation already in progress — skipped")
+            if rc is Outcome.BUSY:
+                raise RuntimeError(outcome_message("digest", rc) or "generation already in progress — skipped")
             if dry_result:
                 return dry_result[0]
             return "Dry-run: no result returned."
 
         async def on_post() -> None:
             result = await coordinator.run_posting()
-            if result == 2:
-                raise RuntimeError("posting already in progress — skipped")
-            if result == 3:
-                raise RuntimeError("no pending posts to deliver")
-            if result == 4:
-                raise RuntimeError("nothing hot enough to post right now")
-            if result == 1:
-                raise RuntimeError("posting failed — check logs for details")
+            msg = outcome_message("post", result)
+            if msg:
+                raise RuntimeError(msg)
 
         async def on_status() -> str:
             cfg = load_config(settings)
@@ -1213,12 +1204,9 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
 
         async def on_summary() -> None:
             result = await coordinator.run_summary(lambda: _run_summary(store, settings, local_now()))
-            if result == 2:
-                raise RuntimeError("summary already in progress — skipped")
-            if result == 3:
-                raise RuntimeError("nothing posted in the last 24h — nothing to recap")
-            if result == 1:
-                raise RuntimeError("daily recap failed — check logs for details")
+            msg = outcome_message("summary", result)
+            if msg:
+                raise RuntimeError(msg)
 
         async def on_preview() -> tuple[str, str, list[dict[str, Any]] | None]:
             """Style the hottest store story for a DM preview.
@@ -1410,14 +1398,12 @@ def main() -> None:
             )
             # Run retention even on no-progress or failure.
             _run_retention(store)
-            # Only drain if generation succeeded (result 0).
-            # No-progress (3) or failure (1) should not proceed to drain —
-            # the old queue is intact and draining it would report false success.
-            if result == 0:
-                return await coordinator.drain_posts()
-            # Return the generation result code — do not drain.
-            # No-progress (3) is not an error exit code, but also not a drain success.
-            return 1 if result == 1 else 0
+            # Only drain if generation succeeded. No-progress or failure
+            # should not proceed to drain — the old queue is intact.
+            if result is Outcome.OK:
+                result = await coordinator.drain_posts()
+                return result.exit_code
+            return result.exit_code if result is Outcome.FAILED else 0
 
         try:
             code = asyncio.run(_once())
@@ -1437,11 +1423,12 @@ def main() -> None:
                 timeout=GENERATION_TIMEOUT_SECONDS,
             )
             _run_retention(store)
-            # Only drain if generation succeeded (result 0).
-            # No-progress (3) or failure (1) should not drain the old queue.
-            if result == 0:
-                return await coordinator.drain_posts()
-            return 1 if result == 1 else 0
+            # Only drain if generation succeeded.
+            # No-progress or failure should not drain the old queue.
+            if result is Outcome.OK:
+                result = await coordinator.drain_posts()
+                return result.exit_code
+            return result.exit_code if result is Outcome.FAILED else 0
 
         try:
             code = asyncio.run(_dry())
