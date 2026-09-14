@@ -21,7 +21,7 @@ def scored_story(title: str, engagement: float, *, hours_old: float = 1.0) -> di
     recalc uses wall-clock now, so a frozen date here would decay the rows
     a little more every real day until they fall below the posting
     threshold and the tests rot. Tests that need exact temperatures freeze
-    newsbot.jobs.datetime instead (see test_posting_gate).
+ newsbot.poster.datetime instead (see test_posting_gate).
     """
     now = datetime.now(timezone.utc)
     published = (now - timedelta(hours=hours_old)).isoformat(timespec="seconds")
@@ -76,3 +76,45 @@ def insert_story(store: Any, title: str = "T", url: str = "", **kwargs: Any) -> 
         "SELECT id FROM pending_posts ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return int(row["id"])
+
+
+async def coord_gen(coord, fn, timeout: float = 0):
+    """run_exclusive(GENERATION) with Busy/timeout mapped to Outcome."""
+    import asyncio
+
+    from newsbot.jobs import Busy, JobKind
+    from newsbot.outcome import Outcome
+
+    try:
+        result = await coord.run_exclusive(JobKind.GENERATION, fn, timeout=timeout)
+    except Busy:
+        return Outcome.BUSY
+    except asyncio.TimeoutError:
+        return Outcome.FAILED
+    return result if result is not None else Outcome.OK
+
+
+async def coord_post(coord, store, settings):
+    from newsbot.jobs import Busy, JobKind
+    from newsbot.outcome import Outcome
+    from newsbot.poster import deliver_one
+
+    try:
+        return await coord.run_exclusive(
+            JobKind.POSTING, lambda: deliver_one(store, settings)
+        )
+    except Busy:
+        return Outcome.BUSY
+
+
+async def coord_drain(coord, store, settings):
+    from newsbot.jobs import Busy, JobKind
+    from newsbot.outcome import Outcome
+    from newsbot.poster import drain
+
+    try:
+        return await coord.run_exclusive(
+            JobKind.POSTING, lambda: drain(store, settings)
+        )
+    except Busy:
+        return Outcome.BUSY

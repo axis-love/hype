@@ -29,6 +29,7 @@ from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
 from newsbot.outcome import Outcome
 from newsbot.selection import PickResult, pick_hottest
+from tests.helpers import coord_post
 
 
 def _mark_posted(store: NewsStore, row_id: int, posted_at: str) -> None:
@@ -193,7 +194,7 @@ def settings():
 
 @pytest.fixture
 def coordinator(store, settings) -> JobCoordinator:
-    return JobCoordinator(store, settings)
+    return JobCoordinator()
 
 
 class _frozen_dt:
@@ -213,10 +214,10 @@ class TestTopicCooldown:
     """AC 2: jobs-level test with stubbed store."""
 
     @pytest.mark.asyncio
-    async def test_fourth_gaming_row_not_picked(self, coordinator, store, monkeypatch):
+    async def test_fourth_gaming_row_not_picked(self, coordinator, store, settings, monkeypatch):
         """3 gaming posts within 24h + NEWS_TOPIC_COOLDOWN_MAX=3 -> 4th
         gaming row excluded, colder non-gaming row picked instead."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(COOLDOWN_NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(COOLDOWN_NOW))
         monkeypatch.setenv("NEWS_TOPIC_COOLDOWN_MAX", "3")
 
         # Insert 3 gaming stories and mark them posted within 24h.
@@ -238,11 +239,11 @@ class TestTopicCooldown:
             picked.append(items[0].get("title"))
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            result = await coordinator.run_posting()
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         # Gaming4 must NOT be picked (3 gaming posts in 24h, cooldown=3).
@@ -250,9 +251,9 @@ class TestTopicCooldown:
         assert picked == ["AI News"], f"expected AI News picked, got {picked}"
 
     @pytest.mark.asyncio
-    async def test_posts_older_than_24h_dont_count(self, coordinator, store, monkeypatch):
+    async def test_posts_older_than_24h_dont_count(self, coordinator, store, settings, monkeypatch):
         """Posts older than 24h should not count toward cooldown."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(COOLDOWN_NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(COOLDOWN_NOW))
         monkeypatch.setenv("NEWS_TOPIC_COOLDOWN_MAX", "3")
 
         # Insert 3 gaming stories posted > 24h ago.
@@ -273,20 +274,20 @@ class TestTopicCooldown:
             picked.append(items[0].get("title"))
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            result = await coordinator.run_posting()
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert picked == ["FreshGaming"], \
             "old posts (>24h) should not trigger cooldown"
 
     @pytest.mark.asyncio
-    async def test_null_origin_topic_unaffected(self, coordinator, store, monkeypatch):
+    async def test_null_origin_topic_unaffected(self, coordinator, store, settings, monkeypatch):
         """Rows with NULL/empty origin_topic are never excluded."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(COOLDOWN_NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(COOLDOWN_NOW))
         monkeypatch.setenv("NEWS_TOPIC_COOLDOWN_MAX", "1")
 
         # Insert a gaming post within 24h (cooldown=1 means 1 post blocks).
@@ -307,20 +308,20 @@ class TestTopicCooldown:
             picked.append(items[0].get("title"))
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            result = await coordinator.run_posting()
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         # NULL-topic row must NOT be excluded (it's the hottest at 90).
         assert picked == ["Null Topic Hot"]
 
     @pytest.mark.asyncio
-    async def test_cooldown_zero_disables(self, coordinator, store, monkeypatch):
+    async def test_cooldown_zero_disables(self, coordinator, store, settings, monkeypatch):
         """NEWS_TOPIC_COOLDOWN_MAX=0 disables the filter."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(COOLDOWN_NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(COOLDOWN_NOW))
         monkeypatch.setenv("NEWS_TOPIC_COOLDOWN_MAX", "0")
 
         # Insert 5 gaming posts within 24h.
@@ -341,11 +342,11 @@ class TestTopicCooldown:
             picked.append(items[0].get("title"))
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            result = await coordinator.run_posting()
+            result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert picked == ["FreshGaming"], \
@@ -386,9 +387,9 @@ class TestCooldownLogging:
     """AC 4: post_pick/post_skip log events carry the cooldown-excluded count."""
 
     @pytest.mark.asyncio
-    async def test_post_pick_has_cooldown_excluded(self, coordinator, store, monkeypatch, caplog):
+    async def test_post_pick_has_cooldown_excluded(self, coordinator, store, settings, monkeypatch, caplog):
         """post_pick log event must include cooldown_excluded field."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(COOLDOWN_NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(COOLDOWN_NOW))
         monkeypatch.setenv("NEWS_TOPIC_COOLDOWN_MAX", "3")
 
         # 3 gaming posts within 24h.
@@ -409,12 +410,12 @@ class TestCooldownLogging:
         async def fake_style(items, lm, **kw):
             return [{"title": "S", "body": "B"}]
 
-        with patch("newsbot.jobs.llm_style_posts", new=fake_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=fake_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            with caplog.at_level(logging.INFO, logger="newsbot.jobs"):
-                await coordinator.run_posting()
+            with caplog.at_level(logging.INFO, logger="newsbot.poster"):
+                await coord_post(coordinator, store, settings)
 
         # Find the post_pick log event.
         pick_events = [
@@ -427,9 +428,9 @@ class TestCooldownLogging:
             "at least 1 gaming row should be cooldown-excluded"
 
     @pytest.mark.asyncio
-    async def test_post_skip_has_cooldown_excluded(self, coordinator, store, monkeypatch, caplog):
+    async def test_post_skip_has_cooldown_excluded(self, coordinator, store, settings, monkeypatch, caplog):
         """post_skip log event must include cooldown_excluded field."""
-        monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(COOLDOWN_NOW))
+        monkeypatch.setattr("newsbot.poster.datetime", _frozen_dt(COOLDOWN_NOW))
         monkeypatch.setenv("NEWS_TOPIC_COOLDOWN_MAX", "1")
 
         # 1 gaming post within 24h (cooldown=1 means 1 blocks).
@@ -447,12 +448,12 @@ class TestCooldownLogging:
         gaming_hot = _scored_story_topic("Gaming Hot", 90.0, topic="gaming")
         store.add_stories_to_store([gaming_hot], [])
 
-        with patch("newsbot.jobs.llm_style_posts", new=AsyncMock()), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=AsyncMock()), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            with caplog.at_level(logging.INFO, logger="newsbot.jobs"):
-                await coordinator.run_posting()
+            with caplog.at_level(logging.INFO, logger="newsbot.poster"):
+                await coord_post(coordinator, store, settings)
 
         skip_events = [
             json.loads(r.message) for r in caplog.records

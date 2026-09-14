@@ -67,7 +67,7 @@ class TestScoreCandidateLogJSON:
                 records.append(record)
 
         handler = CaptureHandler()
-        logger = logging.getLogger("newsbot.main")
+        logger = logging.getLogger("newsbot.generation")
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
@@ -395,7 +395,7 @@ class TestRunGenerationIntegration:
     async def test_generation_logs_score_candidates(self, monkeypatch):
         """_run_generation must produce score_candidate JSON log lines for each candidate."""
         import os
-        from newsbot.main import _run_generation
+        from newsbot.generation import _run_generation
 
         # Build a minimal settings mock
         settings = MagicMock()
@@ -418,8 +418,8 @@ class TestRunGenerationIntegration:
             "style_prompt": "",
         }
 
-        monkeypatch.setattr("newsbot.main.load_config", lambda s: mock_cfg)
-        monkeypatch.setattr("newsbot.main._set_pre_merge_weights", lambda w: None)
+        monkeypatch.setattr("newsbot.generation.load_config", lambda s: mock_cfg)
+        monkeypatch.setattr("newsbot.generation._set_pre_merge_weights", lambda w: None)
 
         # Mock collect_all to return TWO items with tricky titles
         long_title = "A" * 200
@@ -431,12 +431,12 @@ class TestRunGenerationIntegration:
                 {"title": long_title, "url": "https://example.com/gpu", "source": "hn",
                  "source_name": "Hacker News", "upvotes": 300, "published_at": "2026-07-28T09:00:00+00:00"},
             ]
-        monkeypatch.setattr("newsbot.main.collect_all", mock_collect_all)
+        monkeypatch.setattr("newsbot.generation.collect_all", mock_collect_all)
 
         # Mock filter_seen to pass through
-        monkeypatch.setattr("newsbot.main.filter_seen", lambda items, store: items)
+        monkeypatch.setattr("newsbot.generation.filter_seen", lambda items, store: items)
         # Mock dedupe
-        monkeypatch.setattr("newsbot.main.dedupe_and_merge", lambda items: items)
+        monkeypatch.setattr("newsbot.generation.dedupe_and_merge", lambda items: items)
 
         # Mock store
         store = MagicMock()
@@ -455,10 +455,10 @@ class TestRunGenerationIntegration:
                     ]
                 }), {"model": "test"}
 
-        monkeypatch.setattr("newsbot.main._build_filter_lm_client", lambda: FakeFilterLM())
+        monkeypatch.setattr("newsbot.llm.build_lm_client", lambda *a, **k: FakeFilterLM())
 
         # Mock select_diverse_top_items to return 1 item
-        monkeypatch.setattr("newsbot.main.select_diverse_top_items", lambda items, n: items[:n])
+        monkeypatch.setattr("newsbot.generation.select_diverse_top_items", lambda items, n: items[:n])
 
         # Mock LLM styler
         class FakeStyleLM:
@@ -469,7 +469,7 @@ class TestRunGenerationIntegration:
                     ]
                 }), {"model": "test"}
 
-        monkeypatch.setattr("newsbot.main._build_lm_client", lambda: FakeStyleLM())
+        monkeypatch.setattr("newsbot.llm.build_lm_client", lambda *a, **k: FakeStyleLM())
 
         # Capture log records
         records: list[logging.LogRecord] = []
@@ -479,7 +479,7 @@ class TestRunGenerationIntegration:
                 records.append(record)
 
         handler = CaptureHandler()
-        logger = logging.getLogger("newsbot.main")
+        logger = logging.getLogger("newsbot.generation")
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
@@ -533,7 +533,7 @@ class TestRunGenerationIntegration:
     @pytest.mark.asyncio
     async def test_generation_excludes_non_sent_candidates(self, monkeypatch):
         """Only candidates sent to LLM filter are logged — not all scored items."""
-        from newsbot.main import _run_generation
+        from newsbot.generation import _run_generation
 
         settings = MagicMock()
         settings.get_all.return_value = {}
@@ -554,8 +554,8 @@ class TestRunGenerationIntegration:
             "style_prompt": "",
         }
 
-        monkeypatch.setattr("newsbot.main.load_config", lambda s: mock_cfg)
-        monkeypatch.setattr("newsbot.main._set_pre_merge_weights", lambda w: None)
+        monkeypatch.setattr("newsbot.generation.load_config", lambda s: mock_cfg)
+        monkeypatch.setattr("newsbot.generation._set_pre_merge_weights", lambda w: None)
 
         async def mock_collect_all(cfg):
             return [
@@ -564,9 +564,9 @@ class TestRunGenerationIntegration:
                 {"title": "Low Score", "url": "https://example.com/l", "source": "hn",
                  "source_name": "HN", "upvotes": 1, "published_at": "2026-07-28T10:00:00+00:00"},
             ]
-        monkeypatch.setattr("newsbot.main.collect_all", mock_collect_all)
-        monkeypatch.setattr("newsbot.main.filter_seen", lambda items, store: items)
-        monkeypatch.setattr("newsbot.main.dedupe_and_merge", lambda items: items)
+        monkeypatch.setattr("newsbot.generation.collect_all", mock_collect_all)
+        monkeypatch.setattr("newsbot.generation.filter_seen", lambda items, store: items)
+        monkeypatch.setattr("newsbot.generation.dedupe_and_merge", lambda items: items)
 
         store = MagicMock()
         store.is_seen_batch.return_value = set()
@@ -581,13 +581,13 @@ class TestRunGenerationIntegration:
                     ]
                 }), {"model": "test"}
 
-        monkeypatch.setattr("newsbot.main._build_filter_lm_client", lambda: FakeFilterLM())
-        monkeypatch.setattr("newsbot.main.select_diverse_top_items", lambda items, n: items[:n])
+        monkeypatch.setattr("newsbot.llm.build_lm_client", lambda *a, **k: FakeFilterLM())
+        monkeypatch.setattr("newsbot.generation.select_diverse_top_items", lambda items, n: items[:n])
 
         class FakeStyleLM:
             async def generate(self, messages, **kwargs):
                 return json.dumps({"posts": [{"id": "c001", "title": "H", "body": "b"}]}), {"model": "test"}
-        monkeypatch.setattr("newsbot.main._build_lm_client", lambda: FakeStyleLM())
+        monkeypatch.setattr("newsbot.llm.build_lm_client", lambda *a, **k: FakeStyleLM())
 
         records: list[logging.LogRecord] = []
 
@@ -596,7 +596,7 @@ class TestRunGenerationIntegration:
                 records.append(record)
 
         handler = CaptureHandler()
-        logger = logging.getLogger("newsbot.main")
+        logger = logging.getLogger("newsbot.generation")
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 

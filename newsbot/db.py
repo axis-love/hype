@@ -846,7 +846,7 @@ class NewsStore:
 
     def merge_into_store_row(
         self, row_id: int, candidate: Candidate, extra_urls: str | list[str]
-    ) -> None:
+    ) -> int:
         """Merge a duplicate candidate into an existing store row.
 
         merge_count += 1 (exactly once, regardless of how many URLs are
@@ -978,6 +978,7 @@ class NewsStore:
                 row_id,
             ),
         )
+        return int(row["merge_count"]) + 1
 
     def evict_coldest(self, temps: dict[int, float], cap: int) -> int:
         """Delete undelivered rows with the lowest temperatures until count <= cap.
@@ -1097,6 +1098,15 @@ class NewsStore:
         row = self._conn.execute(
             f"SELECT {self._STORE_SELECT} FROM pending_posts WHERE id=?",
             (row_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_delivery(self, post_id: int, channel: str) -> dict[str, Any] | None:
+        """Return one deliveries row for (post_id, channel), or None."""
+        row = self._conn.execute(
+            "SELECT styled_title, styled_body, message_id, delivered_at, external_ref "
+            "FROM deliveries WHERE post_id=? AND channel=?",
+            (post_id, channel),
         ).fetchone()
         return dict(row) if row else None
 

@@ -19,9 +19,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from newsbot.db import NewsStore
-from newsbot.jobs import JobCoordinator
+from newsbot.jobs import JobCoordinator, JobKind
 from newsbot.main import _scheduler_gen_iteration, _scheduler_post_iteration
 from newsbot.outcome import Outcome
+from newsbot.poster import deliver_one
 from tests.helpers import insert_story
 
 TZ = ZoneInfo("Asia/Bangkok")
@@ -55,7 +56,7 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_success_consumes_due_slot(self, store, settings):
         """Success writes scheduler.last_gen_slot = the due slot."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.OK):
             result = await _scheduler_gen_iteration(
@@ -69,7 +70,7 @@ class TestSchedulerGenIteration:
     async def test_second_tick_same_slot_is_idle(self, store, settings):
         """Once the slot is consumed, further ticks within the slot are idle
         and do NOT invoke generation."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         settings.set("scheduler", "last_gen_slot", "2026-08-16T05")
 
         called = False
@@ -90,7 +91,7 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_failure_leaves_slot_unconsumed(self, store, settings):
         """Failure leaves the slot unconsumed so the next tick retries."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.FAILED):
             result = await _scheduler_gen_iteration(
@@ -103,7 +104,7 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_no_progress_leaves_slot_unconsumed(self, store, settings):
         """No-progress (3) leaves the slot unconsumed."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.NOTHING_TO_DO):
             result = await _scheduler_gen_iteration(
@@ -116,8 +117,8 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_busy_leaves_slot_unconsumed(self, store, settings):
         """Already-running generation (2) leaves the slot unconsumed."""
-        coordinator = JobCoordinator(store, settings)
-        coordinator._gen_running = True
+        coordinator = JobCoordinator()
+        coordinator._running[JobKind.GENERATION] = True
 
         result = await _scheduler_gen_iteration(
             coordinator, store, settings, [5, 17], now=NOW,
@@ -129,7 +130,7 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_exception_leaves_slot_unconsumed(self, store, settings):
         """An exception counts as failure — slot unconsumed."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         async def exploding_gen(*args):
             raise RuntimeError("LLM down")
@@ -146,7 +147,7 @@ class TestSchedulerGenIteration:
     async def test_catch_up_after_downtime(self, store, settings):
         """last_gen_slot two days old + now=14:00 → gen fires ONCE for
         today's 05 slot (the most recent due slot), not for every missed one."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         settings.set("scheduler", "last_gen_slot", "2026-08-14T17")
 
         runs = 0
@@ -172,7 +173,7 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_before_first_gen_hour_due_slot_is_yesterday(self, store, settings):
         """At 03:00 the most recent due slot is yesterday's 17:00."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         with patch("newsbot.main._run_generation", new_callable=AsyncMock, return_value=Outcome.OK):
             await _scheduler_gen_iteration(
@@ -185,7 +186,7 @@ class TestSchedulerGenIteration:
     @pytest.mark.asyncio
     async def test_retention_runs_on_every_outcome(self, store, settings):
         """Retention runs on success, failure, no-progress, and exception."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         for gen_result in (Outcome.OK, Outcome.FAILED, Outcome.NOTHING_TO_DO):
             fresh = MockSettings()  # unconsumed slot each round
@@ -212,10 +213,10 @@ class TestSchedulerPostIteration:
 
     @pytest.mark.asyncio
     async def test_success_consumes_slot(self, store, settings):
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
-            result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
+            result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.OK
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T14"
@@ -223,11 +224,11 @@ class TestSchedulerPostIteration:
     @pytest.mark.asyncio
     async def test_odd_hour_is_idle(self, store, settings):
         """Odd hours have no post slot — idle, nothing invoked."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(
-                coordinator, settings, now=NOW.replace(hour=13),
+                coordinator, store, settings, now=NOW.replace(hour=13),
             )
 
         assert result == Outcome.OK
@@ -236,11 +237,11 @@ class TestSchedulerPostIteration:
 
     @pytest.mark.asyncio
     async def test_second_tick_same_slot_is_idle(self, store, settings):
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         settings.set("scheduler", "last_post_slot", "2026-08-16T14")
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
-            result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+            result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.OK
         assert not mock_deliver.called
@@ -248,10 +249,10 @@ class TestSchedulerPostIteration:
     @pytest.mark.asyncio
     async def test_failure_leaves_slot_unconsumed(self, store, settings):
         """Failure (1) → retry within the hour; slot not consumed."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.FAILED):
-            result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.FAILED):
+            result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_post_slot", default="") == ""
@@ -259,10 +260,10 @@ class TestSchedulerPostIteration:
     @pytest.mark.asyncio
     async def test_busy_leaves_slot_unconsumed(self, store, settings):
         """Already posting (2) → slot not consumed."""
-        coordinator = JobCoordinator(store, settings)
-        coordinator._post_running = True
+        coordinator = JobCoordinator()
+        coordinator._running[JobKind.POSTING] = True
 
-        result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.BUSY
         assert settings.get("scheduler", "last_post_slot", default="") == ""
@@ -270,9 +271,9 @@ class TestSchedulerPostIteration:
     @pytest.mark.asyncio
     async def test_empty_store_consumes_slot(self, store, settings):
         """Code 3 (nothing to deliver) consumes the slot — healthy skip."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
-        result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.NOTHING_TO_DO
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T14"
@@ -280,23 +281,23 @@ class TestSchedulerPostIteration:
     @pytest.mark.asyncio
     async def test_threshold_skip_consumes_slot(self, store, settings):
         """Code 4 (nothing hot enough) consumes the slot — healthy skip."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.BELOW_THRESHOLD):
-            result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.BELOW_THRESHOLD):
+            result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.BELOW_THRESHOLD
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T14"
 
     @pytest.mark.asyncio
     async def test_exception_leaves_slot_unconsumed(self, store, settings):
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         async def exploding_deliver():
             raise RuntimeError("Telegram down")
 
-        with patch.object(coordinator, "_deliver_one", side_effect=exploding_deliver):
-            result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        with patch("newsbot.poster.deliver_one", side_effect=exploding_deliver):
+            result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.FAILED
         assert settings.get("scheduler", "last_post_slot", default="") == ""
@@ -306,31 +307,31 @@ class TestSchedulerPostIteration:
         """Post slot missed during downtime is NOT backfilled: with no key
         at all and now=15:00 (odd, slot already over), nothing fires; at the
         NEXT even hour exactly the new slot fires — not the missed one."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         # now = 15:30 odd hour → idle even though 14:00 slot was never consumed.
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(
-                coordinator, settings, now=NOW.replace(hour=15),
+                coordinator, store, settings, now=NOW.replace(hour=15),
             )
         assert result == Outcome.OK
         assert not mock_deliver.called
 
         # next even hour fires exactly once, for the new slot.
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
             await _scheduler_post_iteration(
-                coordinator, settings, now=NOW.replace(hour=16),
+                coordinator, store, settings, now=NOW.replace(hour=16),
             )
         assert settings.get("scheduler", "last_post_slot") == "2026-08-16T16"
 
     @pytest.mark.asyncio
     async def test_restart_same_slot_no_double_post(self, store, settings):
         """Restart after a successful post does not refire the same slot."""
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         settings.set("scheduler", "last_post_slot", "2026-08-16T14")
 
-        with patch.object(coordinator, "_deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
-            result = await _scheduler_post_iteration(coordinator, settings, now=NOW)
+        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+            result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.OK
         assert not mock_deliver.called
@@ -362,7 +363,7 @@ class TestRetentionConfigurable:
 
     def test_retention_uses_env_vars(self, tmp_path):
         """_run_retention should read ages from env vars."""
-        from newsbot.main import _run_retention
+        from newsbot.generation import _run_retention
         from newsbot.db import NewsStore
         from datetime import datetime, timezone, timedelta
 
@@ -393,7 +394,7 @@ class TestRetentionConfigurable:
 
     def test_retention_defaults_to_30_14_90(self, tmp_path):
         """_run_retention should use default ages when env vars are not set."""
-        from newsbot.main import _run_retention
+        from newsbot.generation import _run_retention
         from newsbot.db import NewsStore
         from unittest.mock import patch
 
@@ -426,16 +427,16 @@ class TestMarkPostedFailure:
         from tests.helpers import insert_story, scored_story, echo_style
         import sqlite3
 
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
         store.add_stories_to_store([scored_story("T", 90.0)], [])
 
         # Mock post_digest to succeed (dry-run path).
         with patch.dict("os.environ", {"BOT_TOKEN": "", "NEWS_CHANNEL_ID": ""}), \
-             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+             patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             # Mock mark_posted to fail.
             with patch.object(store, "mark_posted", side_effect=sqlite3.OperationalError("disk full")):
-                result = await coordinator._deliver_one()
+                result = await deliver_one(store, settings)
 
         # Delivery succeeded but bookkeeping failed → report failure.
         assert result == Outcome.FAILED

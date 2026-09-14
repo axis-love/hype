@@ -259,7 +259,7 @@ class TestSourceKeyRegistry:
     def test_collectors_keys_match_valid_source_keys(self):
         """The COLLECTORS registry in main.py must have exactly the same keys
         as VALID_SOURCE_KEYS — no hand-sync drift."""
-        from newsbot.main import COLLECTORS
+        from newsbot.generation import COLLECTORS
         from newsbot.collectors.base import VALID_SOURCE_KEYS
         registry_keys = set(COLLECTORS.keys())
         assert registry_keys == set(VALID_SOURCE_KEYS), (

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from newsbot.collectors import github as gh
+from tests.helpers import coord_gen
 
 
 class TestGitHubConcurrentQueries:
@@ -128,19 +129,19 @@ class TestSafeTimeout:
             def set(self, s, k, v): pass
 
         store = NewsStore(Path("/tmp/test_gen_timeout.sqlite"))
-        coordinator = JobCoordinator(store, MockSettings())
+        coordinator = JobCoordinator()
 
         async def slow_gen():
             await asyncio.sleep(100)
             return Outcome.OK
 
-        result = await coordinator.run_generation(slow_gen, timeout=0.05)
+        result = await coord_gen(coordinator, slow_gen, timeout=0.05)
         assert result == Outcome.FAILED  # timeout = failure
 
     @pytest.mark.asyncio
     async def test_collector_semaphore_bounds_concurrency(self):
         """collect_all should use a semaphore to bound concurrent collectors."""
-        from newsbot.main import MAX_CONCURRENT_COLLECTORS
+        from newsbot.generation import MAX_CONCURRENT_COLLECTORS
         assert MAX_CONCURRENT_COLLECTORS <= 20  # reasonable bound
         assert MAX_CONCURRENT_COLLECTORS >= 3   # at least covers source types
 
@@ -186,7 +187,7 @@ def test_collector_registry_entries_expose_collect():
     """H-6: every COLLECTORS entry is a module exposing ``async def collect(config)``."""
     import inspect
 
-    from newsbot.main import COLLECTORS
+    from newsbot.generation import COLLECTORS
 
     assert COLLECTORS, "COLLECTORS registry must not be empty"
     for name, module in COLLECTORS.items():

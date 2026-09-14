@@ -18,7 +18,7 @@ import pytest
 
 from newsbot.config import consumer_profile, _consumer_profiles
 from newsbot.db import NewsStore
-from newsbot.main import _pick_snapshot
+from newsbot.admin_views import _pick_snapshot
 from newsbot.selection import select_for_consumer
 
 

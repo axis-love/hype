@@ -6,6 +6,7 @@ Covers the admin debug surface: /help grouping, /preview and /recap
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -32,6 +33,20 @@ class _FakeSettings:
 
 def _make_handler(**overrides: Any) -> BotCommandHandler:
     kwargs: dict[str, Any] = dict(bot_token="test", admin_user_id="123", settings=None)
+    action_names = (
+        "digest", "digest_dry", "post", "status", "scores",
+        "summary", "store", "preview", "recap_preview",
+    )
+    actions_kw = {}
+    if "actions" in overrides:
+        kwargs["actions"] = overrides.pop("actions")
+    else:
+        for name in action_names:
+            key = f"on_{name}"
+            if key in overrides:
+                actions_kw[name] = overrides.pop(key)
+        if actions_kw:
+            kwargs["actions"] = SimpleNamespace(**actions_kw)
     kwargs.update(overrides)
     return BotCommandHandler(**kwargs)
 

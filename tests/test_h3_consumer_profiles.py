@@ -290,17 +290,18 @@ class TestUnknownConsumer:
         from newsbot.jobs import JobCoordinator
         from core.settings_store import default_store
         from newsbot.config import load_config
+        from newsbot.poster import deliver_one
 
         settings = default_store(str(store.db_path))
-        coordinator = JobCoordinator(store, settings)
+        coordinator = JobCoordinator()
 
         # Patch load_config to return a config without consumers.
         bad_config = load_config(settings)
         bad_config.pop("consumers", None)
-        monkeypatch.setattr("newsbot.jobs.load_config", lambda s: bad_config)
+        monkeypatch.setattr("newsbot.poster.load_config", lambda s: bad_config)
 
         with pytest.raises(ValueError, match="unknown consumer: telegram"):
-            await coordinator._deliver_one()
+            await deliver_one(store, settings)
 
     def test_select_for_consumer_with_empty_rows(self):
         """select_for_consumer with no rows returns empty result (not

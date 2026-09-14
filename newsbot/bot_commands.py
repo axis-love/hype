@@ -85,30 +85,17 @@ class BotCommandHandler:
         bot_token: str,
         admin_user_id: str,
         settings: SettingsStore,
-        on_digest: Callable[[], Awaitable[None]] | None = None,
-        on_digest_dry: Callable[[], Awaitable[str]] | None = None,
-        on_post: Callable[[], Awaitable[None]] | None = None,
-        on_status: Callable[[], Awaitable[str]] | None = None,
-        on_scores: Callable[[], Awaitable[str]] | None = None,
-        on_summary: Callable[[], Awaitable[None]] | None = None,
-        on_store: Callable[[str], Awaitable[str]] | None = None,
-        on_preview: Callable[[], Awaitable[tuple[str, str, list[dict[str, Any]] | None]]] | None = None,
-        on_recap_preview: Callable[[], Awaitable[tuple[str, str, str]]] | None = None,
+        actions: Any = None,
     ) -> None:
         self.bot_token = bot_token
         self.admin_user_id = str(admin_user_id).strip()
         self.settings = settings
-        self.on_digest = on_digest
-        self.on_digest_dry = on_digest_dry
-        self.on_post = on_post
-        self.on_status = on_status
-        self.on_scores = on_scores
-        self.on_summary = on_summary
-        self.on_store = on_store
-        self.on_preview = on_preview
-        self.on_recap_preview = on_recap_preview
+        self.actions = actions
         self._offset = 0  # getUpdates offset for ack
         self._client = httpx.AsyncClient(timeout=POLL_TIMEOUT + 10)
+
+    def _action(self, name: str):
+        return getattr(self.actions, name, None) if self.actions is not None else None
 
     async def _send(self, chat_id: int, text: str, parse_mode: str = "") -> bool:
         """Send a message to a chat. Returns True on success, False on failure."""
@@ -448,11 +435,12 @@ class BotCommandHandler:
         return json.dumps(block, default=str, ensure_ascii=False)
 
     async def _cmd_digest(self, chat_id: int) -> None:
-        if self.on_digest:
+        handler = self._action("digest")
+        if handler:
             await self._send(chat_id, "Triggering generation cycle now...")
             async def _run_and_notify() -> None:
                 try:
-                    await self.on_digest()
+                    await handler()
                     await self._send(chat_id, "✅ Generation complete. Raw stories stored — styling happens at pick.")
                 except RuntimeError as exc:
                     await self._send(chat_id, str(exc))
@@ -463,11 +451,12 @@ class BotCommandHandler:
             await self._send(chat_id, "No generation handler registered.")
 
     async def _cmd_digest_dry(self, chat_id: int) -> None:
-        if self.on_digest_dry:
+        handler = self._action("digest_dry")
+        if handler:
             await self._send(chat_id, "Running dry-run generation (no DB writes)...")
             async def _run_and_notify() -> None:
                 try:
-                    report = await self.on_digest_dry()
+                    report = await handler()
                     await self._send(chat_id, report)
                 except RuntimeError as exc:
                     await self._send(chat_id, str(exc))
@@ -478,7 +467,7 @@ class BotCommandHandler:
             await self._send(chat_id, "No dry-run handler registered.")
 
     async def _cmd_summary(self, chat_id: int) -> None:
-        handler = self.on_summary
+        handler = self._action("summary")
         if handler:
             await self._send(chat_id, "Running daily recap job now...")
             async def _run_and_notify() -> None:
@@ -494,10 +483,11 @@ class BotCommandHandler:
             await self._send(chat_id, "No summary handler registered.")
 
     async def _cmd_post(self, chat_id: int) -> None:
-        if self.on_post:
+        handler = self._action("post")
+        if handler:
             async def _post_and_notify() -> None:
                 try:
-                    await self.on_post()
+                    await handler()
                     await self._send(chat_id, "✅ Post delivered to channel.")
                 except RuntimeError as exc:
                     await self._send(chat_id, str(exc))
@@ -509,7 +499,7 @@ class BotCommandHandler:
 
     async def _cmd_preview(self, chat_id: int) -> None:
         """Preview the hottest pick, styled, in this DM. No posting, no DB writes."""
-        handler = self.on_preview
+        handler = self._action("preview")
         if not handler:
             await self._send(chat_id, "Preview handler not available.")
             return
@@ -543,7 +533,7 @@ class BotCommandHandler:
             await self._send(chat_id, f"Current recap prompt:\n\n{prompt}")
             return
 
-        handler = self.on_recap_preview
+        handler = self._action("recap_preview")
         if not handler:
             await self._send(chat_id, "Recap preview handler not available.")
             return
@@ -573,9 +563,10 @@ class BotCommandHandler:
         await self._send(chat_id, f"Recap prompt updated.\n\nNew prompt:\n{arg}")
 
     async def _cmd_status(self, chat_id: int) -> None:
-        if self.on_status:
+        handler = self._action("status")
+        if handler:
             try:
-                status_text = await self.on_status()
+                status_text = await handler()
                 await self._send(chat_id, status_text)
             except Exception:
                 await self._send(chat_id, "Status error. Check logs for details.")
@@ -583,9 +574,10 @@ class BotCommandHandler:
             await self._send(chat_id, "Status handler not available.")
 
     async def _cmd_scores(self, chat_id: int) -> None:
-        if self.on_scores:
+        handler = self._action("scores")
+        if handler:
             try:
-                scores_text = await self.on_scores()
+                scores_text = await handler()
                 await self._send(chat_id, scores_text)
             except Exception:
                 await self._send(chat_id, "Scores error. Check logs for details.")
@@ -593,9 +585,10 @@ class BotCommandHandler:
             await self._send(chat_id, "Scores handler not available.")
 
     async def _cmd_store(self, chat_id: int, arg: str) -> None:
-        if self.on_store:
+        handler = self._action("store")
+        if handler:
             try:
-                store_text = await self.on_store(arg)
+                store_text = await handler(arg)
                 await self._send(chat_id, store_text)
             except Exception:
                 await self._send(chat_id, "Store error. Check logs for details.")

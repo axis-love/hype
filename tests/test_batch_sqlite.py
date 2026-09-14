@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from newsbot.db import NewsStore
-from newsbot.main import filter_seen
+from newsbot.generation import filter_seen
 
 
 @pytest.fixture

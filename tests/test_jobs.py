@@ -8,9 +8,10 @@ import pytest
 
 from newsbot.config import _consumer_profiles
 from newsbot.db import NewsStore
-from newsbot.jobs import JobCoordinator, _format_recap_html_fallback, format_post_message
+from newsbot.jobs import JobCoordinator, JobKind
+from newsbot.poster import _format_recap_html_fallback, format_post_message
 from newsbot.outcome import Outcome
-from tests.helpers import insert_story
+from tests.helpers import coord_drain, coord_gen, coord_post, insert_story
 
 
 @pytest.fixture
@@ -33,14 +34,14 @@ def settings():
 
 @pytest.fixture
 def coordinator(store, settings) -> JobCoordinator:
-    return JobCoordinator(store, settings)
+    return JobCoordinator()
 
 
 class TestJobCoordinatorSerialization:
     """Verify that the coordinator serializes generation and posting."""
 
     @pytest.mark.asyncio
-    async def test_generation_lock_prevents_overlap(self, coordinator):
+    async def test_generation_lock_prevents_overlap(self, coordinator, store, settings):
         """Two concurrent generation calls — only one should run, the other skipped."""
         call_count = 0
 
@@ -52,8 +53,8 @@ class TestJobCoordinatorSerialization:
 
         # Launch two concurrently.
         results = await asyncio.gather(
-            coordinator.run_generation(slow_gen),
-            coordinator.run_generation(slow_gen),
+            coord_gen(coordinator, slow_gen),
+            coord_gen(coordinator, slow_gen),
         )
         # One should succeed (0), one should be skipped (2).
         assert results.count(Outcome.OK) == 1
@@ -61,27 +62,27 @@ class TestJobCoordinatorSerialization:
         assert call_count == 1
 
     @pytest.mark.asyncio
-    async def test_posting_lock_prevents_overlap(self, coordinator):
+    async def test_posting_lock_prevents_overlap(self, coordinator, store, settings):
         """Two concurrent posting calls — only one should run, the other skipped."""
         # Add a pending post so posting has something to do.
-        insert_story(coordinator._store, "T", "")
+        insert_story(store, "T", "")
 
         # Mock the actual delivery to be slow.
         async def slow_deliver(*args, **kwargs):
             await asyncio.sleep(0.1)
             return Outcome.OK
 
-        with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver, return_value=Outcome.OK):
+        with patch("newsbot.poster.deliver_one", side_effect=slow_deliver, return_value=Outcome.OK):
             results = await asyncio.gather(
-                coordinator.run_posting(),
-                coordinator.run_posting(),
+                coord_post(coordinator, store, settings),
+                coord_post(coordinator, store, settings),
             )
         # One should succeed (0), one should be skipped (2).
         assert results.count(Outcome.OK) == 1
         assert results.count(Outcome.BUSY) == 1
 
     @pytest.mark.asyncio
-    async def test_generation_and_posting_cannot_overlap(self, coordinator):
+    async def test_generation_and_posting_cannot_overlap(self, coordinator, store, settings):
         """Generation and posting use a SINGLE lock — they cannot overlap."""
         gen_started = asyncio.Event()
         post_started = asyncio.Event()
@@ -95,7 +96,7 @@ class TestJobCoordinatorSerialization:
             return Outcome.OK
 
         # Add a pending post.
-        insert_story(coordinator._store, "T", "")
+        insert_story(store, "T", "")
 
         async def slow_deliver(*args, **kwargs):
             post_started.set()
@@ -103,10 +104,10 @@ class TestJobCoordinatorSerialization:
             post_done.set()
             return Outcome.OK
 
-        with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver):
+        with patch("newsbot.poster.deliver_one", side_effect=slow_deliver):
             await asyncio.gather(
-                coordinator.run_generation(gen_fn),
-                coordinator.run_posting(),
+                coord_gen(coordinator, gen_fn),
+                coord_post(coordinator, store, settings),
             )
         assert gen_started.is_set()
         assert post_started.is_set()
@@ -117,40 +118,40 @@ class TestJobCoordinatorSerialization:
         assert post_done.is_set()
 
     @pytest.mark.asyncio
-    async def test_lock_released_on_exception(self, coordinator):
+    async def test_lock_released_on_exception(self, coordinator, store, settings):
         """Lock must be released even if the generation function raises."""
         async def failing_gen():
             raise ValueError("boom")
 
         # First call raises.
         with pytest.raises(ValueError):
-            await coordinator.run_generation(failing_gen)
+            await coord_gen(coordinator, failing_gen)
 
         # Second call should succeed — lock was released.
-        result = await coordinator.run_generation(lambda: asyncio.sleep(0))
+        result = await coord_gen(coordinator, lambda: asyncio.sleep(0))
         assert result == Outcome.OK
 
     @pytest.mark.asyncio
-    async def test_posting_lock_released_on_exception(self, coordinator):
+    async def test_posting_lock_released_on_exception(self, coordinator, store, settings):
         """Lock must be released even if posting raises."""
-        insert_story(coordinator._store, "T", "")
+        insert_story(store, "T", "")
 
         async def failing_deliver(*args, **kwargs):
             raise RuntimeError("post failed")
 
-        with patch.object(coordinator, "_deliver_one", side_effect=failing_deliver):
+        with patch("newsbot.poster.deliver_one", side_effect=failing_deliver):
             with pytest.raises(RuntimeError):
-                await coordinator.run_posting()
+                await coord_post(coordinator, store, settings)
 
         # Should be able to call again — lock was released.
-        with patch.object(coordinator, "_deliver_one", return_value=Outcome.OK):
-            result = await coordinator.run_posting()
+        with patch("newsbot.poster.deliver_one", return_value=Outcome.OK):
+            result = await coord_post(coordinator, store, settings)
         assert result == Outcome.OK
 
     @pytest.mark.asyncio
-    async def test_multiple_gen_queued_behind_post_only_one_runs(self, coordinator):
+    async def test_multiple_gen_queued_behind_post_only_one_runs(self, coordinator, store, settings):
         """Hold posting active, launch two generation calls, assert only one runs."""
-        insert_story(coordinator._store, "T", "")
+        insert_story(store, "T", "")
 
         post_can_finish = asyncio.Event()
 
@@ -165,19 +166,19 @@ class TestJobCoordinatorSerialization:
             gen_call_count += 1
             return Outcome.OK
 
-        with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver):
-            post_task = asyncio.create_task(coordinator.run_posting())
+        with patch("newsbot.poster.deliver_one", side_effect=slow_deliver):
+            post_task = asyncio.create_task(coord_post(coordinator, store, settings))
             # Give posting time to acquire the lock.
             await asyncio.sleep(0.05)
 
             # Launch two generation calls while posting is active.
             # Don't use gather — the first gen waits for the lock (held by posting),
             # so gather would hang. Launch the first as a task, the second returns 2.
-            gen1_task = asyncio.create_task(coordinator.run_generation(gen_fn))
+            gen1_task = asyncio.create_task(coord_gen(coordinator, gen_fn))
             # Give gen1 time to set _gen_running and start waiting for the lock.
             await asyncio.sleep(0.02)
 
-            gen2_result = await coordinator.run_generation(gen_fn)
+            gen2_result = await coord_gen(coordinator, gen_fn)
             assert gen2_result == Outcome.BUSY  # skipped because gen1 already set the flag
 
             # Release posting so gen1 can proceed.
@@ -190,7 +191,7 @@ class TestJobCoordinatorSerialization:
         assert gen_call_count == 1
 
     @pytest.mark.asyncio
-    async def test_multiple_post_queued_behind_gen_only_one_runs(self, coordinator):
+    async def test_multiple_post_queued_behind_gen_only_one_runs(self, coordinator, store, settings):
         """Hold generation active, launch two posting calls, assert only one runs."""
         gen_can_finish = asyncio.Event()
 
@@ -205,19 +206,19 @@ class TestJobCoordinatorSerialization:
             deliver_call_count += 1
             return Outcome.OK
 
-        insert_story(coordinator._store, "T", "")
+        insert_story(store, "T", "")
 
-        with patch.object(coordinator, "_deliver_one", side_effect=fast_deliver):
-            gen_task = asyncio.create_task(coordinator.run_generation(slow_gen))
+        with patch("newsbot.poster.deliver_one", side_effect=fast_deliver):
+            gen_task = asyncio.create_task(coord_gen(coordinator, slow_gen))
             # Give generation time to acquire the lock.
             await asyncio.sleep(0.05)
 
             # Launch two posting calls while generation is active.
             # The first waits for the lock, the second returns 2.
-            post1_task = asyncio.create_task(coordinator.run_posting())
+            post1_task = asyncio.create_task(coord_post(coordinator, store, settings))
             await asyncio.sleep(0.02)
 
-            post2_result = await coordinator.run_posting()
+            post2_result = await coord_post(coordinator, store, settings)
             assert post2_result == Outcome.BUSY  # skipped
 
             # Release generation so post1 can proceed.
@@ -231,24 +232,24 @@ class TestJobCoordinatorSerialization:
         assert deliver_call_count == 1
 
     @pytest.mark.asyncio
-    async def test_coordinator_returns_to_idle_after_timeout(self, coordinator):
+    async def test_coordinator_returns_to_idle_after_timeout(self, coordinator, store, settings):
         """Coordinator state returns to idle after a timeout."""
         async def slow_gen():
             await asyncio.sleep(10)
             return Outcome.OK
 
-        result = await coordinator.run_generation(slow_gen, timeout=0.05)
+        result = await coord_gen(coordinator, slow_gen, timeout=0.05)
         assert result == Outcome.FAILED  # timeout
-        assert coordinator.generation_running is False
+        assert coordinator.running(JobKind.GENERATION) is False
 
     @pytest.mark.asyncio
-    async def test_coordinator_returns_to_idle_after_cancellation(self, coordinator):
+    async def test_coordinator_returns_to_idle_after_cancellation(self, coordinator, store, settings):
         """Coordinator state returns to idle after task cancellation."""
         async def slow_gen():
             await asyncio.sleep(10)
             return Outcome.OK
 
-        task = asyncio.create_task(coordinator.run_generation(slow_gen))
+        task = asyncio.create_task(coord_gen(coordinator, slow_gen))
         await asyncio.sleep(0.05)
         task.cancel()
         try:
@@ -256,16 +257,16 @@ class TestJobCoordinatorSerialization:
         except asyncio.CancelledError:
             pass
 
-        assert coordinator.generation_running is False
+        assert coordinator.running(JobKind.GENERATION) is False
 
     @pytest.mark.asyncio
-    async def test_no_duplicate_posts_under_concurrent_posting(self, coordinator, store):
+    async def test_no_duplicate_posts_under_concurrent_posting(self, coordinator, store, settings):
         """Concurrent posting calls must not deliver the same post twice."""
         insert_story(store, "T", "http://x.com")
 
         delivered_ids: list[int] = []
 
-        async def capture_deliver():
+        async def capture_deliver(*args, **kwargs):
             # Yield to let any concurrent call check the admission flag.
             await asyncio.sleep(0.05)
             unposted = store.list_unposted_posts("telegram")
@@ -275,10 +276,10 @@ class TestJobCoordinatorSerialization:
                 store.mark_posted(post["id"])
             return Outcome.OK
 
-        with patch.object(coordinator, "_deliver_one", new=capture_deliver):
+        with patch("newsbot.poster.deliver_one", new=capture_deliver):
             results = await asyncio.gather(
-                coordinator.run_posting(),
-                coordinator.run_posting(),
+                coord_post(coordinator, store, settings),
+                coord_post(coordinator, store, settings),
             )
 
         # One should succeed (0), one should be skipped (2).
@@ -292,27 +293,27 @@ class TestJobCoordinatorDrain:
     """Verify drain_posts consolidates the --once and dry-run paths."""
 
     @pytest.mark.asyncio
-    async def test_drain_posts_all(self, coordinator, store):
+    async def test_drain_posts_all(self, coordinator, store, settings):
         """Drain should post all eligible store rows and mark them posted."""
-        from tests.helpers import insert_story, scored_story, echo_style
+        from tests.helpers import coord_drain, coord_gen, coord_post, insert_story, scored_story, echo_style
 
         for i in range(3):
             store.add_stories_to_store([scored_story(f"T{i}", 90.0 - i * 5)], [])
 
         # Dry-run mode (no BOT_TOKEN).
-        with patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             os.environ.pop("BOT_TOKEN", None)
             os.environ.pop("NEWS_CHANNEL_ID", None)
-            result = await coordinator.drain_posts()
+            result = await coord_drain(coordinator, store, settings)
 
         assert result == Outcome.OK
         assert store.count_pending("telegram") == 0
 
     @pytest.mark.asyncio
-    async def test_drain_empty_queue(self, coordinator):
+    async def test_drain_empty_queue(self, coordinator, store, settings):
         """Drain with empty queue should return 0."""
-        result = await coordinator.drain_posts()
+        result = await coord_drain(coordinator, store, settings)
         assert result == Outcome.OK
 
 
@@ -327,7 +328,7 @@ class TestConcurrentGenerationPostingIntegration:
     """
 
     @pytest.mark.asyncio
-    async def test_concurrent_gen_post_no_duplicate_delivery(self, coordinator, store):
+    async def test_concurrent_gen_post_no_duplicate_delivery(self, coordinator, store, settings):
         """Concurrent generation+posting must not deliver any post twice.
 
         Scenario: 3 pending posts in queue. Posting starts draining them
@@ -359,14 +360,14 @@ class TestConcurrentGenerationPostingIntegration:
             store.add_stories_to_store(new_posts, seen_items)
             return Outcome.OK
 
-        with patch("newsbot.jobs.post_rich_message", new=slow_post_rich), \
-             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.post_rich_message", new=slow_post_rich), \
+             patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
                 # Launch generation and posting concurrently.
-                gen_task = asyncio.create_task(coordinator.run_generation(gen_fn))
+                gen_task = asyncio.create_task(coord_gen(coordinator, gen_fn))
                 await asyncio.sleep(0.01)  # Let gen acquire the lock first.
-                post_task = asyncio.create_task(coordinator.run_posting())
+                post_task = asyncio.create_task(coord_post(coordinator, store, settings))
 
                 gen_result = await gen_task
                 post_result = await post_task
@@ -389,7 +390,7 @@ class TestConcurrentGenerationPostingIntegration:
         assert remaining == 5
 
     @pytest.mark.asyncio
-    async def test_concurrent_posting_no_duplicate_or_loss(self, coordinator, store):
+    async def test_concurrent_posting_no_duplicate_or_loss(self, coordinator, store, settings):
         """Multiple concurrent posting calls through real DB must not
         duplicate delivery or lose posts.
 
@@ -408,22 +409,22 @@ class TestConcurrentGenerationPostingIntegration:
             await asyncio.sleep(0.02)
             # Don't track here — tracking happens in _deliver_one via mark_posted.
 
-        # Monkey-patch _deliver_one to add a tiny delay so calls overlap.
-        original_deliver = coordinator._deliver_one
+        import newsbot.poster as poster_mod
+        original_deliver = poster_mod.deliver_one
 
-        async def slow_deliver_one():
+        async def slow_deliver_one(store, settings):
             await asyncio.sleep(0.02)
-            return await original_deliver()
+            return await original_deliver(store, settings)
 
-        with patch("newsbot.jobs.post_rich_message", new=tracking_post_rich), \
-             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.post_rich_message", new=tracking_post_rich), \
+             patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
-                with patch.object(coordinator, "_deliver_one", side_effect=slow_deliver_one):
+                with patch("newsbot.poster.deliver_one", side_effect=slow_deliver_one):
                     results = await asyncio.gather(
-                        coordinator.run_posting(),
-                        coordinator.run_posting(),
-                        coordinator.run_posting(),
+                        coord_post(coordinator, store, settings),
+                        coord_post(coordinator, store, settings),
+                        coord_post(coordinator, store, settings),
                     )
 
         # Only one should succeed (0), others skipped (2).
@@ -440,7 +441,7 @@ class TestConcurrentGenerationPostingIntegration:
         assert store.count_pending("telegram") == 4
 
     @pytest.mark.asyncio
-    async def test_generation_during_drain_preserves_order(self, coordinator, store):
+    async def test_generation_during_drain_preserves_order(self, coordinator, store, settings):
         """Generation replacing the queue while drain_posts is running
         must not lose or reorder posts.
 
@@ -469,16 +470,16 @@ class TestConcurrentGenerationPostingIntegration:
             store.add_stories_to_store(new_posts, seen_items)
             return Outcome.OK
 
-        with patch("newsbot.jobs.post_rich_message", new=tracking_post_rich), \
-             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.post_rich_message", new=tracking_post_rich), \
+             patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "fake"}):
                 # Start drain (processes all 3 old posts sequentially).
-                drain_task = asyncio.create_task(coordinator.drain_posts())
+                drain_task = asyncio.create_task(coord_drain(coordinator, store, settings))
                 await asyncio.sleep(0.01)
 
                 # Concurrently attempt generation — must wait for drain.
-                gen_task = asyncio.create_task(coordinator.run_generation(gen_fn))
+                gen_task = asyncio.create_task(coord_gen(coordinator, gen_fn))
 
                 drain_result = await drain_task
                 gen_result = await gen_task
@@ -493,7 +494,7 @@ class TestConcurrentGenerationPostingIntegration:
         assert store.count_pending("telegram") == 1
 
     @pytest.mark.asyncio
-    async def test_concurrent_generation_no_queue_corruption(self, coordinator, store):
+    async def test_concurrent_generation_no_queue_corruption(self, coordinator, store, settings):
         """Two concurrent generation calls through real DB — only one
         should run, the other skipped. Queue must not be corrupted."""
         posts_a = [{"title": "A", "body": "BA", "url": "http://a.com"}]
@@ -511,8 +512,8 @@ class TestConcurrentGenerationPostingIntegration:
             return Outcome.OK
 
         results = await asyncio.gather(
-            coordinator.run_generation(gen_a),
-            coordinator.run_generation(gen_b),
+            coord_gen(coordinator, gen_a),
+            coord_gen(coordinator, gen_b),
         )
 
         # One succeeds (0), one skipped (2).
@@ -550,7 +551,7 @@ class TestFormatPostMessage:
 
 def test_format_post_message_truncates_long_body():
     """format_post_message caps body so total HTML stays under ~3000 chars."""
-    from newsbot.jobs import format_post_message
+    from newsbot.poster import format_post_message
 
     long_body = "This is a very long sentence. " * 200  # ~5000 chars
     msg = format_post_message("Test Title", long_body, "https://example.com/very/long/url/path")
@@ -561,7 +562,7 @@ def test_format_post_message_truncates_long_body():
 
 def test_format_post_message_short_body_unchanged():
     """Short bodies are not truncated."""
-    from newsbot.jobs import format_post_message
+    from newsbot.poster import format_post_message
 
     msg = format_post_message("Title", "Short body text.", "https://example.com")
     assert "Short body text." in msg
@@ -570,7 +571,7 @@ def test_format_post_message_short_body_unchanged():
 
 def test_format_post_message_truncates_at_sentence_boundary():
     """Truncation prefers sentence boundaries when possible."""
-    from newsbot.jobs import format_post_message
+    from newsbot.poster import format_post_message
 
     # Create a body with clear sentence boundaries
     body = "First sentence here. Second one follows. Third is cut off " + "x" * 4000
@@ -586,7 +587,7 @@ def test_format_post_message_truncates_at_sentence_boundary():
 def test_format_scores_empty_store(tmp_path):
     """_format_scores with an empty store says so."""
     from newsbot.db import NewsStore
-    from newsbot.main import _format_scores
+    from newsbot.admin_views import _format_scores
     store = NewsStore(tmp_path / "test.sqlite")
     result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
     assert result == "Store is empty."
@@ -596,7 +597,7 @@ def test_format_scores_empty_store(tmp_path):
 def test_format_scores_threshold_header_and_row(tmp_path):
     """_format_scores shows threshold header and eff/raw temp per row."""
     from newsbot.db import NewsStore
-    from newsbot.main import _format_scores
+    from newsbot.admin_views import _format_scores
     from tests.helpers import scored_story
     store = NewsStore(tmp_path / "test.sqlite")
     store.add_stories_to_store([scored_story("Test Post About LLMs", 150.0)], [])
@@ -614,7 +615,7 @@ def test_format_scores_threshold_header_and_row(tmp_path):
 def test_format_scores_styled_flag(tmp_path):
     """Rows with styled_at show the [styled] flag."""
     from newsbot.db import NewsStore
-    from newsbot.main import _format_scores
+    from newsbot.admin_views import _format_scores
     from tests.helpers import scored_story
     store = NewsStore(tmp_path / "test.sqlite")
     store.add_stories_to_store([scored_story("Styled One", 150.0)], [])
@@ -627,7 +628,7 @@ def test_format_scores_styled_flag(tmp_path):
 def test_format_scores_legacy_row_sinks(tmp_path):
     """Legacy rows (NULL score columns) show 'score unavailable', last."""
     from newsbot.db import NewsStore
-    from newsbot.main import _format_scores
+    from newsbot.admin_views import _format_scores
     from tests.helpers import scored_story
     store = NewsStore(tmp_path / "test.sqlite")
 
@@ -650,7 +651,7 @@ def test_format_scores_legacy_row_sinks(tmp_path):
 def test_format_scores_hottest_first(tmp_path):
     """_format_scores sorts rows hottest-first by effective temperature."""
     from newsbot.db import NewsStore
-    from newsbot.main import _format_scores
+    from newsbot.admin_views import _format_scores
     from tests.helpers import scored_story
     store = NewsStore(tmp_path / "test.sqlite")
     store.add_stories_to_store([
@@ -711,7 +712,7 @@ class TestSendMessageIdPersistence:
     """_send_and_mark captures message_id from the send result and persists it."""
 
     @pytest.mark.asyncio
-    async def test_message_id_captured_and_stored(self, coordinator, store):
+    async def test_message_id_captured_and_stored(self, coordinator, store, settings):
         from tests.helpers import scored_story, echo_style
 
         store.add_stories_to_store([scored_story("Test", 80.0)], [])
@@ -719,11 +720,11 @@ class TestSendMessageIdPersistence:
         async def fake_post_rich(markdown, **kwargs):
             return [{"ok": True, "result": {"message_id": 999, "date": 1234567890}}]
 
-        with patch("newsbot.jobs.post_rich_message", new=fake_post_rich), \
-             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.post_rich_message", new=fake_post_rich), \
+             patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "-1001234567890"}):
-                result = await coordinator.run_posting()
+                result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         row = store._conn.execute(
@@ -732,7 +733,7 @@ class TestSendMessageIdPersistence:
         assert row["message_id"] == 999
 
     @pytest.mark.asyncio
-    async def test_no_message_id_when_post_digest_returns_empty(self, coordinator, store):
+    async def test_no_message_id_when_post_digest_returns_empty(self, coordinator, store, settings):
         from tests.helpers import scored_story, echo_style
 
         store.add_stories_to_store([scored_story("Test", 80.0)], [])
@@ -740,11 +741,11 @@ class TestSendMessageIdPersistence:
         async def fake_post_rich(markdown, **kwargs):
             return []  # edge case: no results returned
 
-        with patch("newsbot.jobs.post_rich_message", new=fake_post_rich), \
-             patch("newsbot.jobs.llm_style_posts", new=echo_style), \
-             patch("newsbot.jobs._build_lm_client", return_value=object()):
+        with patch("newsbot.poster.post_rich_message", new=fake_post_rich), \
+             patch("newsbot.poster.llm_style_posts", new=echo_style), \
+             patch("newsbot.llm.build_lm_client", return_value=object()):
             with patch.dict(os.environ, {"BOT_TOKEN": "fake", "NEWS_CHANNEL_ID": "@chan"}):
-                result = await coordinator.run_posting()
+                result = await coord_post(coordinator, store, settings)
 
         assert result == Outcome.OK
         row = store._conn.execute(
@@ -768,7 +769,7 @@ def _seed_store_row(store, title="Test Story", score=80.0, **extra):
 
 class TestFormatStoreBrowse:
     def test_empty_store(self, store):
-        from newsbot.main import _format_store_browse
+        from newsbot.admin_views import _format_store_browse
         from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
 
         config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
@@ -776,7 +777,7 @@ class TestFormatStoreBrowse:
         assert "empty" in result.lower()
 
     def test_shows_rows_hottest_first(self, store):
-        from newsbot.main import _format_store_browse
+        from newsbot.admin_views import _format_store_browse
         from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
 
         _seed_store_row(store, "Cold Story", 50.0)
@@ -789,7 +790,7 @@ class TestFormatStoreBrowse:
         assert result.index("Hot Story") < result.index("Cold Story")
 
     def test_shows_row_id_temp_flag_snippet(self, store):
-        from newsbot.main import _format_store_browse
+        from newsbot.admin_views import _format_store_browse
         from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
 
         row_id = _seed_store_row(store, "Tale", 80.0)
@@ -800,7 +801,7 @@ class TestFormatStoreBrowse:
         assert "Tale" in result
 
     def test_browse_has_no_raw_styled_flags(self, store):
-        from newsbot.main import _format_store_browse
+        from newsbot.admin_views import _format_store_browse
         from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
 
         _seed_store_row(store, "Plain", 80.0)
@@ -814,7 +815,7 @@ class TestFormatStoreBrowse:
 
 class TestFormatStoreDetail:
     def test_not_found_lists_valid_ids(self, store):
-        from newsbot.main import _format_store_detail
+        from newsbot.admin_views import _format_store_detail
 
         _seed_store_row(store, "Real", 80.0)
         result = _format_store_detail(store, 999999)
@@ -822,13 +823,13 @@ class TestFormatStoreDetail:
         assert "Valid ids" in result
 
     def test_not_found_empty_store(self, store):
-        from newsbot.main import _format_store_detail
+        from newsbot.admin_views import _format_store_detail
 
         result = _format_store_detail(store, 1)
         assert "empty" in result.lower()
 
     def test_shows_score_components(self, store):
-        from newsbot.main import _format_store_detail
+        from newsbot.admin_views import _format_store_detail
 
         row_id = _seed_store_row(store, "Scored", 80.0)
         result = _format_store_detail(store, row_id)
@@ -837,7 +838,7 @@ class TestFormatStoreDetail:
         assert "Engagement" in result
 
     def test_shows_styled_body_when_styled(self, store):
-        from newsbot.main import _format_store_detail
+        from newsbot.admin_views import _format_store_detail
 
         row_id = _seed_store_row(store, "Styled", 80.0, styled=True)
         result = _format_store_detail(store, row_id)
@@ -845,14 +846,14 @@ class TestFormatStoreDetail:
         assert "Styled body text" in result
 
     def test_shows_snippet_when_raw(self, store):
-        from newsbot.main import _format_store_detail
+        from newsbot.admin_views import _format_store_detail
 
         row_id = _seed_store_row(store, "Raw", 80.0)
         result = _format_store_detail(store, row_id)
         assert "Snippet" in result
 
     def test_shows_metadata(self, store):
-        from newsbot.main import _format_store_detail
+        from newsbot.admin_views import _format_store_detail
 
         row_id = _seed_store_row(store, "Meta", 80.0)
         result = _format_store_detail(store, row_id)

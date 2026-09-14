@@ -193,27 +193,27 @@ class TestLLMEnvValidation:
     """Verify LLM env validation at startup (flow_001031 round 1)."""
 
     def test_missing_lm_base_raises(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(RuntimeError, match="LM_BASE is not set"):
                 _validate_llm_env()
 
     def test_missing_lm_model_raises(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1"}, clear=True):
             with pytest.raises(RuntimeError, match="LM_MODEL is not set"):
                 _validate_llm_env()
 
     def test_both_set_passes(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test"}, clear=True):
             _validate_llm_env()  # should not raise
 
     def test_missing_lm_api_key_raises(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {"LM_BASE": "http://x.com/v1", "LM_MODEL": "test"}, clear=True):
             with pytest.raises(RuntimeError, match="LM_API_KEY is not set"):
@@ -364,7 +364,7 @@ class TestRuntimeEnvValidation:
     """Verify numeric env vars are validated at startup."""
 
     def test_invalid_lm_timeout_rejected(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {
             "LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test",
@@ -374,7 +374,7 @@ class TestRuntimeEnvValidation:
                 _validate_llm_env()
 
     def test_negative_lm_timeout_rejected(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {
             "LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test",
@@ -384,7 +384,7 @@ class TestRuntimeEnvValidation:
                 _validate_llm_env()
 
     def test_non_numeric_admin_user_id_rejected(self):
-        from newsbot.main import _validate_llm_env
+        from newsbot.llm import validate_llm_env as _validate_llm_env
         from unittest.mock import patch
         with patch.dict("os.environ", {
             "LM_BASE": "http://x.com/v1", "LM_MODEL": "test", "LM_API_KEY": "sk-test",
