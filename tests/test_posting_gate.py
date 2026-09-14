@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from newsbot.db import NewsStore
+from tests.helpers import insert_story
 from newsbot.jobs import JobCoordinator
 
 
@@ -175,12 +176,11 @@ class TestPostingGate:
         assert result == 0
         assert posted and "STYLED" in posted[0]
         assert store.count_pending("telegram") == 0
-        row = store._conn.execute(
-            "SELECT styled_at, posted_at, body FROM pending_posts"
+        d = store._conn.execute(
+            "SELECT styled_title, styled_body FROM deliveries WHERE channel='telegram'"
         ).fetchone()
-        assert row["styled_at"] is not None
-        assert row["posted_at"] is not None
-        assert row["body"] == "Styled body"
+        assert d["styled_title"] == "STYLED"
+        assert d["styled_body"] == "Styled body"
 
     @pytest.mark.asyncio
     async def test_merge_multiplier_changes_ranking_not_eligibility(
@@ -243,7 +243,10 @@ class TestPostingGate:
     async def test_legacy_null_score_row_never_selected(self, coordinator, store, monkeypatch):
         """Legacy row (engagement_score NULL) has temp 0.0 -> never eligible."""
         monkeypatch.setattr("newsbot.jobs.datetime", _frozen_dt(NOW))
-        store.add_pending_post({"title": "Legacy", "body": "", "url": "https://legacy.example.com"})
+        store._conn.execute(
+            "INSERT INTO pending_posts(title, url, created_at) VALUES(?,?,?)",
+            ("Legacy", "https://legacy.example.com", NOW.isoformat()),
+        )
 
         async def fake_style(items, lm, **kw):
             raise AssertionError("styler must not run for a below-threshold legacy row")

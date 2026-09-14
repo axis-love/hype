@@ -66,7 +66,7 @@ COLLECTORS: dict[str, Any] = {
     "trends": trends,
 }
 from newsbot.config import consumer_profile, load_config
-from newsbot.db import NewsStore, display_title, _as_dict
+from newsbot.db import NewsStore, _as_dict
 from newsbot.dedupe import dedupe_and_merge, match_candidate_to_store, _set_pre_merge_weights
 from newsbot.jobs import (
     JobCoordinator,
@@ -564,20 +564,18 @@ def _run_retention(store: NewsStore) -> None:
 def _recap_input_items(rows: list[dict]) -> list[dict[str, Any] | Candidate]:
     """Build the item list llm_daily_summary receives, from posted store rows.
 
-    Rows carry the STYLED content actually posted: ``styled_title`` +
-    ``body`` after set_styled_content. ``title`` is the immutable Pass A
-    English headline. Recap/Telegram display uses COALESCE(styled_title,
-    title). Legacy rows posted before styling (body empty, styled_at NULL)
-    fall back to the raw snippet.
+    Prefers the channel copy on the delivery (styled_title / styled_body /
+    message_id). A legacy delivery without styled columns falls back to
+    the engine title + summary.
     """
     items: list[dict[str, Any] | Candidate] = []
     for row in rows:
-        body = (row.get("body") or "").strip()
-        if not body:
-            body = (row.get("snippet") or "").strip()
+        styled_body = str(row.get("styled_body") or "").strip()
+        summary = str(row.get("summary") or "").strip()
+        title = str(row.get("styled_title") or row.get("title") or "")
         items.append({
-            "title": display_title(row),
-            "body": body,
+            "title": title,
+            "body": styled_body or summary,
             "category": row.get("category") or "",
             "url": row.get("url") or "",
             "source": row.get("source") or "",
@@ -763,7 +761,7 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
         reverse=True,
     )
     for i, row in enumerate(ordered, start=1):
-        title = display_title(row)[:60]
+        title = str(row.get("title") or "")[:60]
         raw_temp = result.temps.get(row["id"], 0.0)
         if row.get("engagement_score") is None:
             lines.append(f"{i}. score unavailable — queued before scoring update")
@@ -772,11 +770,10 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
             continue
         mult = merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap)
         effective = raw_temp * mult
-        flag = "styled" if row.get("styled_at") else "raw"
         merge = row.get("merge_count") or 1
         source = row.get("source") or "?"
         merge_note = f" merge={merge}×{mult:.2f}" if merge > 1 else ""
-        lines.append(f"{i}. {effective:.1f} eff ({raw_temp:.1f} raw{merge_note}) [{flag}]")
+        lines.append(f"{i}. {effective:.1f} eff ({raw_temp:.1f} raw{merge_note})")
         lines.append(title)
         origin = row.get("origin_topic")
         origin_str = f" | topic={origin}" if origin else ""
@@ -810,11 +807,10 @@ def _format_store_browse(store: NewsStore, config: dict[str, Any]) -> str:
     lines = [f"Store browse ({len(rows)} rows, hottest first):", ""]
 
     for i, row in enumerate(ordered, start=1):
-        title = display_title(row)[:60]
+        title = str(row.get("title") or "")[:60]
         raw_temp = result.temps.get(row["id"], 0.0)
         mult = merge_multiplier(row.get("merge_count"), bonus=merge_bonus, cap=merge_cap)
         effective = raw_temp * mult
-        flag = "styled" if row.get("styled_at") else "raw"
         source = row.get("source") or "?"
         published = (row.get("published_at") or "")[:10] or "?"
         merge = row.get("merge_count") or 1
@@ -832,7 +828,7 @@ def _format_store_browse(store: NewsStore, config: dict[str, Any]) -> str:
             snippet += "…"
 
         merge_note = f" merge×{merge}" if merge > 1 else ""
-        lines.append(f"{i}. [{row['id']}] {effective:.1f}° [{flag}]{merge_note}")
+        lines.append(f"{i}. [{row['id']}] {effective:.1f}°{merge_note}")
         lines.append(f"   {title}")
         lines.append(f"   {source} | {published} | {signal_str} | {snippet}")
         lines.append("")
@@ -845,7 +841,7 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
 
     Returns a helpful error with valid id hints if the row is not found.
     """
-    row = store.get_store_row(row_id, "telegram")
+    row = store.get_story(row_id)
     if row is None:
         valid_ids = store.list_store_ids("telegram")
         if valid_ids:
@@ -856,14 +852,11 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
 
     lines = [f"Store row {row_id}", ""]
 
-    title = display_title(row) or "(untitled)"
-    flag = "styled" if row.get("styled_at") else "raw"
+    title = str(row.get("title") or "") or "(untitled)"
     lines.append(f"Title: {title}")
-    raw_title = str(row.get("title") or "")
-    styled = str(row.get("styled_title") or "")
-    if styled and styled != raw_title:
-        lines.append(f"Raw title: {raw_title}")
-    lines.append(f"State: {flag}")
+    summary = str(row.get("summary") or "")
+    if summary:
+        lines.append(f"Summary: {summary}")
     lines.append("")
 
     # Score breakdown
@@ -919,20 +912,28 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
         except Exception:
             lines.append(f"  Merged URLs: (parse error)")
 
-    styled_at = row.get("styled_at")
-    if styled_at:
-        lines.append(f"  Styled at: {styled_at}")
-        body = row.get("body") or ""
-        if body:
-            lines.append(f"  Styled body: {body[:200]}{'…' if len(body) > 200 else ''}")
-    else:
-        snippet = row.get("snippet") or ""
-        if snippet:
-            lines.append(f"  Snippet: {snippet[:200]}{'…' if len(snippet) > 200 else ''}")
+    snippet = row.get("snippet") or ""
+    if snippet:
+        lines.append(f"  Snippet: {snippet[:200]}{'…' if len(snippet) > 200 else ''}")
 
     lines.append(f"  Scored at: {row.get('scored_at') or '(unscored)'}")
     lines.append(f"  Lookback hours: {row.get('lookback_hours') or '?'}")
-    lines.append(f"  Message ID: {row.get('message_id') or '(none)'}")
+
+    delivery = store._conn.execute(
+        "SELECT styled_title, styled_body, message_id FROM deliveries "
+        "WHERE post_id=? AND channel='telegram'",
+        (row_id,),
+    ).fetchone()
+    if delivery is not None:
+        lines.append("")
+        lines.append("Telegram delivery:")
+        if delivery["styled_title"]:
+            lines.append(f"  styled_title: {delivery['styled_title']}")
+        if delivery["styled_body"]:
+            body = str(delivery["styled_body"])
+            lines.append(f"  styled_body: {body[:200]}{'…' if len(body) > 200 else ''}")
+        if delivery["message_id"] is not None:
+            lines.append(f"  message_id: {delivery['message_id']}")
 
     return "\n".join(lines)
 
@@ -1176,8 +1177,6 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
         async def on_status() -> str:
             cfg = load_config(settings)
             rows = store.list_store_rows("telegram")
-            styled = sum(1 for row in rows if row.get("styled_at"))
-            raw = len(rows) - styled
             result, floor, ratio, _, _ = _pick_snapshot(store, cfg)
             last_gen_slot = settings.get("scheduler", "last_gen_slot", default="") or ""
             last_post_slot = settings.get("scheduler", "last_post_slot", default="") or ""
@@ -1188,7 +1187,7 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             post_status = "running" if coordinator.posting_running else "idle"
             summary_status = "running" if coordinator.summary_running else "idle"
             return (
-                f"Store: {len(rows)} rows ({raw} raw, {styled} styled)\n"
+                f"Store: {len(rows)} rows\n"
                 f"Threshold: {result.threshold:.1f} (floor {floor:.1f}, {ratio:.2f}× median {result.median:.1f})\n"
                 f"Last skip: {skip}\n"
                 f"Last generation slot: {last_gen_slot or 'never'}\n"

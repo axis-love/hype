@@ -100,16 +100,7 @@ def store(tmp_path: Path) -> Iterator[NewsStore]:
 
 
 def _mark_posted(store: NewsStore, row_id: int, posted_at: str) -> None:
-    """Mark a row as posted with a specific timestamp.
-
-    Sets posted_at on pending_posts AND inserts a 'telegram' delivery
-    row with the same timestamp, mirroring mark_posted's dual-write
-    but allowing a custom timestamp for window-testing.
-    """
-    store._conn.execute(
-        "UPDATE pending_posts SET posted_at=? WHERE id=?",
-        (posted_at, row_id),
-    )
+    """Mark a row as posted with a specific timestamp on deliveries."""
     store._conn.execute(
         "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
         "VALUES(?,?,?,?)",
@@ -168,11 +159,12 @@ class TestWitcherRegression:
         assert all(r["id"] != row_id for r in unposted), \
             "posted row must not appear in list_store_rows"
 
-        # posted_at must be unchanged.
+        # Delivery timestamp must be unchanged.
         row = store._conn.execute(
-            "SELECT posted_at FROM pending_posts WHERE id=?", (row_id,)
+            "SELECT delivered_at FROM deliveries WHERE post_id=? AND channel='telegram'",
+            (row_id,),
         ).fetchone()
-        assert row["posted_at"] == posted_at
+        assert row["delivered_at"] == posted_at
 
 
 # --- AC 2: Mac Studio case -------------------------------------------------
@@ -565,7 +557,11 @@ class TestUnpostedOnlyMethods:
         assert evicted == 1  # the one unposted row evicted
         # Posted row must survive.
         assert store._conn.execute(
-            "SELECT 1 FROM pending_posts WHERE id=? AND posted_at IS NOT NULL",
+            "SELECT 1 FROM pending_posts WHERE id=?",
+            (cold_id,),
+        ).fetchone() is not None
+        assert store._conn.execute(
+            "SELECT 1 FROM deliveries WHERE post_id=? AND channel='telegram'",
             (cold_id,),
         ).fetchone() is not None
 
@@ -597,10 +593,14 @@ class TestMergeIntoPostedRow:
         store.merge_into_store_row(row_id, candidate, "https://reddit.com/r/test/comments/abc/original")
 
         row = store._conn.execute(
-            "SELECT posted_at, merge_count FROM pending_posts WHERE id=?",
+            "SELECT merge_count FROM pending_posts WHERE id=?",
             (row_id,),
         ).fetchone()
-        assert row["posted_at"] == posted_at, "merge must not change posted_at"
+        delivered = store._conn.execute(
+            "SELECT delivered_at FROM deliveries WHERE post_id=? AND channel='telegram'",
+            (row_id,),
+        ).fetchone()
+        assert delivered["delivered_at"] == posted_at, "merge must not change delivered_at"
         assert row["merge_count"] == 2
 
 

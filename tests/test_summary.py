@@ -52,8 +52,7 @@ def _seed_posted_row(store: NewsStore, title: str = "Posted story") -> None:
 
     store.add_stories_to_store([scored_story(title, 80.0)], [])
     row = store.list_store_rows("telegram")[0]
-    store.set_styled_content(int(row["id"]), title, "Styled body text.")
-    store.mark_posted(int(row["id"]))
+    store.mark_posted(int(row["id"]), styled_title=title, styled_body="Styled body text.")
 
 
 class TestRunSummary:
@@ -244,8 +243,9 @@ class TestRecapInputItemsFallback:
     def test_styled_row_uses_styled_body(self):
         from newsbot.main import _recap_input_items
 
-        rows = [{"title": "Styled post", "body": "  Styled body here.  ",
-                 "snippet": "Raw snippet.", "category": "AI", "url": "https://x.io",
+        rows = [{"title": "English title", "styled_title": "Styled post",
+                 "styled_body": "  Styled body here.  ",
+                 "summary": "Engine summary.", "category": "AI", "url": "https://x.io",
                  "source": "hn", "posted_at": "2026-08-16T06:00:00+00:00",
                  "message_id": 7}]
         items = _recap_input_items(rows)
@@ -257,11 +257,13 @@ class TestRecapInputItemsFallback:
     def test_legacy_row_with_empty_body_falls_back_to_snippet(self):
         from newsbot.main import _recap_input_items
 
-        rows = [{"title": "Legacy post", "body": "", "snippet": "  Raw snippet only.  ",
+        rows = [{"title": "Legacy post", "styled_title": "", "styled_body": "",
+                 "summary": "  Raw snippet only.  ",
                  "category": "AI", "url": "https://x.io", "source": "hn",
                  "posted_at": "2026-08-15T06:00:00+00:00", "message_id": None}]
         items = _recap_input_items(rows)
         assert items[0]["body"] == "Raw snippet only."
+        assert items[0]["title"] == "Legacy post"
 
     def test_row_with_neither_body_nor_snippet_yields_empty(self):
         from newsbot.main import _recap_input_items

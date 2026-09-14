@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from newsbot.db import NewsStore
+from tests.helpers import insert_story
 
 
 @pytest.fixture
@@ -65,7 +66,7 @@ class TestMigrations:
         """NewsStore should work as a context manager."""
         db_path = tmp_path / "test.sqlite"
         with NewsStore(db_path) as store:
-            store.add_pending_post({"title": "T", "body": "B", "url": ""})
+            insert_story(store, "T", "")
             assert store.count_pending("telegram") == 1
         # Connection should be closed after context exit.
         with pytest.raises(sqlite3.ProgrammingError):
@@ -78,7 +79,7 @@ class TestRetentionPruning:
     def test_prune_delivered_removes_old(self, store):
         """Posted posts older than the cutoff should be removed."""
         # Insert and mark as posted with an old timestamp.
-        store.add_pending_post({"title": "Old", "body": "B", "url": ""})
+        insert_story(store, "Old", "")
         old_ts = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat(timespec="seconds")
         post = store.list_unposted_posts("telegram")[0]
         store._conn.execute(
@@ -93,10 +94,14 @@ class TestRetentionPruning:
 
     def test_prune_delivered_preserves_recent(self, store):
         """Recently posted posts should NOT be removed."""
-        store.add_pending_post({"title": "Recent", "body": "B", "url": ""})
+        insert_story(store, "Recent", "")
         recent_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
         post = store.list_unposted_posts("telegram")[0]
-        store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (recent_ts, post["id"]))
+        store._conn.execute(
+            "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
+            "VALUES(?,?,?,?)",
+            (post["id"], "telegram", recent_ts, None),
+        )
 
         deleted = store.prune_delivered(max_age_days=30)
         assert deleted == 0
@@ -106,10 +111,10 @@ class TestRetentionPruning:
 
     def test_prune_delivered_preserves_unposted(self, store):
         """Unposted posts should NEVER be removed by prune_delivered."""
-        store.add_pending_post({"title": "Unposted", "body": "B", "url": ""})
+        insert_story(store, "Unposted", "")
         # Set a very old created_at to try to trick the pruner.
         old_ts = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat(timespec="seconds")
-        store._conn.execute("UPDATE pending_posts SET created_at=? WHERE posted_at IS NULL", (old_ts,))
+        store._conn.execute("UPDATE pending_posts SET created_at=?", (old_ts,))
 
         deleted = store.prune_delivered(max_age_days=1)
         assert deleted == 0
@@ -152,7 +157,7 @@ class TestRetentionPruning:
         # Insert 100 old posted posts.
         old_ts = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat(timespec="seconds")
         for i in range(100):
-            store.add_pending_post({"title": f"Old{i}", "body": "B", "url": ""})
+            insert_story(store, f"Old{i}", "")
             post = store.list_unposted_posts("telegram")[0]
             store._conn.execute(
                 "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
@@ -187,8 +192,10 @@ class TestScoreColumnsMigration:
 
     def test_legacy_rows_have_null_scores(self, store):
         """Rows inserted before migration 3 should have NULL score columns."""
-        # Insert a post the old way (no score data).
-        store.add_pending_post({"title": "Legacy", "body": "B", "url": ""})
+        store._conn.execute(
+            "INSERT INTO pending_posts(title, url, created_at) VALUES(?,?,?)",
+            ("Legacy", "", "2026-01-01T00:00:00+00:00"),
+        )
         row = store._conn.execute(
             "SELECT score_at_queue, engagement_score, scored_at FROM pending_posts WHERE title='Legacy'"
         ).fetchone()
@@ -225,9 +232,9 @@ class TestScoreColumnsMigration:
         assert rows[0]["scored_at"] is None
         # Migration 4 backfills legacy rows with merge_count=1 (additive default).
         assert rows[0]["merge_count"] == 1
-        # Migration 5 adds message_id (NULL for legacy rows).
-        assert rows[0]["message_id"] is None
-        # Migration 6 adds origin_topic (NULL for legacy rows).
+        # Migration 10 drops Telegram columns from pending_posts.
+        assert "message_id" not in rows[0].keys()
+        assert "posted_at" not in rows[0].keys()
         assert rows[0]["origin_topic"] is None
         # Migration 7 creates deliveries table. This row has posted_at
         # NULL so backfill skips it — no delivery row should exist.
@@ -237,7 +244,7 @@ class TestScoreColumnsMigration:
         assert del_count["n"] == 0
         # Verify all migrations were applied.
         version_row = store2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-        assert version_row["v"] == 9
+        assert version_row["v"] == 10
         store2.close()
 
 
@@ -335,9 +342,9 @@ class TestListUnpostedPosts:
 
     def test_ordering_oldest_first(self, store):
         """Posts should be ordered by created_at, id (oldest first)."""
-        store.add_pending_post({"title": "First", "body": "B", "url": ""})
-        store.add_pending_post({"title": "Second", "body": "B", "url": ""})
-        store.add_pending_post({"title": "Third", "body": "B", "url": ""})
+        insert_story(store, "First", "")
+        insert_story(store, "Second", "")
+        insert_story(store, "Third", "")
         posts = store.list_unposted_posts("telegram")
         assert len(posts) == 3
         assert posts[0]["title"] == "First"
@@ -346,8 +353,8 @@ class TestListUnpostedPosts:
 
     def test_excludes_posted(self, store):
         """Posted posts should not appear in list_unposted_posts."""
-        store.add_pending_post({"title": "Unposted", "body": "B", "url": ""})
-        store.add_pending_post({"title": "AlsoUnposted", "body": "B", "url": ""})
+        insert_story(store, "Unposted", "")
+        insert_story(store, "AlsoUnposted", "")
         post = store.list_unposted_posts("telegram")[0]
         store.mark_posted(post["id"])
         unposted = store.list_unposted_posts("telegram")

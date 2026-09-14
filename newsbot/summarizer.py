@@ -35,6 +35,8 @@ FILTER_SYSTEM = (
     "actively discussed. For kept items, assign a category (e.g. 'AI / Coding', 'LLM', 'Game Dev', "
     "'VR/AR', 'Robotics', 'Research', 'Tools'), an importance score from 1 to 10, a "
     "one-line reason, and a one-line short_summary. "
+    "title and short_summary MUST be in English regardless of the source language; "
+    "short_summary is one factual sentence, no opinion. "
     "Return STRICT JSON: {\"items\":[{\"id\":\"c001\",\"keep\":true,\"title\":...,"
     "\"category\":...,\"importance\":8,\"reason\":...,\"short_summary\":...}]}. "
     "Each item MUST include the 'id' field exactly as given in the input. "

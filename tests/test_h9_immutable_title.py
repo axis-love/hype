@@ -1,4 +1,4 @@
-"""flow_001165: immutable Pass A title; styled_title for Telegram."""
+"""flow_001165 / H15: immutable Pass A title; channel copy on deliveries."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,7 @@ from typing import Iterator
 
 import pytest
 
-from newsbot.db import NewsStore, _migration_9, display_title
+from newsbot.db import NewsStore, _migration_9
 from newsbot.dedupe import match_candidate_to_store
 from newsbot.main import _recap_input_items
 
@@ -28,27 +28,34 @@ def _freeze_time(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api_module, "_now", lambda: NOW)
 
 
-class TestSetStyledLeavesTitle:
+class TestMarkPostedLeavesTitle:
     def test_title_stays_english(self, store: NewsStore) -> None:
         store.add_stories_to_store(
             [_story(title="Mistral raises €3B", url="https://mistral.ai/x")],
             [],
         )
         rid = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
-        store.set_styled_content(
-            rid, "Три миллиарда евро, чтобы Франция перестала быть ИИ-колбасой", "body"
+        store.mark_posted(
+            rid,
+            message_id=7,
+            styled_title="Три миллиарда евро, чтобы Франция перестала быть ИИ-колбасой",
+            styled_body="body",
         )
         row = store._conn.execute(
-            "SELECT title, styled_title, body FROM pending_posts WHERE id=?", (rid,)
+            "SELECT title FROM pending_posts WHERE id=?", (rid,)
         ).fetchone()
         assert row["title"] == "Mistral raises €3B"
-        assert row["styled_title"].startswith("Три миллиарда")
-        assert row["body"] == "body"
+        d = store._conn.execute(
+            "SELECT styled_title, styled_body FROM deliveries WHERE post_id=?",
+            (rid,),
+        ).fetchone()
+        assert d["styled_title"].startswith("Три миллиарда")
+        assert d["styled_body"] == "body"
 
     @pytest.mark.asyncio
     async def test_girllm_api_returns_raw_title_after_style(self, store: NewsStore) -> None:
         ids = _seed_store(store, [_story(title="Mistral raises €3B", url="https://mistral.ai/x")])
-        store.set_styled_content(ids[0], "Три миллиарда евро", "ru body")
+        store.mark_posted(ids[0], styled_title="Три миллиарда евро", styled_body="ru body")
         app = _make_app(store)
         client = await _get_client(app)
         try:
@@ -70,8 +77,8 @@ class TestRecapUsesStyledTitle:
         rows = [{
             "title": "Mistral raises €3B",
             "styled_title": "Три миллиарда евро",
-            "body": "Styled body.",
-            "snippet": "English snippet about Mistral.",
+            "styled_body": "Styled body.",
+            "summary": "English snippet about Mistral.",
             "category": "AI",
             "url": "https://mistral.ai/x",
             "source": "hn",
@@ -82,12 +89,12 @@ class TestRecapUsesStyledTitle:
         assert items[0]["title"] == "Три миллиарда евро"
         assert items[0]["body"] == "Styled body."
 
-    def test_recap_falls_back_to_title(self) -> None:
+    def test_recap_falls_back_to_title_and_summary(self) -> None:
         rows = [{
             "title": "English raw",
             "styled_title": None,
-            "body": "",
-            "snippet": "snip",
+            "styled_body": "",
+            "summary": "English summary.",
             "category": "AI",
             "url": "https://x.io",
             "source": "hn",
@@ -96,7 +103,7 @@ class TestRecapUsesStyledTitle:
         }]
         items = _recap_input_items(rows)
         assert items[0]["title"] == "English raw"
-        assert items[0]["body"] == "snip"
+        assert items[0]["body"] == "English summary."
 
 
 class TestMigration9:
@@ -170,17 +177,16 @@ class TestMigration9:
         s2 = NewsStore(path)
         v2 = s2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
         s2.close()
-        assert v1 == v2 == 9
+        assert v1 == v2 == 10
 
 
 class TestMatchUsesRawTitle:
-    def test_english_recollection_matches_styled_row(self, store: NewsStore) -> None:
+    def test_english_recollection_matches_row(self, store: NewsStore) -> None:
         store.add_stories_to_store(
             [_story(title="Mistral raises €3B", url="https://mistral.ai/x")],
             [],
         )
         rid = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
-        store.set_styled_content(rid, "Три миллиарда евро", "ru")
         rows = store.list_store_rows("telegram")
         hit = match_candidate_to_store(
             {"title": "Mistral raises €3B", "url": "https://other.example/mistral"},
@@ -191,16 +197,9 @@ class TestMatchUsesRawTitle:
         assert hit["title"] == "Mistral raises €3B"
 
 
-def test_display_title_prefers_styled() -> None:
-    assert display_title({"title": "en", "styled_title": "ru"}) == "ru"
-    assert display_title({"title": "en", "styled_title": None}) == "en"
-    assert display_title({}) == ""
-
-
-def test_no_post_insert_title_writer() -> None:
-    """grep-equivalent: set_styled_content must not write pending_posts.title."""
+def test_mark_posted_does_not_write_pending_posts_title() -> None:
     from newsbot import db as db_mod
     src = Path(db_mod.__file__).read_text(encoding="utf-8")
-    # The live writer is set_styled_content; it must target styled_title.
-    assert "SET styled_title=?, body=?, styled_at=?" in src
+    assert "def mark_posted(" in src
+    assert "UPDATE pending_posts SET posted_at" not in src
     assert "SET title=?, body=?, styled_at=?" not in src
