@@ -68,7 +68,7 @@ async def _fetch_one(client: httpx.AsyncClient, *, params: dict[str, Any], sourc
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[Candidate]:
+async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch HN candidates. *config* is the news.sources.hackernews block."""
     if not config:
         return []
@@ -85,8 +85,10 @@ async def collect(config: dict[str, Any]) -> list[Candidate]:
     else:
         requests.append({"tags": tags, "hitsPerPage": limit})
 
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+    from newsbot.collectors.base import owned_client
+
+    async with owned_client(client, timeout=15.0, follow_redirects=True) as c:
         results = []
         for params in requests:
-            results.extend(await _fetch_one(client, params=params, source_name=source_name))
+            results.extend(await _fetch_one(c, params=params, source_name=source_name))
     return results

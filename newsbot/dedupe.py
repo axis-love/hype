@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -383,179 +384,143 @@ def _fuzzy_ratio(a: str, b: str) -> float:
     return 100.0 * len(ta & tb) / len(ta | tb)
 
 
-def _merge_pair(keep: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
-    """Merge *other* into *keep*, summing engagement across distinct sources only.
+_ENG_FIELDS = ("upvotes", "comments", "stars", "forks", "reposts")
 
-    Returns the merged *keep* dict (mutated in place).
 
-    Key rules:
-    - Engagement is summed only when the other item comes from a different
-      source than any already merged. Same-source duplicates (e.g. same GitHub
-      repo from multiple search queries) take the MAX engagement value
-      (not first-seen, not re-summed).
-    - crosspost_count reflects all distinct contributing sources (not capped at 2).
-    - contributing_sources is a persistent list on the output item.
-    - The representative source is deterministic: highest pre-merge preference
-      wins, tie-break by normalized source ID alphabetically. This is
-      order-independent — reversing collector input produces the same primary.
-    - When the primary changes, all representative fields (source, url, title,
-      snippet, published_at) are copied consistently from the new primary.
-    """
-    # Track contributing sources in a persistent list.
-    if not keep.get("contributing_sources"):
-        keep["contributing_sources"] = [keep.get("source") or "unknown"]
-    # Track contributing URLs (every absorbed candidate's url and
-    # external_url) so the store can persist them in merged_urls and
-    # seen-marking can include them. Survives primary-source switch.
-    if not keep.get("contributing_urls"):
-        keep["contributing_urls"] = []
-    # Track per-source engagement values so same-source duplicates
-    # can take MAX per source without inflating other sources' totals.
-    if "_per_source_eng" not in keep:
-        keep["_per_source_eng"] = {}
-    my_source = keep.get("source") or "unknown"
-    if my_source not in keep["_per_source_eng"]:
-        keep["_per_source_eng"][my_source] = {
-            f: keep.get(f) or 0 for f in ("upvotes", "comments", "stars", "forks", "reposts")
-        }
+def _eng_snapshot(item: dict[str, Any]) -> dict[str, int]:
+    return {f: int(item.get(f) or 0) for f in _ENG_FIELDS}
+
+
+@dataclass(slots=True)
+class _MergeGroup:
+    """Scratch accumulator for one duplicate group. Never leaks onto the dict."""
+
+    rep: dict[str, Any]
+    per_source_eng: dict[str, dict[str, int]]
+    primary_pref: float
+    merged_published_at: Any
+    source_names: set[str]
+
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> _MergeGroup:
+        src = item.get("source") or "unknown"
+        if not item.get("contributing_sources"):
+            item["contributing_sources"] = [src]
+        if not item.get("contributing_urls"):
+            item["contributing_urls"] = []
+        names: set[str] = set()
+        for n in str(item.get("source_name") or "").split(" + "):
+            n = n.strip()
+            if n:
+                names.add(n)
+        return cls(
+            rep=item,
+            per_source_eng={src: _eng_snapshot(item)},
+            primary_pref=_pre_merge_preference(item),
+            merged_published_at=item.get("published_at"),
+            source_names=names,
+        )
+
+    def finalize(self) -> dict[str, Any]:
+        keep = self.rep
+        keep["source_name"] = " + ".join(sorted(self.source_names))
+        for field in _ENG_FIELDS:
+            keep[field] = sum(src_eng[field] for src_eng in self.per_source_eng.values())
+        sources = set(keep["contributing_sources"])
+        sources.discard(None)
+        sources.discard("")
+        sources.discard("unknown")
+        keep["crosspost_count"] = max(int(keep.get("crosspost_count") or 1), len(sources))
+        if self.merged_published_at:
+            keep["published_at"] = self.merged_published_at
+        return keep
+
+
+def _merge_pair(group: _MergeGroup, other: dict[str, Any]) -> _MergeGroup:
+    """Merge *other* into *group*, summing engagement across distinct sources."""
+    keep = group.rep
     other_source = other.get("source") or "unknown"
-    other_eng = {
-        f: other.get(f) or 0 for f in ("upvotes", "comments", "stars", "forks", "reposts")
-    }
-
-    # Track the individual preference of the current primary candidate.
-    if "_primary_preference" not in keep:
-        keep["_primary_preference"] = _pre_merge_preference(keep)
+    other_eng = _eng_snapshot(other)
     other_pref = _pre_merge_preference(other)
 
-    # Accumulate the absorbed candidate's url and external_url into
-    # contributing_urls (deduped). These are persisted in merged_urls
-    # and seen-marking so a recycled permalink is caught next cycle.
     for curl in (other.get("url"), _external_url_key(other)):
         cs = str(curl or "").strip()
         if cs and cs not in keep["contributing_urls"]:
             keep["contributing_urls"].append(cs)
 
     if other_source not in keep["contributing_sources"]:
-        # New distinct source: add to contributing sources, record its engagement.
         keep["contributing_sources"].append(other_source)
-        keep["_per_source_eng"][other_source] = other_eng
+        group.per_source_eng[other_source] = other_eng
     else:
-        # Same-source duplicate: take MAX engagement per field for this source.
-        if other_source not in keep["_per_source_eng"]:
-            keep["_per_source_eng"][other_source] = {
-                f: 0 for f in ("upvotes", "comments", "stars", "forks", "reposts")
-            }
-        for field in ("upvotes", "comments", "stars", "forks", "reposts"):
-            keep["_per_source_eng"][other_source][field] = max(
-                keep["_per_source_eng"][other_source][field],
-                other_eng[field]
+        if other_source not in group.per_source_eng:
+            group.per_source_eng[other_source] = {f: 0 for f in _ENG_FIELDS}
+        for fld in _ENG_FIELDS:
+            group.per_source_eng[other_source][fld] = max(
+                group.per_source_eng[other_source][fld], other_eng[fld]
             )
 
-    # Recompute total engagement from per-source tracking.
-    for field in ("upvotes", "comments", "stars", "forks", "reposts"):
-        keep[field] = sum(
-            src_eng[field] for src_eng in keep["_per_source_eng"].values()
-        )
+    for fld in _ENG_FIELDS:
+        keep[fld] = sum(src_eng[fld] for src_eng in group.per_source_eng.values())
 
-    # upvote_ratio: take the max (Reddit-only field; non-Reddit items have None).
     if other.get("upvote_ratio") is not None:
         a = keep.get("upvote_ratio") or 0.0
         b = other.get("upvote_ratio") or 0.0
         keep["upvote_ratio"] = max(a, b)
 
-    # published_at: keep the most recent (max). This is the merged value
-    # and must NOT be overwritten by the primary-source switch below,
-    # because the primary's timestamp may be older than the merged max.
-    a_ts = keep.get("published_at")
+    a_ts = group.merged_published_at or keep.get("published_at")
     b_ts = other.get("published_at")
     if a_ts and b_ts:
-        keep["published_at"] = max(str(a_ts), str(b_ts))
+        group.merged_published_at = max(str(a_ts), str(b_ts))
     elif b_ts and not a_ts:
-        keep["published_at"] = b_ts
+        group.merged_published_at = b_ts
+    keep["published_at"] = group.merged_published_at
 
-    # Store the merged published_at so the primary-source switch
-    # below does not clobber it with the new primary's (possibly older) value.
-    keep["_merged_published_at"] = keep["published_at"]
-
-    # snippet: keep the longer one (more info).
     if len(str(other.get("snippet") or "")) > len(str(keep.get("snippet") or "")):
         keep["snippet"] = other.get("snippet")
 
-    # Track the union of source names so the digest can list them.
-    if "_source_names_set" not in keep:
-        keep["_source_names_set"] = set()
     for it in (keep, other):
         for n in str(it.get("source_name") or "").split(" + "):
             n = n.strip()
             if n:
-                keep["_source_names_set"].add(n)
-    keep["source_name"] = " + ".join(sorted(keep["_source_names_set"]))
+                group.source_names.add(n)
+    keep["source_name"] = " + ".join(sorted(group.source_names))
 
-    # crosspost_count = number of distinct contributing sources (not capped at 2).
     sources = set(keep["contributing_sources"])
     sources.discard(None)
     sources.discard("")
     sources.discard("unknown")
     keep["crosspost_count"] = max(int(keep.get("crosspost_count") or 1), len(sources))
 
-    # Deterministic primary-source selection using pre-merge preference:
-    # Compares individual candidate preferences (stored in _primary_preference),
-    # not the inflated merged engagement value. Order-independent.
-    # Tie-break: source ID alphabetically.
-    if other_pref > keep["_primary_preference"] or (
-        other_pref == keep["_primary_preference"]
+    if other_pref > group.primary_pref or (
+        other_pref == group.primary_pref
         and str(other.get("source") or "") < str(keep.get("source") or "")
     ):
-        # Before switching, capture the old primary's url and external_url
-        # in contributing_urls (the old primary is now "absorbed" too).
         for curl in (keep.get("url"), _external_url_key(keep)):
             cs = str(curl or "").strip()
             if cs and cs not in keep["contributing_urls"]:
                 keep["contributing_urls"].append(cs)
-        # Switch primary: copy all representative fields from other,
-        # EXCEPT published_at — that's the merged max, already computed.
         keep["source"] = other.get("source") or keep.get("source")
         keep["url"] = other.get("url") or keep.get("url")
         keep["title"] = other.get("title") or keep.get("title")
-        # Carry raw_json from the new primary so the write-boundary
-        # reddit link-post URL swap (flow_001125) can read is_self and
-        # external_url. Merge dicts instead of replacing outright —
-        # the old primary's raw_json may carry per-feed fields (e.g.
-        # 'weight' for official RSS) that scoring reads. New primary's
-        # keys take precedence.
         old_rj = keep.get("raw_json")
         new_rj = other.get("raw_json")
         if isinstance(new_rj, dict):
-            if isinstance(old_rj, dict):
-                merged_rj = {**old_rj, **new_rj}
-            else:
-                merged_rj = {**new_rj}
-            keep["raw_json"] = merged_rj
+            keep["raw_json"] = {**(old_rj if isinstance(old_rj, dict) else {}), **new_rj}
         if other.get("snippet"):
             keep["snippet"] = other["snippet"]
-        # Restore the merged published_at — the new primary's timestamp
-        # may be older than the merged max we already computed above.
-        if "_merged_published_at" in keep:
-            keep["published_at"] = keep["_merged_published_at"]
+        keep["published_at"] = group.merged_published_at
         if other.get("score") is not None:
             keep["score"] = other["score"]
-        # Update primary preference to the new primary's individual value.
-        keep["_primary_preference"] = other_pref
-
-    return keep
+        group.primary_pref = other_pref
+    return group
 
 
 def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group duplicates and merge each group into one candidate.
-
-    Returns the deduplicated list (order preserved by first occurrence).
-    """
+    """Group duplicates and merge each group into one candidate."""
     if not items:
         return []
 
-    # Index: canonical_key -> index of the representative in `result`.
-    result: list[dict[str, Any]] = []
+    result: list[_MergeGroup] = []
     url_index: dict[str, int] = {}
     title_index: dict[str, int] = {}
     gh_index: dict[str, int] = {}
@@ -565,42 +530,32 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         external = _external_url_key(item)
         norm_title = _normalize_title(item.get("title"))
         gh_key = _github_repo_key(item)
-
         match_idx: int | None = None
 
-        # 1. GitHub repo full_name (strongest for GitHub items).
         if gh_key and gh_key in gh_index:
             match_idx = gh_index[gh_key]
-        # 2. Canonical URL — the item's own URL, or the article a Reddit
-        #    link post points at (so a Reddit post about the IGN story
-        #    merges with the IGN RSS item instead of relying on titles).
         elif canon and canon in url_index:
             match_idx = url_index[canon]
         elif external and external in url_index:
             match_idx = url_index[external]
-        # 3. Exact normalized title.
         elif norm_title and norm_title in title_index:
             match_idx = title_index[norm_title]
         else:
-            # 4b. Trends containment: if this is a trends candidate, check
-            # if its trend tokens are ALL contained in any existing result's
-            # title. Scoped to source == "trends" (H-3).
             if str(item.get("source") or "") == "trends":
-                for idx, rep in enumerate(result):
-                    if _trends_containment_match(item, rep):
+                for idx, group in enumerate(result):
+                    if _trends_containment_match(item, group.rep):
                         match_idx = idx
                         log.info(
                             "dedupe_trends_match: trend '%s' matched candidate '%s'",
                             str(item.get("source_name") or ""),
-                            str(rep.get("title") or "")[:80],
+                            str(group.rep.get("title") or "")[:80],
                         )
                         break
-            # 4. Fuzzy title match (>0.90). Linear scan — N is small (hundreds).
             if match_idx is None and norm_title:
                 best_idx = -1
                 best_ratio = 0.0
-                for idx, rep in enumerate(result):
-                    rep_title = _normalize_title(rep.get("title"))
+                for idx, group in enumerate(result):
+                    rep_title = _normalize_title(group.rep.get("title"))
                     if not rep_title:
                         continue
                     ratio = _fuzzy_ratio(norm_title, rep_title)
@@ -613,7 +568,7 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     match_idx = best_idx
 
         if match_idx is None:
-            result.append(item)
+            result.append(_MergeGroup.from_item(item))
             idx = len(result) - 1
             if canon:
                 url_index[canon] = idx
@@ -625,11 +580,6 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 gh_index[gh_key] = idx
         else:
             _merge_pair(result[match_idx], item)
-            # After merging, update indexes with the merged item's
-            # canonical URL and normalized title so that future candidates
-            # matching the merged item (or the item just absorbed) find
-            # the same group. This prevents transitive duplicates from
-            # splitting into separate groups.
             if canon:
                 url_index[canon] = match_idx
             if external:
@@ -640,92 +590,74 @@ def dedupe_and_merge(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 gh_index[gh_key] = match_idx
 
     log.info("dedupe: %d candidates -> %d unique", len(items), len(result))
+    return [g.finalize() for g in result]
 
-    # Clean up internal-only tracking fields (but keep contributing_sources
-    # and contributing_urls — those are persisted to the store).
-    for item in result:
-        item.pop("_source_names_set", None)
-        item.pop("_primary_preference", None)
-        item.pop("_per_source_eng", None)
-        item.pop("_merged_published_at", None)
 
-    return result
+@dataclass(frozen=True, slots=True)
+class _RowKeys:
+    row: dict[str, Any]
+    canon: str
+    url_set: frozenset[str]
+    ext_key: str
+    gh_key: str
+    norm_title: str
 
 
 def match_candidate_to_store(candidate: dict, store_rows: list[dict]) -> dict | None:
-    """Return the store row matching this candidate, or None.
-
-    Identity checks run in the same order and with the same priority as
-    `dedupe_and_merge` — at check level across ALL rows (a URL match on any
-    row beats a title match on any row), first match wins:
-
-      1. GitHub repo key — candidate via `_github_repo_key` (requires
-         source="github"), store rows via `_row_github_repo_key` (derived
-         from the row URL, since store rows carry no source field).
-      2. Canonical URL (`_canonical_url`) against row['url'] AND each entry
-         of the row's merged_urls JSON string. Also includes external-URL
-         identity: candidate `_external_url_key` vs row url + merged_urls,
-         AND candidate canonical url + external key vs the ROW's
-         `_row_external_url_key` (parsed from raw_json, tolerantly).
-      3. Normalized title (`_normalize_title`) exact match on row['title'].
-      4. Fuzzy title similarity >= FUZZY_THRESHOLD against row titles —
-         same scan semantics as dedupe_and_merge: best ratio tracked across
-         rows, early exit once the threshold is met.
-
-    All helpers are shared with `dedupe_and_merge`; no identity logic is
-    duplicated here. Malformed merged_urls / raw_json JSON degrades to
-    empty / None and never raises.
-    """
+    """Return the store row matching this candidate, or None."""
     if not store_rows:
         return None
 
+    indexed: list[_RowKeys] = []
+    for row in store_rows:
+        row_canon = _canonical_url(row.get("url"))
+        merged = [_canonical_url(u) for u in _merged_urls_list(row)]
+        indexed.append(
+            _RowKeys(
+                row=row,
+                canon=row_canon,
+                url_set=frozenset(x for x in [row_canon, *merged] if x),
+                ext_key=_row_external_url_key(row),
+                gh_key=_row_github_repo_key(row.get("url")),
+                norm_title=_normalize_title(row.get("title")),
+            )
+        )
+
     gh_key = _github_repo_key(candidate)
     if gh_key:
-        for row in store_rows:
-            if gh_key == _row_github_repo_key(row.get("url")):
-                return row
+        for keys in indexed:
+            if gh_key == keys.gh_key:
+                return keys.row
 
-    # Candidate-side URL family: canonical url and external_url key.
     canon = _canonical_url(candidate.get("url"))
     ext_key = _external_url_key(candidate)
     if canon or ext_key:
-        for row in store_rows:
-            row_canon = _canonical_url(row.get("url"))
-            row_urls = [row_canon] + [ _canonical_url(u) for u in _merged_urls_list(row) ]
-            # (a) candidate canonical url vs row url + merged_urls
-            if canon and canon in row_urls:
-                return row
-            # (b) candidate external_url key vs row url + merged_urls
-            if ext_key and ext_key in row_urls:
-                return row
-            # (c) candidate canonical url vs row's external_url
-            row_ext = _row_external_url_key(row)
-            if canon and row_ext and canon == row_ext:
-                return row
-            # (d) candidate external key vs row's external_url
-            if ext_key and row_ext and ext_key == row_ext:
-                return row
+        for keys in indexed:
+            if canon and canon in keys.url_set:
+                return keys.row
+            if ext_key and ext_key in keys.url_set:
+                return keys.row
+            if canon and keys.ext_key and canon == keys.ext_key:
+                return keys.row
+            if ext_key and keys.ext_key and ext_key == keys.ext_key:
+                return keys.row
 
     norm_title = _normalize_title(candidate.get("title"))
     if norm_title:
-        for row in store_rows:
-            if norm_title == _normalize_title(row.get("title")):
-                return row
-
-        # Fuzzy fallback (>0.90). Linear scan — the store is small (cap ~36).
+        for keys in indexed:
+            if norm_title == keys.norm_title:
+                return keys.row
         best_row: dict | None = None
         best_ratio = 0.0
-        for row in store_rows:
-            row_title = _normalize_title(row.get("title"))
-            if not row_title:
+        for keys in indexed:
+            if not keys.norm_title:
                 continue
-            ratio = _fuzzy_ratio(norm_title, row_title)
+            ratio = _fuzzy_ratio(norm_title, keys.norm_title)
             if ratio > best_ratio:
                 best_ratio = ratio
-                best_row = row
+                best_row = keys.row
             if best_ratio >= FUZZY_THRESHOLD:
                 break
         if best_row is not None and best_ratio >= FUZZY_THRESHOLD:
             return best_row
-
     return None

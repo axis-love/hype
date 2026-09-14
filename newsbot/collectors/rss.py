@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 _RSS_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
 
-async def _fetch_one(feed: dict[str, Any]) -> list[Candidate]:
+async def _fetch_one(feed: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     url = str(feed.get("url") or "").strip()
     if not url:
         return []
@@ -49,8 +49,9 @@ async def _fetch_one(feed: dict[str, Any]) -> list[Candidate]:
     sem = get_shared_semaphore()
     async with sem:
         try:
-            async with httpx.AsyncClient(timeout=_RSS_TIMEOUT, follow_redirects=True) as client:
-                response = await client.get(url)
+            from newsbot.collectors.base import owned_client
+            async with owned_client(client, timeout=_RSS_TIMEOUT, follow_redirects=True) as c:
+                response = await c.get(url)
                 content = response.content
         except httpx.TimeoutException:
             log.warning("RSS fetch timed out for %s url=%s", source_name, url)
@@ -98,12 +99,12 @@ async def _fetch_one(feed: dict[str, Any]) -> list[Candidate]:
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[Candidate]:
+async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch RSS candidates. *config* is the news.sources.rss block."""
     feeds = config.get("feeds") or []
     if not feeds:
         return []
-    batches = await asyncio.gather(*[_fetch_one(f) for f in feeds if isinstance(f, dict)], return_exceptions=True)
+    batches = await asyncio.gather(*[_fetch_one(f, client) for f in feeds if isinstance(f, dict)], return_exceptions=True)
     results = []
     for batch in batches:
         if isinstance(batch, Exception):

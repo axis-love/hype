@@ -63,6 +63,17 @@ class LMClient:
         # Debug export must NEVER leak secrets.
         # Keep last_request header-free by default.
         self.last_request: Optional[Dict[str, Any]] = None
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     @staticmethod
     def _looks_like_html_error(body: str) -> bool:
@@ -126,65 +137,62 @@ class LMClient:
         }
 
         url = f"{self.base_url}{self.endpoint_path}"
-        # Record request for debugging — URL only (no auth headers, no body).
         self.last_request = {"url": url, "model": self.model}
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            last_error: Optional[LLMTransientError] = None
-            attempts = max(1, self.max_retries)
-            for attempt in range(attempts):
+        client = await self._ensure_client()
+        last_error: Optional[LLMTransientError] = None
+        attempts = max(1, self.max_retries)
+        for attempt in range(attempts):
+            try:
+                r = await client.post(url, json=payload, headers=(self.headers or None))
+                r.raise_for_status()
+
+                if not r.content:
+                    last_error = LLMTransientError("LLM returned 200 with empty body")
+                    if attempt == attempts - 1:
+                        break
+                    delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
+                    await asyncio.sleep(delay)
+                    continue
+
+                data = r.json()
+                if not data or not data.get("choices"):
+                    return "", "empty_response"
+
+                content = data["choices"][0]["message"]["content"]
+                return (
+                    content if content is not None else "",
+                    data["choices"][0].get("finish_reason", ""),
+                )
+            except httpx.TimeoutException:
+                last_error = LLMTransientError(f"LLM request timed out after {self.timeout}s")
+            except httpx.TransportError:
+                last_error = LLMTransientError("LLM transport error (connection failed)")
+            except httpx.HTTPStatusError as exc:
+                response = exc.response
+                response_body = ""
                 try:
-                    r = await client.post(url, json=payload, headers=(self.headers or None))
-                    r.raise_for_status()
-
-                    # Caddy/muse can intermittently return 200 with an empty body.
-                    # Retry on empty responses.
-                    if not r.content:
-                        last_error = LLMTransientError("LLM returned 200 with empty body")
-                        if attempt == attempts - 1:
-                            break
-                        delay = 1.0 * (2 ** attempt) + random.uniform(0.0, 0.5)
-                        await asyncio.sleep(delay)
-                        continue
-
-                    data = r.json()
-                    if not data or not data.get("choices"):
-                        return "", "empty_response"
-
-                    content = data["choices"][0]["message"]["content"]
-                    return (
-                        content if content is not None else "",
-                        data["choices"][0].get("finish_reason", "")
-                    )
-                except httpx.TimeoutException:
-                    last_error = LLMTransientError(f"LLM request timed out after {self.timeout}s")
-                except httpx.TransportError:
-                    last_error = LLMTransientError("LLM transport error (connection failed)")
-                except httpx.HTTPStatusError as exc:
-                    response = exc.response
-                    response_body = ""
+                    response_body = response.text
+                except Exception:
                     try:
-                        response_body = response.text
+                        response_body = json.dumps(response.json())
                     except Exception:
-                        try:
-                            response_body = json.dumps(response.json())
-                        except Exception:
-                            response_body = ""
-                    is_transient, error_class, message = self._classify_http_error(
-                        response.status_code,
-                        response_body,
-                    )
-                    error = error_class(message)
-                    if not is_transient:
-                        raise error from exc
-                    last_error = error
+                        response_body = ""
+                is_transient, error_class, message = self._classify_http_error(
+                    response.status_code,
+                    response_body,
+                )
+                error = error_class(message)
+                if not is_transient:
+                    raise error from exc
+                last_error = error
 
-                if attempt == attempts - 1:
-                    break
-                # Bounded backoff: 1s, 2s, 4s (+ jitter), capped at 10s.
-                delay = min(1.0 * (2 ** attempt) + random.uniform(0.0, 0.5), 10.0)
-                await asyncio.sleep(delay)
+            if attempt == attempts - 1:
+                break
+            delay = min(1.0 * (2 ** attempt) + random.uniform(0.0, 0.5), 10.0)
+            await asyncio.sleep(delay)
 
-            if last_error is not None:
-                raise last_error
-            raise LLMTransientError("LLM request failed after retries with no error detail")
+        if last_error is not None:
+            raise last_error
+        raise LLMTransientError("LLM request failed after retries with no error detail")
+

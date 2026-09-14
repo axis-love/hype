@@ -102,17 +102,16 @@ def _extract_news_items(item: ET.Element) -> list[dict[str, str]]:
     return items
 
 
-async def _fetch_one_geo(geo: str, limit: int) -> list[Candidate]:
+async def _fetch_one_geo(geo: str, limit: int, client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch trending RSS for one geo and return candidates."""
     url = f"{_TRENDS_RSS_BASE}?geo={geo}"
 
     sem = get_shared_semaphore()
     async with sem:
         try:
-            async with httpx.AsyncClient(
-                timeout=_TRENDS_TIMEOUT, follow_redirects=True,
-            ) as client:
-                response = await client.get(url)
+            from newsbot.collectors.base import owned_client
+            async with owned_client(client, timeout=_TRENDS_TIMEOUT, follow_redirects=True) as c:
+                response = await c.get(url)
                 content = response.content
         except httpx.TimeoutException:
             log.warning("Trends fetch timed out for geo=%s url=%s", geo, url)
@@ -168,7 +167,7 @@ async def _fetch_one_geo(geo: str, limit: int) -> list[Candidate]:
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[Candidate]:
+async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch Google Trends candidates.
 
     *config* is the news.sources.trends block. Geos are fetched
@@ -189,7 +188,7 @@ async def collect(config: dict[str, Any]) -> list[Candidate]:
     results: list[Candidate] = []
     for geo in geos:
         try:
-            results.extend(await _fetch_one_geo(geo, limit))
+            results.extend(await _fetch_one_geo(geo, limit, client))
         except Exception as exc:  # defensive: the collector never raises
             log.warning("Trends fetch error for geo=%s: %s", geo, exc)
     return results

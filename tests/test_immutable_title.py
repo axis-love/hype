@@ -12,7 +12,7 @@ from newsbot.db import NewsStore, _migration_9
 from newsbot.dedupe import match_candidate_to_store
 from newsbot.recap import _recap_input_items
 
-from tests.test_h4_api import NOW, _get_client, _make_app, _seed_store, _story
+from tests.test_items_api import NOW, _get_client, _make_app, _seed_store, _story
 
 
 @pytest.fixture

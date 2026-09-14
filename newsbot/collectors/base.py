@@ -11,8 +11,11 @@ from __future__ import annotations
 import html
 import math
 import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Optional, TypedDict
+from typing import Any, AsyncIterator, Optional, TypedDict
+
+import httpx
 
 
 # --- Source identifier validation ---
@@ -296,3 +299,16 @@ def to_iso_utc(value: Any) -> Optional[str]:
         return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
     except ValueError:
         return None
+
+
+@asynccontextmanager
+async def owned_client(
+    existing: httpx.AsyncClient | None = None,
+    **kwargs: Any,
+) -> AsyncIterator[httpx.AsyncClient]:
+    """Use *existing* if given, otherwise open (and close) a new client."""
+    if existing is not None:
+        yield existing
+        return
+    async with httpx.AsyncClient(**kwargs) as client:
+        yield client

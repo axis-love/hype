@@ -304,6 +304,7 @@ async def post_digest(
     bot_token: str,
     chat_id: str,
     parse_mode: str = "HTML",
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     """Post *text* to the Telegram channel. Returns per-chunk send results.
 
@@ -328,11 +329,13 @@ async def post_digest(
     chunks = _split_for_telegram(text)
     results: list[dict[str, Any]] = []
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    from newsbot.collectors.base import owned_client
+
+    async with owned_client(client, timeout=30.0) as c:
         for idx, chunk in enumerate(chunks):
             payload = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}
             try:
-                result = await _send_with_retry(client, url, payload, idx)
+                result = await _send_with_retry(c, url, payload, idx)
             except httpx.HTTPError as exc:
                 log.error("chunk %d: transport error after retries: %s", idx, redact_exception(exc))
                 if results:
@@ -374,6 +377,7 @@ async def post_rich_message(
     bot_token: str,
     chat_id: str,
     blocks: list[dict[str, Any]] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> list[dict[str, Any]]:
     """Post a rich message via Bot API sendRichMessage.
 
@@ -418,9 +422,11 @@ async def post_rich_message(
     # The URL contains the bot token — never log it directly.
     url = f"{BOT_API_BASE}/bot{bot_token}/sendRichMessage"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    from newsbot.collectors.base import owned_client
+
+    async with owned_client(client, timeout=30.0) as c:
         try:
-            result = await _send_with_retry(client, url, payload, 0)
+            result = await _send_with_retry(c, url, payload, 0)
         except httpx.HTTPStatusError as exc:
             log.warning("rich message rejected (status=%d) — caller falls back to HTML",
                         exc.response.status_code)
