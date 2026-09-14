@@ -17,6 +17,7 @@ import pytest
 
 from newsbot.db import NewsStore
 from newsbot.main import _run_generation
+from newsbot.outcome import Outcome
 
 
 @pytest.fixture
@@ -106,7 +107,7 @@ class TestAdditiveGeneration:
         _patch_pipeline(monkeypatch, _make_cfg(), [new_story], keep_ids={"c001"})
 
         result = await _run_generation(store, MagicMock())
-        assert result == 0
+        assert result == Outcome.OK
 
         rows = store.list_store_rows("telegram")
         titles = {r["title"] for r in rows}
@@ -134,7 +135,7 @@ class TestAdditiveGeneration:
         _patch_pipeline(monkeypatch, _make_cfg(), [dup], keep_ids={"c001"})
 
         result = await _run_generation(store, MagicMock())
-        assert result == 0
+        assert result == Outcome.OK
 
         rows = store.list_store_rows("telegram")
         assert len(rows) == 1, "duplicate must merge, not insert a new row"
@@ -163,7 +164,7 @@ class TestAdditiveGeneration:
         _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids={"c001", "c002"})
 
         result = await _run_generation(store, MagicMock())
-        assert result == 0
+        assert result == Outcome.OK
         assert store.is_seen("https://a.example.com/1", "Story A"), "added story must be seen"
         assert store.is_seen("https://anchor.example.com/1", "Seen Anchor"), \
             "merged story must also be seen (all survivors live in the store)"
@@ -186,7 +187,7 @@ class TestAdditiveGeneration:
         _patch_pipeline(monkeypatch, _make_cfg(), [fresh], keep_ids={"c001"})
 
         result = await _run_generation(store, MagicMock())
-        assert result == 0
+        assert result == Outcome.OK
 
         rows = store.list_store_rows("telegram")
         assert len(rows) == cap, f"store must be capped at {cap}, got {len(rows)}"
@@ -219,7 +220,7 @@ class TestAdditiveGeneration:
         _patch_pipeline(monkeypatch, _make_cfg(), stories, keep_ids={"c001"})
 
         result = await _run_generation(store, MagicMock())
-        assert result == 0
+        assert result == Outcome.OK
         assert style_called["n"] == 0
 
     async def test_merges_only_still_success(self, store, monkeypatch):
@@ -236,7 +237,7 @@ class TestAdditiveGeneration:
         _patch_pipeline(monkeypatch, _make_cfg(), [dup], keep_ids={"c001"})
 
         result = await _run_generation(store, MagicMock())
-        assert result == 0
+        assert result == Outcome.OK
         rows = store.list_store_rows("telegram")
         assert len(rows) == 1 and rows[0]["merge_count"] == 2
 

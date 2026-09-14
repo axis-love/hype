@@ -21,6 +21,7 @@ from core.settings_store import SettingsStore
 from lm_client import LMClient
 from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore
+from newsbot.outcome import Outcome
 from newsbot.images import extract_article_media
 from newsbot.richmd import (
     RECAP_MAX_ITEMS,
@@ -30,7 +31,7 @@ from newsbot.richmd import (
     render_post_blocks,
     signature_for,
 )
-from newsbot.selection import pick_hottest, select_for_consumer
+from newsbot.selection import select_for_consumer
 from newsbot.summarizer import llm_style_posts
 from newsbot.telegram_poster import (
     PartialDeliveryError,
@@ -161,12 +162,12 @@ class JobCoordinator:
     replaces the queue — a single lock prevents that race.
 
     Admission flags are set *before* awaiting the lock so that additional
-    same-type requests immediately return 2 (skipped) instead of queuing
+    same-type requests immediately return BUSY instead of queuing
     behind the lock and running after the first completes.
 
     - At most one job (generation OR posting) runs at a time.
-    - Re-entrant calls of the same type are skipped (returns 2).
-    - Generation result (0=success, 1=failure) is propagated to the caller.
+    - Re-entrant calls of the same type are skipped (BUSY).
+    - Generation result (OK / FAILED / NOTHING_TO_DO) is propagated.
     """
 
     def __init__(self, store: NewsStore, settings: SettingsStore) -> None:
@@ -194,38 +195,37 @@ class JobCoordinator:
     def summary_running(self) -> bool:
         return self._summary_running
 
-    async def run_summary(self, summary_fn: Any) -> int:
+    async def run_summary(self, summary_fn: Any) -> Outcome:
         """Acquire the job lock and run the daily summary job.
 
-        Returns the summary_fn's result (0=success, 1=failure, 3=skipped
-        because fewer than one post landed in the window), or 2 if another
-        job is already holding the lock (busy).
+        Returns the summary_fn's Outcome, or BUSY if another job is
+        already holding the lock.
         """
         if self._summary_running:
             log.info("summary already in progress — skipping")
-            return 2
+            return Outcome.BUSY
         self._summary_running = True
         try:
             async with self._job_lock:
                 result = await summary_fn()
-                return int(result) if result is not None else 0
+                return result if result is not None else Outcome.OK
         finally:
             self._summary_running = False
 
-    async def run_generation(self, gen_fn: Any, *, timeout: float = 0) -> int:
+    async def run_generation(self, gen_fn: Any, *, timeout: float = 0) -> Outcome:
         """Acquire the job lock and run the generation cycle.
 
-        Returns the gen_fn's result (0=success, 1=failure), or 2 if
-        another generation is already in progress (skipped).
+        Returns the gen_fn's Outcome, or BUSY if another generation is
+        already in progress.
 
         If *timeout* > 0, the generation is bounded to that many seconds.
-        A timeout returns 1 (failure) — the prior queue remains intact.
+        A timeout returns FAILED — the prior queue remains intact.
         """
         # Admission check: set flag BEFORE awaiting the lock so concurrent
-        # requests see the flag and immediately return 2 instead of queuing.
+        # requests see the flag and immediately return BUSY instead of queuing.
         if self._gen_running:
             log.info("generation already in progress — skipping")
-            return 2
+            return Outcome.BUSY
         self._gen_running = True
         try:
             async with self._job_lock:
@@ -234,22 +234,22 @@ class JobCoordinator:
                         result = await asyncio.wait_for(gen_fn(), timeout=timeout)
                     except asyncio.TimeoutError:
                         log.error("generation timed out after %ds — keeping existing queue", timeout)
-                        return 1
+                        return Outcome.FAILED
                 else:
                     result = await gen_fn()
-                return int(result) if result is not None else 0
+                return result if result is not None else Outcome.OK
         finally:
             self._gen_running = False
 
-    async def run_posting(self) -> int:
+    async def run_posting(self) -> Outcome:
         """Acquire the job lock and post one pending post.
 
-        Returns 0 on success, 1 on failure, 2 if another posting is
-        in progress (skipped).
+        Returns OK on success, FAILED on failure, BUSY if another
+        posting is in progress.
         """
         if self._post_running:
             log.info("posting already in progress — skipping")
-            return 2
+            return Outcome.BUSY
         self._post_running = True
         try:
             async with self._job_lock:
@@ -257,33 +257,35 @@ class JobCoordinator:
         finally:
             self._post_running = False
 
-    async def drain_posts(self) -> int:
+    async def drain_posts(self) -> Outcome:
         """Acquire the job lock and drain all pending posts.
 
         Used by --once and dry-run modes. Picks and delivers posts
-        sequentially until the store is empty (3) or nothing is hot
-        enough (4). Returns 0 on success, 1 on failure, 2 if another
-        posting is already in progress (skipped).
+        sequentially until the store is empty (NOTHING_TO_DO) or
+        nothing is hot enough (BELOW_THRESHOLD). Those healthy
+        terminals map to OK so --once/dry-run exit 0. Returns FAILED
+        on delivery error, BUSY if another posting is already in
+        progress.
         """
         if self._post_running:
             log.info("posting already in progress — cannot drain")
-            return 2
+            return Outcome.BUSY
         self._post_running = True
         try:
             async with self._job_lock:
                 while True:
                     result = await self._deliver_one()
-                    if result in (3, 4):
+                    if result is Outcome.NOTHING_TO_DO or result is Outcome.BELOW_THRESHOLD:
                         # Empty store or nothing hot enough — done. Both are
                         # healthy terminal states, so --once/dry-run exit 0.
-                        return 0
-                    if result != 0:
+                        return Outcome.OK
+                    if result is not Outcome.OK:
                         return result
             # Continue until no more pending posts.
         finally:
             self._post_running = False
 
-    async def _deliver_one(self) -> int:
+    async def _deliver_one(self) -> Outcome:
         """Pick the hottest eligible store row, style it, deliver, mark posted.
 
         Style-at-pick: the store holds RAW scored rows; styling happens here,
@@ -299,10 +301,10 @@ class JobCoordinator:
 
         Shared by run_posting (single) and drain_posts (loop).
         Returns:
-            0 — success: a post was styled, delivered, and marked posted.
-            1 — failure: styler or delivery failed (slot NOT consumed).
-            3 — no-op: store is empty.
-            4 — threshold skip: nothing hot enough (slot consumed).
+            OK — success: a post was styled, delivered, and marked posted.
+            FAILED — styler or delivery failed (slot NOT consumed).
+            NOTHING_TO_DO — store is empty.
+            BELOW_THRESHOLD — nothing hot enough (slot consumed).
         """
         cfg = load_config(self._settings)
         rows = self._store.list_store_rows("telegram")
@@ -324,7 +326,7 @@ class JobCoordinator:
         if result.reason == "empty":
             log.debug("store empty — nothing to post")
             self._last_skip_reason = "empty"
-            return 3
+            return Outcome.NOTHING_TO_DO
         if result.reason == "below_threshold":
             log.info(json.dumps({
                 "event": "post_skip",
@@ -334,11 +336,11 @@ class JobCoordinator:
                 "cooldown_excluded": len(result.excluded_ids),
             }))
             self._last_skip_reason = "below_threshold"
-            return 4
+            return Outcome.BELOW_THRESHOLD
 
         row = result.row
         if row is None:
-            return 4  # unreachable in practice; keeps the type narrowed
+            return Outcome.BELOW_THRESHOLD  # unreachable in practice; keeps the type narrowed
         row_id = int(row["id"])
         raw_temp = result.temps[row_id]
         self._last_skip_reason = ""  # a pick happened; no skip to report
@@ -353,16 +355,16 @@ class JobCoordinator:
         except Exception as exc:
             log.error("styler raised for row id=%d — will retry within the hour: %s",
                       row_id, redact_exception(exc))
-            return 1
+            return Outcome.FAILED
         if not styled:
             log.error("styler failed for row id=%d — will retry within the hour", row_id)
-            return 1
+            return Outcome.FAILED
 
         styled_title = str(styled[0].get("title") or row.get("title") or "").strip()
         styled_body = str(styled[0].get("body") or "").strip()
         if not styled_body:
             log.error("styler returned empty body for row id=%d — will retry", row_id)
-            return 1
+            return Outcome.FAILED
 
         log.info(json.dumps({
             "event": "post_pick",
@@ -419,7 +421,7 @@ class JobCoordinator:
         blocks: list[dict[str, Any]] | None = None,
         styled_title: str | None = None,
         styled_body: str | None = None,
-    ) -> int:
+    ) -> Outcome:
         """Deliver a post (rich markdown/blocks, HTML fallback) and mark it posted.
 
         Delivery goes through sendRichMessage — the exact renderer and
@@ -447,8 +449,8 @@ class JobCoordinator:
                     "CRITICAL: post id=%d dry-run delivered but mark_posted failed: %s",
                     row_id, redact_exception(db_exc),
                 )
-                return 1
-            return 0
+                return Outcome.FAILED
+            return Outcome.OK
 
         try:
             try:
@@ -486,10 +488,10 @@ class JobCoordinator:
             except Exception as db_exc:
                 log.error("CRITICAL: post id=%d delivered but mark_posted failed: %s "
                           "— row may be re-delivered on retry", row_id, redact_exception(db_exc))
-            return 1  # Still report failure — operator should investigate
+            return Outcome.FAILED  # Still report failure — operator should investigate
         except Exception as exc:
             log.error("failed to post store row id=%d: %s", row_id, redact_exception(exc))
-            return 1
+            return Outcome.FAILED
 
         # Delivery succeeded — extract message_id from the first chunk's
         # Telegram response for channel-post linking (OQ-2).
@@ -519,6 +521,6 @@ class JobCoordinator:
                 "— row will be re-delivered on next cycle unless manually resolved",
                 row_id, redact_exception(db_exc),
             )
-            return 1  # Report failure so the scheduler doesn't advance timestamp
+            return Outcome.FAILED  # Report failure so the scheduler doesn't advance timestamp
 
-        return 0
+        return Outcome.OK

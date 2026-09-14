@@ -43,10 +43,35 @@ import httpx
 from core.log_sanitizer import redact_exception, redact_text
 from core.settings_store import SettingsStore
 from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT, load_config
+from newsbot.outcome import Outcome
 from newsbot.telegram_poster import post_rich_message, RichSendRejected
 from newsbot.topics import DEFAULT_TOPIC_PACKS, merge_packs as _merge_topic_packs, validate_topic_overrides as _validate_topic_overrides
 
 log = logging.getLogger(__name__)
+
+# kind + Outcome → the RuntimeError text the /digest, /post, /summary
+# handlers used to hardcode. None means success (no message).
+_OUTCOME_MESSAGES: dict[tuple[str, Outcome], str] = {
+    ("digest", Outcome.BUSY): "generation already in progress — skipped",
+    ("digest", Outcome.NOTHING_TO_DO): (
+        "no new posts generated (empty collection, all seen, or LLM returned nothing)"
+    ),
+    ("digest", Outcome.FAILED): "generation failed — check logs for details",
+    ("post", Outcome.BUSY): "posting already in progress — skipped",
+    ("post", Outcome.NOTHING_TO_DO): "no pending posts to deliver",
+    ("post", Outcome.BELOW_THRESHOLD): "nothing hot enough to post right now",
+    ("post", Outcome.FAILED): "posting failed — check logs for details",
+    ("summary", Outcome.BUSY): "summary already in progress — skipped",
+    ("summary", Outcome.NOTHING_TO_DO): "nothing posted in the last 24h — nothing to recap",
+    ("summary", Outcome.FAILED): "daily recap failed — check logs for details",
+}
+
+
+def outcome_message(kind: str, outcome: Outcome) -> str | None:
+    """Human message for a non-OK job outcome, or None on OK / unknown."""
+    if outcome is Outcome.OK:
+        return None
+    return _OUTCOME_MESSAGES.get((kind, outcome))
 
 BOT_API_BASE = "https://api.telegram.org"
 POLL_TIMEOUT = 60  # long-poll seconds

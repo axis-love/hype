@@ -41,7 +41,6 @@ from aiohttp import web
 from core.settings_store import SettingsStore, default_store
 from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore
-from newsbot.scoring import merge_multiplier
 from newsbot.selection import select_for_consumer
 
 log = logging.getLogger(__name__)
@@ -131,20 +130,8 @@ async def _handle_items(request: web.Request) -> web.Response:
     since = (now - timedelta(hours=24)).isoformat(timespec="seconds")
     deliveries = store.list_posted_since(channel, since)
 
-    # Use select_for_consumer to get the PickResult — its temps dict has
-    # the full temperature map for all rows after topic filtering. We
-    # then build the ranked list from the same eligible set.
     result = select_for_consumer(rows, deliveries, profile, cfg, now=now)
 
-    # Build the ranked list from all rows that passed topic filter +
-    # cooldown + threshold. select_for_consumer already applied all three
-    # before calling pick_hottest, but pick_hottest only returns the winner.
-    # We need to re-apply the same filtering to get the full eligible list.
-    #
-    # Rather than duplicating the filter logic, we use the temps dict from
-    # the PickResult (which covers all rows after topic filtering —
-    # pick_hottest receives the filtered list) and reconstruct the eligible
-    # set: rows whose temp >= threshold and not in excluded_ids.
     max_candidates = int(profile.get("max_candidates", _DEFAULT_LIMIT))
 
     # Parse limit from query string, cap to max_candidates.
@@ -156,38 +143,10 @@ async def _handle_items(request: web.Request) -> web.Response:
         limit = _DEFAULT_LIMIT
     limit = min(limit, max_candidates)
 
-    # Reconstruct the topic-filtered + cooldown-excluded row set.
-    # select_for_consumer did this internally; we need the same set to
-    # rank them. The temps dict keys are row IDs after topic filtering.
-    # excluded_ids contains rows excluded by cooldown.
-    temps = result.temps
-    excluded = set(result.excluded_ids)
-
-    # Filter: temp >= threshold AND not excluded.
-    eligible = [
-        (row_id, temp)
-        for row_id, temp in temps.items()
-        if row_id not in excluded and temp >= result.threshold
-    ]
-
-    # Sort by temperature × merge_multiplier descending.
-    # We need merge_count per row — fetch from the rows list.
-    row_map = {row["id"]: row for row in rows}
-    merge_bonus = float(profile.get("merge_bonus", 0.2))
-    merge_cap = float(profile.get("merge_cap", 2.0))
-
-    def _rank_key(item: tuple[int, float]) -> float:
-        row_id, temp = item
-        row = row_map.get(row_id)
-        mc = int(row.get("merge_count") or 1) if row else 1
-        return temp * merge_multiplier(mc, bonus=merge_bonus, cap=merge_cap)
-
-    eligible.sort(key=_rank_key, reverse=True)
-    eligible = eligible[:limit]
-
     items = []
-    for row_id, temp in eligible:
-        row = row_map.get(row_id, {})
+    for row in result.eligible[:limit]:
+        row_id = int(row["id"])
+        temp = result.temps[row_id]
         matched_topics = row.get("matched_topics")
         if isinstance(matched_topics, str):
             try:
