@@ -377,7 +377,7 @@ async def _fetch_group(
 
 # --- Public entry point ---------------------------------------------------
 
-async def collect(config: dict[str, Any]) -> list[Candidate]:
+async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch Reddit candidates via batched multi-subreddit JSON API.
 
     *config* is the news.sources.reddit block. Subreddits are fetched in

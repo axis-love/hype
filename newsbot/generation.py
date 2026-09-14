@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
+
 from core.log_sanitizer import redact_exception
 from core.settings_store import SettingsStore
 from newsbot.collectors import (
@@ -56,22 +58,23 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
     sources = cfg["sources"]
     tasks: list[tuple[str, Any]] = []
 
-    for name, module in COLLECTORS.items():
-        if name in sources:
-            tasks.append((name, module.collect(sources[name])))
+    async with httpx.AsyncClient(follow_redirects=True) as shared:
+        for name, module in COLLECTORS.items():
+            if name in sources:
+                tasks.append((name, module.collect(sources[name], shared)))
 
-    if not tasks:
-        log.warning("no collectors enabled in config")
-        return []
+        if not tasks:
+            log.warning("no collectors enabled in config")
+            return []
 
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_COLLECTORS)
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_COLLECTORS)
 
-    async def _bounded(coro):
-        async with semaphore:
-            return await coro
+        async def _bounded(coro):
+            async with semaphore:
+                return await coro
 
-    coros = [_bounded(c) for _, c in tasks]
-    batches = await asyncio.gather(*coros, return_exceptions=True)
+        coros = [_bounded(c) for _, c in tasks]
+        batches = await asyncio.gather(*coros, return_exceptions=True)
 
     items: list[dict[str, Any]] = []
     failed_collectors: list[str] = []

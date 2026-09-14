@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 HF_DAILY_PAPERS_URL = "https://huggingface.co/api/daily_papers"
 
 
-async def collect(config: dict[str, Any]) -> list[Candidate]:
+async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch HF Papers candidates. *config* is the news.sources.huggingface_papers block."""
     if not config:
         # enabled but empty config — still fetch defaults
@@ -36,8 +36,9 @@ async def collect(config: dict[str, Any]) -> list[Candidate]:
     sem = get_shared_semaphore()
     async with sem:
         try:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-                r = await client.get(HF_DAILY_PAPERS_URL)
+            from newsbot.collectors.base import owned_client
+            async with owned_client(client, timeout=20.0, follow_redirects=True) as c:
+                r = await c.get(HF_DAILY_PAPERS_URL)
                 if r.status_code >= 400:
                     log.warning("HF Papers fetch failed url=%s status=%s", HF_DAILY_PAPERS_URL, r.status_code)
                     return []

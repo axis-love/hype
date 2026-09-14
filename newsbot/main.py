@@ -230,6 +230,8 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             await api_runner.cleanup()
         if bot_handler:
             await bot_handler.close()
+        from newsbot.llm import aclose_clients
+        await aclose_clients()
         store.close()
 
 

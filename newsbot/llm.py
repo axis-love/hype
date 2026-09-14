@@ -9,12 +9,14 @@ from lm_client import LMClient
 Role = Literal["filter", "style"]
 
 
-def build_lm_client(role: Role = "style") -> LMClient:
-    """Build an LMClient from env.
+_clients: dict[Role, LMClient] = {}
 
-    role='filter' uses LM_FILTER_MODEL when set, else LM_MODEL.
-    role='style' always uses LM_MODEL.
-    """
+
+def build_lm_client(role: Role = "style") -> LMClient:
+    """Build (or reuse) an LMClient from env."""
+    cached = _clients.get(role)
+    if cached is not None:
+        return cached
     base = os.getenv("LM_BASE", "").rstrip("/")
     if role == "filter":
         model = os.getenv("LM_FILTER_MODEL", "") or os.getenv("LM_MODEL", "")
@@ -31,7 +33,15 @@ def build_lm_client(role: Role = "style") -> LMClient:
     api_key = os.getenv("LM_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    return LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
+    client = LMClient(base, model, timeout, headers=headers, endpoint_path="/chat/completions")
+    _clients[role] = client
+    return client
+
+
+async def aclose_clients() -> None:
+    for client in _clients.values():
+        await client.aclose()
+    _clients.clear()
 
 
 def validate_llm_env() -> None:

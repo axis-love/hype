@@ -127,7 +127,7 @@ async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort:
     return items
 
 
-async def collect(config: dict[str, Any]) -> list[Candidate]:
+async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
     """Fetch GitHub candidates. *config* is the news.sources.github block."""
     queries = config.get("queries") or []
     if not queries:
@@ -145,9 +145,10 @@ async def collect(config: dict[str, Any]) -> list[Candidate]:
         headers["Authorization"] = f"Bearer {github_token}"
     timeout = httpx.Timeout(20.0)
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, follow_redirects=True) as client:
-        # Fetch queries concurrently for bounded latency.
-        tasks = [_fetch_one(client, query=str(q).strip(), limit=limit, sort=sort)
+    from newsbot.collectors.base import owned_client
+
+    async with owned_client(client, headers=headers, timeout=timeout, follow_redirects=True) as c:
+        tasks = [_fetch_one(c, query=str(q).strip(), limit=limit, sort=sort)
                  for q in queries if str(q).strip()]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
         results = []

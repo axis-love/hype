@@ -76,10 +76,12 @@ def test_dedupe_keeps_unrelated_items_separate():
 
 
 def test_merge_pair_takes_longer_snippet():
+    from newsbot.dedupe import _MergeGroup
     keep = new_candidate(title="t", url="https://example.com", source="hn", source_name="HN", snippet="short")
     other = new_candidate(title="t", url="https://example.com", source="reddit", source_name="r/x", snippet="a much longer snippet than the first one")
-    _merge_pair(keep, other)
-    assert "much longer snippet" in keep["snippet"]
+    group = _MergeGroup.from_item(keep)
+    _merge_pair(group, other)
+    assert "much longer snippet" in group.rep["snippet"]
 
 
 # --- New tests for flow_001027 ------------------------------------------
@@ -828,3 +830,36 @@ def test_trends_containment_dedupe_does_not_merge_partial():
     # "gta 5 rp server has a leak" contains "gta" and "leak" but NOT "6".
     # So no match → 2 separate items.
     assert len(out) == 2
+
+
+def test_match_candidate_parses_merged_urls_once_per_row(monkeypatch):
+    """Each store row's merged_urls JSON is parsed at most once per call."""
+    import newsbot.dedupe as d
+
+    real_loads = json.loads
+    counts = {"n": 0}
+
+    def counting_loads(s, *a, **k):
+        counts["n"] += 1
+        return real_loads(s, *a, **k)
+
+    monkeypatch.setattr(d.json, "loads", counting_loads)
+
+    rows = []
+    for i in range(5):
+        rows.append({
+            "id": i,
+            "title": f"Story {i}",
+            "url": f"https://example.com/{i}",
+            "merged_urls": json.dumps([f"https://other.com/{i}"]),
+            "raw_json": "{}",
+        })
+    cand = new_candidate(
+        title="Unrelated unique title xyzzy",
+        url="https://nomatch.example/z",
+        source="hn",
+        source_name="HN",
+    )
+    match_candidate_to_store(cand, rows)
+    assert counts["n"] <= 10
+
