@@ -495,8 +495,8 @@ async def test_reddit_collect_returns_candidate_instances(monkeypatch):
 
     from newsbot.collectors.base import Candidate
     assert len(items) == 1
-    assert isinstance(items[0], Candidate)
-    assert items[0].source == "reddit"
+    assert isinstance(items[0], dict)
+    assert items[0]["source"] == "reddit"
 
 
 @pytest.mark.asyncio
@@ -537,9 +537,9 @@ async def test_hn_collect_returns_candidate_instances():
         items = await hn.collect({"tags": "front_page", "limit": 10})
 
     assert len(items) == 1
-    assert isinstance(items[0], Candidate)
-    assert items[0].source == "hn"
-    assert items[0].upvotes == 430
+    assert isinstance(items[0], dict)
+    assert items[0]["source"] == "hn"
+    assert items[0]["upvotes"] == 430
 
 
 @pytest.mark.asyncio
@@ -570,10 +570,10 @@ async def test_github_collect_returns_candidate_instances():
         items = await github.collect({"queries": ["llm"], "limit": 5})
 
     assert len(items) == 1
-    assert isinstance(items[0], Candidate)
-    assert items[0].source == "github"
-    assert items[0].stars == 100
-    assert items[0].penalty == 1.0  # no penalty triggers for this repo
+    assert isinstance(items[0], dict)
+    assert items[0]["source"] == "github"
+    assert items[0]["stars"] == 100
+    assert items[0]["penalty"] == 1.0  # no penalty triggers for this repo
 
 
 @pytest.mark.asyncio
@@ -604,8 +604,8 @@ async def test_rss_collect_returns_candidate_instances():
             ]})
 
     assert len(items) == 1
-    assert isinstance(items[0], Candidate)
-    assert items[0].source == "rss"
+    assert isinstance(items[0], dict)
+    assert items[0]["source"] == "rss"
 
 
 # --- Downstream integration tests ---------------------------------------
@@ -658,7 +658,7 @@ def test_candidate_through_summarizer_payload():
     assert c["reason"] == "Major breakthrough"
 
     # Verify to_dict includes summarizer fields
-    d = c.to_dict()
+    d = c
     assert d["candidate_id"] == "test_001"
     assert d["importance"] == 8
     assert d["reason"] == "Major breakthrough"
@@ -666,10 +666,10 @@ def test_candidate_through_summarizer_payload():
     assert d["extracted_text"] == "Researchers at XYZ lab..."
 
     # Verify round-trip through from_dict
-    restored = Candidate.from_dict(d)
-    assert restored.candidate_id == "test_001"
-    assert restored.importance == 8
-    assert restored.reason == "Major breakthrough"
+    restored = new_candidate(**d)
+    assert restored["candidate_id"] == "test_001"
+    assert restored["importance"] == 8
+    assert restored["reason"] == "Major breakthrough"
 
 
 # --- Google Trends collector (H-3) -------------------------------------
@@ -869,8 +869,8 @@ async def test_trends_collect_returns_candidate_instances():
 
     from newsbot.collectors.base import Candidate
     assert len(items) == 1
-    assert isinstance(items[0], Candidate)
-    assert items[0].source == "trends"
+    assert isinstance(items[0], dict)
+    assert items[0]["source"] == "trends"
 
 
 @pytest.mark.asyncio
