@@ -60,13 +60,15 @@ def _build_lm_client() -> LMClient:
 def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
     """Shape a store row like a digest-time candidate for llm_style_posts.
 
-    The styler reads title/url/snippet/published_at plus the engagement
-    signal fields — all persisted on store rows by add_stories_to_store.
+    The styler reads title/url/short_summary/published_at plus the
+    engagement signal fields. short_summary is the Pass A summary
+    persisted on the store row; snippet is collector excerpt only.
     """
     return {
         "candidate_id": f"s{row['id']:03d}",
         "title": row.get("title") or "",
         "url": row.get("url") or "",
+        "short_summary": row.get("summary") or "",
         "snippet": row.get("snippet") or "",
         "published_at": row.get("published_at") or "",
         "upvotes": row.get("upvotes") or 0,
