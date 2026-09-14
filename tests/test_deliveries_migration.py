@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from newsbot.db import NewsStore
+from tests.helpers import insert_story
 
 
 @pytest.fixture
@@ -32,12 +33,12 @@ def _utc_now_iso() -> str:
 class TestMigrationApplies:
     """Migration 7 applies on a fresh DB and on a v6 DB with posted rows."""
 
-    def test_fresh_db_schema_version_9(self, store):
-        """A fresh DB should reach schema_version 9 after init."""
+    def test_fresh_db_schema_version_10(self, store):
+        """A fresh DB should reach schema_version 10 after init."""
         row = store._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert row["v"] == 9
+        assert row["v"] == 10
 
     def test_deliveries_table_exists(self, store):
         """The deliveries table should exist after migration 7."""
@@ -118,7 +119,7 @@ class TestMigrationApplies:
         version_row = store2._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 9
+        assert version_row["v"] == 10
 
         # Backfill: 3 posted rows should have 'telegram' deliveries.
         del_count = store2._conn.execute(
@@ -187,13 +188,9 @@ class TestBackfillCount:
         conn.close()
 
         store2 = NewsStore(db_path)
-        posted_count = store2._conn.execute(
-            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
-        ).fetchone()["n"]
         del_count = store2._conn.execute(
             "SELECT COUNT(*) AS n FROM deliveries WHERE channel='telegram'"
         ).fetchone()["n"]
-        assert del_count == posted_count
         assert del_count == 5
         store2.close()
 
@@ -206,7 +203,7 @@ class TestMarkDeliveredIdempotent:
 
     def test_mark_delivered_twice_one_row(self, store):
         """Double-deliver to the same channel should not duplicate or raise."""
-        store.add_pending_post({"title": "Test", "body": "B", "url": "http://example.com"})
+        insert_story(store, "Test", "http://example.com")
         post_id = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
 
         # First delivery — should insert one row.
@@ -226,7 +223,7 @@ class TestMarkDeliveredIdempotent:
 
     def test_mark_delivered_different_channels(self, store):
         """Delivering to two different channels should produce two rows."""
-        store.add_pending_post({"title": "Test", "body": "B", "url": "http://example.com"})
+        insert_story(store, "Test", "http://example.com")
         post_id = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
 
         store.mark_delivered(post_id, "telegram", message_id=42)
@@ -247,46 +244,35 @@ class TestMarkPostedDualWrite:
 
     def test_mark_posted_sets_posted_at_and_creates_delivery(self, store):
         """mark_posted should set posted_at AND insert a telegram delivery."""
-        store.add_pending_post({"title": "Test", "body": "B", "url": "http://example.com"})
+        insert_story(store, "Test", "http://example.com")
         post_id = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
 
         store.mark_posted(post_id, message_id=77)
 
-        # posted_at should be set.
-        pp_row = store._conn.execute(
-            "SELECT posted_at, message_id FROM pending_posts WHERE id=?", (post_id,)
-        ).fetchone()
-        assert pp_row["posted_at"] is not None
-        assert pp_row["message_id"] == 77
-
-        # telegram delivery should exist.
         del_row = store._conn.execute(
             "SELECT * FROM deliveries WHERE post_id=? AND channel='telegram'", (post_id,)
         ).fetchone()
         assert del_row is not None
         assert del_row["message_id"] == 77
+        assert del_row["delivered_at"] is not None
 
     def test_mark_posted_without_message_id(self, store):
         """mark_posted without message_id should still dual-write."""
-        store.add_pending_post({"title": "Test", "body": "B", "url": "http://example.com"})
+        insert_story(store, "Test", "http://example.com")
         post_id = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
 
         store.mark_posted(post_id)
-
-        pp_row = store._conn.execute(
-            "SELECT posted_at, message_id FROM pending_posts WHERE id=?", (post_id,)
-        ).fetchone()
-        assert pp_row["posted_at"] is not None
 
         del_row = store._conn.execute(
             "SELECT * FROM deliveries WHERE post_id=? AND channel='telegram'", (post_id,)
         ).fetchone()
         assert del_row is not None
         assert del_row["message_id"] is None
+        assert del_row["delivered_at"] is not None
 
     def test_mark_posted_idempotent_delivery(self, store):
         """Calling mark_posted twice should not create duplicate deliveries."""
-        store.add_pending_post({"title": "Test", "body": "B", "url": "http://example.com"})
+        insert_story(store, "Test", "http://example.com")
         post_id = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
 
         store.mark_posted(post_id, message_id=100)

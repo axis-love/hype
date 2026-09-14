@@ -177,23 +177,24 @@ class TestMarkPostedAtomicity:
         finally:
             store._conn = original_conn
 
-        # posted_at must NOT be set (transaction rolled back).
-        row = store._conn.execute(
-            "SELECT posted_at FROM pending_posts WHERE id=?", (rid,)
+        # Delivery must NOT exist (transaction rolled back).
+        d = store._conn.execute(
+            "SELECT COUNT(*) AS n FROM deliveries WHERE post_id=?", (rid,)
         ).fetchone()
-        assert row["posted_at"] is None, \
-            "posted_at must be NULL when delivery insert fails (atomic)"
+        assert d["n"] == 0, "delivery must not exist when insert fails (atomic)"
 
     def test_mark_posted_success_sets_both(self, store):
         store.add_stories_to_store([_story()], [])
         rid = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
         store.mark_posted(rid, message_id=42)
 
-        row = store._conn.execute(
-            "SELECT posted_at, message_id FROM pending_posts WHERE id=?", (rid,)
+        d = store._conn.execute(
+            "SELECT delivered_at, message_id FROM deliveries "
+            "WHERE post_id=? AND channel='telegram'",
+            (rid,),
         ).fetchone()
-        assert row["posted_at"] is not None
-        assert row["message_id"] == 42
+        assert d["delivered_at"] is not None
+        assert d["message_id"] == 42
 
         d = store._conn.execute(
             "SELECT COUNT(*) AS n FROM deliveries WHERE post_id=? AND channel='telegram'",

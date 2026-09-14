@@ -31,16 +31,7 @@ from newsbot.selection import PickResult, pick_hottest
 
 
 def _mark_posted(store: NewsStore, row_id: int, posted_at: str) -> None:
-    """Mark a row as posted with a specific timestamp (dual-write).
-
-    Sets posted_at on pending_posts AND inserts a 'telegram' delivery
-    row with the same timestamp, mirroring mark_posted but allowing
-    a custom timestamp for cooldown window-testing.
-    """
-    store._conn.execute(
-        "UPDATE pending_posts SET posted_at=? WHERE id=?",
-        (posted_at, row_id),
-    )
+    """Mark a row as posted with a specific timestamp on deliveries."""
     store._conn.execute(
         "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id) "
         "VALUES(?,?,?,?)",

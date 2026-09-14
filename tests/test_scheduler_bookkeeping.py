@@ -21,6 +21,7 @@ import pytest
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator
 from newsbot.main import _scheduler_gen_iteration, _scheduler_post_iteration
+from tests.helpers import insert_story
 
 TZ = ZoneInfo("Asia/Bangkok")
 NOW = datetime(2026, 8, 16, 14, 30, tzinfo=TZ)  # even hour, between 05 and 17 gen slots
@@ -366,12 +367,11 @@ class TestRetentionConfigurable:
 
         store = NewsStore(tmp_path / "test.sqlite")
         # Add a posted post with an old timestamp so it's eligible for pruning.
-        store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
+        insert_story(store, "old", "http://old.com")
         post = store.list_unposted_posts("telegram")[0]
         store.mark_posted(post["id"])
         # Set posted_at and delivered_at to 5 days ago.
         old_ts = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(timespec="seconds")
-        store._conn.execute("UPDATE pending_posts SET posted_at=? WHERE id=?", (old_ts, post["id"]))
         store._conn.execute(
             "UPDATE deliveries SET delivered_at=? WHERE post_id=? AND channel='telegram'",
             (old_ts, post["id"]),
@@ -386,7 +386,7 @@ class TestRetentionConfigurable:
 
         # The 5-day-old posted post should be pruned.
         posted_count = store._conn.execute(
-            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
+            "SELECT COUNT(*) AS n FROM deliveries WHERE channel='telegram'"
         ).fetchone()
         assert int(posted_count["n"]) == 0
 
@@ -397,7 +397,7 @@ class TestRetentionConfigurable:
         from unittest.mock import patch
 
         store = NewsStore(tmp_path / "test.sqlite")
-        store.add_pending_post({"title": "old", "body": "b", "url": "http://old.com"})
+        insert_story(store, "old", "http://old.com")
         post = store.list_unposted_posts("telegram")[0]
         store.mark_posted(post["id"])
 
@@ -407,7 +407,7 @@ class TestRetentionConfigurable:
 
         # With defaults (30 days), a just-posted post should NOT be pruned.
         posted_count = store._conn.execute(
-            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
+            "SELECT COUNT(*) AS n FROM deliveries WHERE channel='telegram'"
         ).fetchone()
         assert int(posted_count["n"]) == 1
 
@@ -422,7 +422,7 @@ class TestMarkPostedFailure:
         doesn't advance the timestamp."""
         from newsbot.jobs import JobCoordinator
         from unittest.mock import AsyncMock, patch
-        from tests.helpers import scored_story, echo_style
+        from tests.helpers import insert_story, scored_story, echo_style
         import sqlite3
 
         coordinator = JobCoordinator(store, settings)

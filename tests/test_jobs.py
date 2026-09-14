@@ -9,6 +9,7 @@ import pytest
 from newsbot.config import _consumer_profiles
 from newsbot.db import NewsStore
 from newsbot.jobs import JobCoordinator, _format_recap_html_fallback, format_post_message
+from tests.helpers import insert_story
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ class TestJobCoordinatorSerialization:
     async def test_posting_lock_prevents_overlap(self, coordinator):
         """Two concurrent posting calls — only one should run, the other skipped."""
         # Add a pending post so posting has something to do.
-        coordinator._store.add_pending_post({"title": "T", "body": "B", "url": ""})
+        insert_story(coordinator._store, "T", "")
 
         # Mock the actual delivery to be slow.
         async def slow_deliver(*args, **kwargs):
@@ -93,7 +94,7 @@ class TestJobCoordinatorSerialization:
             return 0
 
         # Add a pending post.
-        coordinator._store.add_pending_post({"title": "T", "body": "B", "url": ""})
+        insert_story(coordinator._store, "T", "")
 
         async def slow_deliver(*args, **kwargs):
             post_started.set()
@@ -131,7 +132,7 @@ class TestJobCoordinatorSerialization:
     @pytest.mark.asyncio
     async def test_posting_lock_released_on_exception(self, coordinator):
         """Lock must be released even if posting raises."""
-        coordinator._store.add_pending_post({"title": "T", "body": "B", "url": ""})
+        insert_story(coordinator._store, "T", "")
 
         async def failing_deliver(*args, **kwargs):
             raise RuntimeError("post failed")
@@ -148,7 +149,7 @@ class TestJobCoordinatorSerialization:
     @pytest.mark.asyncio
     async def test_multiple_gen_queued_behind_post_only_one_runs(self, coordinator):
         """Hold posting active, launch two generation calls, assert only one runs."""
-        coordinator._store.add_pending_post({"title": "T", "body": "B", "url": ""})
+        insert_story(coordinator._store, "T", "")
 
         post_can_finish = asyncio.Event()
 
@@ -203,7 +204,7 @@ class TestJobCoordinatorSerialization:
             deliver_call_count += 1
             return 0
 
-        coordinator._store.add_pending_post({"title": "T", "body": "B", "url": ""})
+        insert_story(coordinator._store, "T", "")
 
         with patch.object(coordinator, "_deliver_one", side_effect=fast_deliver):
             gen_task = asyncio.create_task(coordinator.run_generation(slow_gen))
@@ -259,7 +260,7 @@ class TestJobCoordinatorSerialization:
     @pytest.mark.asyncio
     async def test_no_duplicate_posts_under_concurrent_posting(self, coordinator, store):
         """Concurrent posting calls must not deliver the same post twice."""
-        store.add_pending_post({"title": "T", "body": "B", "url": "http://x.com"})
+        insert_story(store, "T", "http://x.com")
 
         delivered_ids: list[int] = []
 
@@ -292,7 +293,7 @@ class TestJobCoordinatorDrain:
     @pytest.mark.asyncio
     async def test_drain_posts_all(self, coordinator, store):
         """Drain should post all eligible store rows and mark them posted."""
-        from tests.helpers import scored_story, echo_style
+        from tests.helpers import insert_story, scored_story, echo_style
 
         for i in range(3):
             store.add_stories_to_store([scored_story(f"T{i}", 90.0 - i * 5)], [])
@@ -430,7 +431,7 @@ class TestConcurrentGenerationPostingIntegration:
 
         # Exactly 1 post was marked posted.
         posted_count = store._conn.execute(
-            "SELECT COUNT(*) AS n FROM pending_posts WHERE posted_at IS NOT NULL"
+            "SELECT COUNT(*) AS n FROM deliveries WHERE channel='telegram'"
         ).fetchone()
         assert int(posted_count["n"]) == 1
 
@@ -605,7 +606,6 @@ def test_format_scores_threshold_header_and_row(tmp_path):
     assert "floor 35.0" in result  # default NEWS_TEMP_FLOOR
     assert "Test Post About LLMs" in result
     assert "eff" in result and "raw)" in result  # effective + raw temp
-    assert "[raw]" in result  # not yet styled
     assert "source=hn" in result
     store.close()
 
@@ -617,11 +617,9 @@ def test_format_scores_styled_flag(tmp_path):
     from tests.helpers import scored_story
     store = NewsStore(tmp_path / "test.sqlite")
     store.add_stories_to_store([scored_story("Styled One", 150.0)], [])
-    row = store.list_store_rows("telegram")[0]
-    store.set_styled_content(int(row["id"]), "Styled One", "Styled body.")
 
     result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
-    assert "[styled]" in result
+    assert "Styled One" in result
     store.close()
 
 
@@ -635,8 +633,8 @@ def test_format_scores_legacy_row_sinks(tmp_path):
     store.add_stories_to_store([scored_story("Scored Post", 150.0)], [])
     # Legacy row inserted directly (no score columns).
     store._conn.execute(
-        "INSERT INTO pending_posts(title, body, url, created_at) VALUES(?, ?, ?, ?)",
-        ("Legacy Post", "B", "https://legacy.com", "2026-07-28T10:00:00+00:00"),
+        "INSERT INTO pending_posts(title, url, created_at) VALUES(?, ?, ?)",
+        ("Legacy Post", "https://legacy.com", "2026-07-28T10:00:00+00:00"),
     )
 
     result = _format_scores(store, {"lookback_hours": 48, "consumers": _consumer_profiles()})
@@ -728,7 +726,7 @@ class TestSendMessageIdPersistence:
 
         assert result == 0
         row = store._conn.execute(
-            "SELECT message_id FROM pending_posts WHERE posted_at IS NOT NULL"
+            "SELECT message_id FROM deliveries WHERE channel='telegram'"
         ).fetchone()
         assert row["message_id"] == 999
 
@@ -749,7 +747,7 @@ class TestSendMessageIdPersistence:
 
         assert result == 0
         row = store._conn.execute(
-            "SELECT message_id FROM pending_posts WHERE posted_at IS NOT NULL"
+            "SELECT message_id FROM deliveries WHERE channel='telegram'"
         ).fetchone()
         assert row["message_id"] is None
 
@@ -763,7 +761,7 @@ def _seed_store_row(store, title="Test Story", score=80.0, **extra):
     store.add_stories_to_store([story], [])
     row = store.list_store_rows("telegram")[0]
     if extra.get("styled"):
-        store.set_styled_content(int(row["id"]), title, "Styled body text.")
+        store.mark_posted(int(row["id"]), styled_title=title, styled_body="Styled body text.")
     return int(row["id"])
 
 
@@ -798,18 +796,19 @@ class TestFormatStoreBrowse:
         config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
         result = _format_store_browse(store, config)
         assert f"[{row_id}]" in result
-        assert "raw" in result
         assert "Tale" in result
 
-    def test_styled_flag_shown(self, store):
+    def test_browse_has_no_raw_styled_flags(self, store):
         from newsbot.main import _format_store_browse
         from newsbot.config import DEFAULT_SOURCES, DEFAULT_SOURCE_WEIGHTS
 
-        _seed_store_row(store, "Styled", 80.0, styled=True)
+        _seed_store_row(store, "Plain", 80.0)
 
         config = {"sources": DEFAULT_SOURCES, "source_weights": DEFAULT_SOURCE_WEIGHTS, "consumers": _consumer_profiles()}
         result = _format_store_browse(store, config)
-        assert "styled" in result
+        assert "Plain" in result
+        assert "[raw]" not in result
+        assert "[styled]" not in result
 
 
 class TestFormatStoreDetail:
@@ -841,8 +840,7 @@ class TestFormatStoreDetail:
 
         row_id = _seed_store_row(store, "Styled", 80.0, styled=True)
         result = _format_store_detail(store, row_id)
-        assert "State: styled" in result
-        assert "Styled body" in result
+        assert "styled_body" in result
         assert "Styled body text" in result
 
     def test_shows_snippet_when_raw(self, store):
@@ -850,7 +848,6 @@ class TestFormatStoreDetail:
 
         row_id = _seed_store_row(store, "Raw", 80.0)
         result = _format_store_detail(store, row_id)
-        assert "State: raw" in result
         assert "Snippet" in result
 
     def test_shows_metadata(self, store):
@@ -861,4 +858,3 @@ class TestFormatStoreDetail:
         assert "Source:" in result
         assert "URL:" in result
         assert "Merge count:" in result
-        assert "Message ID:" in result

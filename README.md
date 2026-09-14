@@ -319,7 +319,8 @@ Every item in the `GET /api/v1/items` response:
 {
   "id": 42,
   "title": "Story title",
-  "snippet": "One-line summary from the LLM filter pass",
+  "summary": "One factual English sentence from Pass A",
+  "snippet": "Collector excerpt (audit only; often empty)",
   "url": "https://example.com/story",
   "source_name": "r/gaming",
   "origin_topic": "gaming",
@@ -333,9 +334,11 @@ Every item in the `GET /api/v1/items` response:
 }
 ```
 
+Two layers: the engine story (`title`, `summary`) is shared English and
+immutable after Pass A. Channel copy (Telegram `styled_title` /
+`styled_body`) lives on the `deliveries` row and is never returned here.
+
 `title` is the raw Pass A English headline. It is never overwritten after insert.
-Telegram's rewritten headline lives in `styled_title` (null until the styler
-runs). Recap and Telegram renderers display `COALESCE(styled_title, title)`.
 
 `temperature` is the raw hype score; items are ranked by
 `temperature * merge_multiplier(merge_count)` descending (the merge

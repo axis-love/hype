@@ -364,13 +364,6 @@ class JobCoordinator:
             log.error("styler returned empty body for row id=%d — will retry", row_id)
             return 1
 
-        try:
-            self._store.set_styled_content(row_id, styled_title, styled_body)
-        except Exception as db_exc:
-            log.error("CRITICAL: styled row id=%d but set_styled_content failed: %s",
-                      row_id, redact_exception(db_exc))
-            return 1
-
         log.info(json.dumps({
             "event": "post_pick",
             "threshold": round(result.threshold, 2),
@@ -412,7 +405,10 @@ class JobCoordinator:
             )
             log.info("post id=%d carries %d media item(s)", row_id, len(media))
 
-        return await self._send_and_mark(row_id, markdown, html_fallback, blocks=blocks)
+        return await self._send_and_mark(
+            row_id, markdown, html_fallback, blocks=blocks,
+            styled_title=styled_title, styled_body=styled_body,
+        )
 
     async def _send_and_mark(
         self,
@@ -421,6 +417,8 @@ class JobCoordinator:
         html_fallback: str,
         *,
         blocks: list[dict[str, Any]] | None = None,
+        styled_title: str | None = None,
+        styled_body: str | None = None,
     ) -> int:
         """Deliver a post (rich markdown/blocks, HTML fallback) and mark it posted.
 
@@ -441,7 +439,9 @@ class JobCoordinator:
             log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
             print(markdown)
             try:
-                self._store.mark_posted(row_id)
+                self._store.mark_posted(
+                    row_id, styled_title=styled_title, styled_body=styled_body,
+                )
             except Exception as db_exc:
                 log.error(
                     "CRITICAL: post id=%d dry-run delivered but mark_posted failed: %s",
@@ -480,7 +480,9 @@ class JobCoordinator:
                 row_id, exc.delivered_chunks, redact_exception(exc),
             )
             try:
-                self._store.mark_posted(row_id)
+                self._store.mark_posted(
+                    row_id, styled_title=styled_title, styled_body=styled_body,
+                )
             except Exception as db_exc:
                 log.error("CRITICAL: post id=%d delivered but mark_posted failed: %s "
                           "— row may be re-delivered on retry", row_id, redact_exception(db_exc))
@@ -507,7 +509,10 @@ class JobCoordinator:
         # We must handle this atomically: if DB fails after Telegram success,
         # log a CRITICAL error so the operator can manually mark it.
         try:
-            self._store.mark_posted(row_id, message_id=message_id)
+            self._store.mark_posted(
+                row_id, message_id=message_id,
+                styled_title=styled_title, styled_body=styled_body,
+            )
         except Exception as db_exc:
             log.error(
                 "CRITICAL: post id=%d delivered to Telegram but mark_posted failed: %s "

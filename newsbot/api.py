@@ -21,7 +21,7 @@ Endpoints
   as ``select_for_consumer``, then ranks by current temperature (× merge
   multiplier) descending. ``limit`` is capped by the profile's
   ``max_candidates``.
-- ``POST /api/v1/deliveries`` — body ``{item_id, external_ref}``.
+- ``POST /api/v1/deliveries`` — payload ``{item_id, external_ref}``.
   Idempotent via ``mark_delivered`` (INSERT OR IGNORE on the deliveries
   UNIQUE(post_id, channel) constraint). The first POST persists
   ``external_ref``; a repeat POST is a no-op — the original ref is kept.
@@ -197,6 +197,7 @@ async def _handle_items(request: web.Request) -> web.Response:
         items.append({
             "id": row_id,
             "title": str(row.get("title") or ""),
+            "summary": str(row.get("summary") or ""),
             "snippet": str(row.get("snippet") or ""),
             "url": str(row.get("url") or ""),
             "source_name": str(row.get("source_name") or ""),
@@ -229,20 +230,20 @@ async def _handle_deliveries(request: web.Request) -> web.Response:
         )
 
     try:
-        body = await request.json()
+        payload = await request.json()
     except Exception:
         raise web.HTTPBadRequest(
-            text=json.dumps({"error": "invalid JSON body"}),
+            text=json.dumps({"error": "invalid JSON"}),
             content_type="application/json",
         )
-    if not isinstance(body, dict):
+    if not isinstance(payload, dict):
         raise web.HTTPBadRequest(
-            text=json.dumps({"error": "body must be a JSON object"}),
+            text=json.dumps({"error": "payload must be a JSON object"}),
             content_type="application/json",
         )
 
-    item_id = body.get("item_id")
-    external_ref = body.get("external_ref")
+    item_id = payload.get("item_id")
+    external_ref = payload.get("external_ref")
     if item_id is None or not isinstance(item_id, int):
         raise web.HTTPBadRequest(
             text=json.dumps({"error": "item_id is required and must be an integer"}),

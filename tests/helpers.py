@@ -62,3 +62,17 @@ async def echo_style(items: list, lm: Any, **kw: Any) -> list[dict[str, Any]]:
         {"title": it.get("title") or "S", "body": f"Body for {it.get('title')}"}
         for it in items
     ]
+
+
+def insert_story(store: Any, title: str = "T", url: str = "", **kwargs: Any) -> int:
+    """Insert one engine-story row via add_stories_to_store. Returns id."""
+    engagement = float(kwargs.pop("engagement", 50))
+    story = scored_story(title, engagement)
+    if url:
+        story["url"] = url
+    story.update(kwargs)
+    store.add_stories_to_store([story], [])
+    row = store._conn.execute(
+        "SELECT id FROM pending_posts ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return int(row["id"])

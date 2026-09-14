@@ -1,36 +1,31 @@
 """SQLite-backed news bot storage.
 
 Tables:
-  - pending_posts:   the STORY STORE — raw scored news waiting to be styled
-                     and delivered (and, after delivery, the posted archive)
+  - pending_posts:   the ENGINE STORY store — shared English rows after
+                     Pass A (immutable title + summary). No channel copy.
+  - deliveries:      per-channel posts. Telegram styled_title/styled_body
+                     and message_id live here, never on the story.
   - daily_summaries: one recap post per local day (migration 4)
-  - seen:            URLs/titles already delivered (dedup state)
+  - seen:            URLs/titles already processed (dedup state)
   - schema_version:  migration tracking
 
 WAL mode, autocommit, single connection per process — same pattern as
 core/settings_store.py. Schema evolution is handled by a lightweight
 migration mechanism that records applied versions in schema_version.
 
-Store semantics (migration 4 / v2):
+Two layers (migration 10):
+  1. Engine story (pending_posts): id, title, summary, url, snippet
+     (collector excerpt, audit only), score columns, topics.
+     ``title`` and ``summary`` are Pass A English and immutable after
+     insert (summary may fill once from NULL via merge).
+  2. Channel post (deliveries): what a channel published, any language.
+     Consumers read layer 1 only. Pass B writes layer 2 only via
+     ``mark_posted(..., styled_title=, styled_body=)``.
+
   The digest APPENDS raw scored stories (add_stories_to_store); it never
-  clears the queue. Duplicates merge into existing rows (merge_into_store_row),
-  and the poster styles a single winner at pick time (set_styled_content).
-
-  ``body`` stays NOT NULL (SQLite cannot relax NOT NULL without a table
-  rebuild), so new raw rows insert ``body=''``. The poster fills ``body`` +
-  ``styled_title`` + ``styled_at`` when it styles the winner (migration 9).
-  ``title`` is immutable after insert — the Pass A English headline.
-  Telegram display uses ``COALESCE(styled_title, title)``. The marker for
-  "raw, not yet styled" is therefore ``body='' AND styled_at IS NULL``.
-
-  ``posted_at`` means "delivered to the Telegram channel" — nothing else.
-  The ``deliveries`` table (migration 7) is the per-consumer delivery
-  marker: each row records a (post_id, channel, delivered_at) delivery.
-  ``posted_at`` is preserved during the transition (dual-write in
-  ``mark_delivered``); read paths migrate to ``deliveries`` in H2.
-  Do not overload ``posted_at`` as a general consumption marker.
-  ``message_id`` (migration 5) stores the Telegram channel message_id for
-  recap linking — it is NOT a general consumption marker.
+  clears the queue. Duplicates merge into existing rows
+  (merge_into_store_row). Styling happens in memory at Telegram pick
+  time and is persisted on the deliveries row, not on the story.
 
   Legacy rows (pre-migration-4) carry merge_count=1 and NULL in the new
   columns; all reads must be NULL-safe.
@@ -359,9 +354,49 @@ def _title_from_raw_json(raw: Any) -> str | None:
     return None
 
 
-def display_title(row: dict[str, Any]) -> str:
-    """Telegram/recap headline: styled_title if set, else the raw title."""
-    return str(row.get("styled_title") or row.get("title") or "")
+@_migration(10, "Engine story vs channel post: summary on pending_posts; styled copy on deliveries")
+def _migration_10(cur: sqlite3.Cursor) -> None:
+    """Split engine story from Telegram post.
+
+    pending_posts gains ``summary`` (Pass A) and drops Telegram columns.
+    deliveries gains ``styled_title`` / ``styled_body``. Existing telegram
+    deliveries copy styled text from the story row when styled_at is set.
+    Requires SQLite 3.35+ (DROP COLUMN).
+    """
+    if sqlite3.sqlite_version_info < (3, 35, 0):
+        raise RuntimeError(
+            "migration 10 needs SQLite 3.35+ for DROP COLUMN "
+            f"(have {sqlite3.sqlite_version})"
+        )
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN summary TEXT")
+    cur.execute("ALTER TABLE deliveries ADD COLUMN styled_title TEXT")
+    cur.execute("ALTER TABLE deliveries ADD COLUMN styled_body TEXT")
+    cur.execute(
+        """
+        UPDATE deliveries
+        SET
+          styled_title = (
+            SELECT styled_title FROM pending_posts
+            WHERE pending_posts.id = deliveries.post_id
+          ),
+          styled_body = (
+            SELECT body FROM pending_posts
+            WHERE pending_posts.id = deliveries.post_id
+          )
+        WHERE channel = 'telegram'
+          AND EXISTS (
+            SELECT 1 FROM pending_posts
+            WHERE pending_posts.id = deliveries.post_id
+              AND pending_posts.styled_at IS NOT NULL
+          )
+        """
+    )
+    cur.execute("DROP INDEX IF EXISTS ix_pending_posts_posted")
+    cur.execute("ALTER TABLE pending_posts DROP COLUMN body")
+    cur.execute("ALTER TABLE pending_posts DROP COLUMN styled_title")
+    cur.execute("ALTER TABLE pending_posts DROP COLUMN styled_at")
+    cur.execute("ALTER TABLE pending_posts DROP COLUMN posted_at")
+    cur.execute("ALTER TABLE pending_posts DROP COLUMN message_id")
 
 
 class NewsStore:
@@ -565,29 +600,7 @@ class NewsStore:
     # --- news_digests (dropped in migration 2) -----------------------------
     # The news_digests table was dropped in migration 2. No pruning needed.
 
-    # --- pending_posts (individual posts waiting to be sent) -----------
-
-    def add_pending_post(self, post: dict[str, Any]) -> Optional[int]:
-        """Insert a styled post into the pending queue. Returns row id."""
-        try:
-            cur = self._conn.execute(
-                """
-                INSERT INTO pending_posts(title, body, category, importance, url, created_at)
-                VALUES(?,?,?,?,?,?)
-                """,
-                (
-                    str(post.get("title") or "").strip(),
-                    str(post.get("body") or "").strip(),
-                    str(post.get("category") or "").strip() or None,
-                    post.get("importance"),
-                    str(post.get("url") or "").strip() or None,
-                    _utc_now_iso(),
-                ),
-            )
-        except sqlite3.Error as exc:
-            log.warning("add_pending_post failed: %s", exc)
-            return None
-        return int(cur.lastrowid)
+    # --- pending_posts (engine story store) ---------------------------
 
     def mark_delivered(
         self,
@@ -632,32 +645,42 @@ class NewsStore:
         ).fetchone()
         return int(row["v"]) if row and row["v"] is not None else 0
 
-    def mark_posted(self, post_id: int, message_id: int | None = None) -> None:
-        """Mark a pending post as posted (Telegram delivery, atomic dual-write).
+    def mark_posted(
+        self,
+        post_id: int,
+        message_id: int | None = None,
+        *,
+        styled_title: str | None = None,
+        styled_body: str | None = None,
+    ) -> None:
+        """Record a telegram delivery. Never writes pending_posts.
 
-        Sets posted_at on pending_posts AND records a 'telegram' delivery
-        in a single transaction (BEGIN IMMEDIATE / COMMIT). If the
-        delivery INSERT fails, posted_at is rolled back — the row stays
-        undelivered and will be re-posted on the next cycle.
+        Styled channel copy lives on the deliveries row. A failed send is
+        restyled on retry — nothing is persisted at pick time.
         """
+        row = self._conn.execute(
+            "SELECT 1 FROM pending_posts WHERE id=?", (post_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"mark_posted: post_id {post_id} does not exist")
         now = _utc_now_iso()
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE")
-            if message_id is not None:
-                cur.execute(
-                    "UPDATE pending_posts SET posted_at=?, message_id=? WHERE id=?",
-                    (now, message_id, post_id),
-                )
-            else:
-                cur.execute(
-                    "UPDATE pending_posts SET posted_at=? WHERE id=?",
-                    (now, post_id),
-                )
             cur.execute(
-                "INSERT OR IGNORE INTO deliveries(post_id, channel, delivered_at, message_id, external_ref) "
-                "VALUES(?,?,?,?,?)",
-                (post_id, "telegram", now, message_id, None),
+                "INSERT OR IGNORE INTO deliveries("
+                "post_id, channel, delivered_at, message_id, external_ref, "
+                "styled_title, styled_body"
+                ") VALUES(?,?,?,?,?,?,?)",
+                (
+                    post_id,
+                    "telegram",
+                    now,
+                    message_id,
+                    None,
+                    styled_title,
+                    styled_body,
+                ),
             )
             cur.execute("COMMIT")
         except Exception:
@@ -683,10 +706,9 @@ class NewsStore:
         Accepts plain dicts or collector Candidate dataclasses (both carry
         the same fields; Candidates are normalized via to_dict()).
 
-        Raw rows insert body='' (NOT NULL cannot be relaxed); the poster
-        fills body + styled_at at pick time. Every score-component column
-        is persisted from story['score_breakdown']. NO delete of unposted
-        rows — the store is additive.
+        Persists story['short_summary'] as summary. Every score-component
+        column is persisted from story['score_breakdown']. NO delete of
+        undelivered rows — the store is additive.
 
         Returns the number of rows inserted.
         Raises sqlite3.Error on failure (transaction rolled back).
@@ -711,7 +733,7 @@ class NewsStore:
                 merged_urls_json = json.dumps(seed_urls) if seed_urls else None
                 post_rows.append((
                     str(story.get("title") or "").strip(),
-                    "",  # body — raw, not yet styled
+                    str(story.get("short_summary") or "").strip() or None,
                     str(story.get("category") or "").strip() or None,
                     row_url or None,
                     now,
@@ -743,7 +765,7 @@ class NewsStore:
                 cur.executemany(
                     """
                     INSERT INTO pending_posts(
-                        title, body, category, url, created_at,
+                        title, summary, category, url, created_at,
                         snippet, source_name, raw_json,
                         source, published_at, upvotes, comments, stars, reposts,
                         crosspost_count, penalty, lookback_hours,
@@ -782,13 +804,12 @@ class NewsStore:
         return len(post_rows)
 
     _STORE_SELECT = (
-        "id, title, styled_title, url, snippet, source_name, raw_json, category, "
+        "id, title, summary, url, snippet, source_name, raw_json, category, "
         "source, published_at, upvotes, comments, stars, reposts, "
         "crosspost_count, penalty, lookback_hours, "
         "score_at_queue, engagement_score, recency_at_queue, "
         "source_weight, topic_bonus, crosspost_bonus, "
-        "matched_topics, scored_at, origin_topic, merge_count, merged_urls, "
-        "styled_at, message_id"
+        "matched_topics, scored_at, origin_topic, merge_count, merged_urls"
     )
 
     def list_store_rows(self, channel: str) -> list[dict]:
@@ -824,11 +845,14 @@ class NewsStore:
             datetime.now(timezone.utc) - timedelta(days=max(1, days))
         ).isoformat(timespec="seconds")
         rows = self._conn.execute(
-            f"SELECT {self._STORE_SELECT}, posted_at FROM pending_posts "
+            f"SELECT {self._STORE_SELECT}, "
+            "(SELECT delivered_at FROM deliveries "
+            " WHERE post_id = pending_posts.id AND channel=? LIMIT 1) AS posted_at "
+            "FROM pending_posts "
             "WHERE id NOT IN (SELECT post_id FROM deliveries) "
             "OR id IN (SELECT post_id FROM deliveries WHERE channel=? AND delivered_at >= ?) "
             "ORDER BY created_at ASC, id ASC",
-            (channel, cutoff),
+            (channel, channel, cutoff),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -935,6 +959,10 @@ class NewsStore:
         # source may be pack-attributable when the original wasn't).
         origin_topic = row["origin_topic"] or bd.get("origin_topic")
 
+        stored_summary = str(row["summary"] or "").strip()
+        cand_summary = str(candidate.get("short_summary") or "").strip()
+        summary = stored_summary or cand_summary or None
+
         self._conn.execute(
             """
             UPDATE pending_posts SET
@@ -946,7 +974,8 @@ class NewsStore:
                 source_weight = ?, topic_bonus = ?, crosspost_bonus = ?,
                 penalty = ?, lookback_hours = ?,
                 score_at_queue = ?,
-                origin_topic = ?
+                origin_topic = ?,
+                summary = ?
             WHERE id = ?
             """,
             (
@@ -958,20 +987,9 @@ class NewsStore:
                 penalty, lookback_hours,
                 score_at_queue,
                 origin_topic,
+                summary,
                 row_id,
             ),
-        )
-
-    def set_styled_content(self, row_id: int, title: str, body: str) -> None:
-        """Fill styled_title/body and stamp styled_at (UTC ISO).
-
-        Called by the poster after styling the picked winner. Never
-        overwrites ``title`` (Pass A English headline, migration 9).
-        Clears the raw-not-yet-styled marker (body='' AND styled_at IS NULL).
-        """
-        self._conn.execute(
-            "UPDATE pending_posts SET styled_title=?, body=?, styled_at=? WHERE id=?",
-            (title, body, _utc_now_iso(), row_id),
         )
 
     def evict_coldest(self, temps: dict[int, float], cap: int) -> int:
@@ -1024,7 +1042,9 @@ class NewsStore:
             f"pp.{c.strip()}" for c in self._STORE_SELECT.split(",")
         )
         rows = self._conn.execute(
-            f"SELECT {select_cols}, pp.body, d.delivered_at AS posted_at "
+            f"SELECT {select_cols}, "
+            "d.styled_title, d.styled_body, d.message_id, "
+            "d.delivered_at AS posted_at "
             "FROM pending_posts pp "
             "JOIN deliveries d ON d.post_id = pp.id "
             "WHERE d.channel = ? AND d.delivered_at >= ? "
@@ -1079,9 +1099,17 @@ class NewsStore:
     def get_store_row(self, row_id: int, channel: str) -> dict[str, Any] | None:
         """Return a single row by id if not yet delivered to *channel*, or None."""
         row = self._conn.execute(
-            f"SELECT {self._STORE_SELECT}, body FROM pending_posts "
+            f"SELECT {self._STORE_SELECT} FROM pending_posts "
             "WHERE id=? AND id NOT IN (SELECT post_id FROM deliveries WHERE channel=?)",
             (row_id, channel),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_story(self, row_id: int) -> dict[str, Any] | None:
+        """Return an engine story by id, delivered or not."""
+        row = self._conn.execute(
+            f"SELECT {self._STORE_SELECT} FROM pending_posts WHERE id=?",
+            (row_id,),
         ).fetchone()
         return dict(row) if row else None
 

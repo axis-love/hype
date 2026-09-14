@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from newsbot.db import NewsStore
+from tests.helpers import insert_story
 from newsbot.scoring import engagement
 
 
@@ -57,10 +58,9 @@ def _story(title="Story A", url="https://a.example.com/1", **bd_overrides) -> di
 
 
 def _insert_legacy(store: NewsStore, title: str, url: str) -> int:
-    """Insert a row the pre-v2 way (styled, no score data) via add_pending_post."""
-    row_id = store.add_pending_post({"title": title, "body": f"body of {title}", "url": url})
-    assert row_id is not None
-    return row_id
+    """Insert a story row (engine store)."""
+    from tests.helpers import insert_story
+    return insert_story(store, title, url)
 
 
 # --- Migration 4 ----------------------------------------------------------
@@ -69,7 +69,7 @@ def _insert_legacy(store: NewsStore, title: str, url: str) -> int:
 class TestMigration4:
     def test_new_columns_exist(self, store):
         cols = {c["name"] for c in store._conn.execute("PRAGMA table_info(pending_posts)")}
-        for col in ("merge_count", "merged_urls", "snippet", "source_name", "raw_json", "styled_at"):
+        for col in ("merge_count", "merged_urls", "snippet", "source_name", "raw_json", "summary"):
             assert col in cols, f"missing column {col}"
 
     def test_daily_summaries_table_exists(self, store):
@@ -81,17 +81,17 @@ class TestMigration4:
     def test_merge_count_defaults_to_1_for_legacy_rows(self, store):
         _insert_legacy(store, "Legacy", "http://legacy.example.com")
         row = store._conn.execute(
-            "SELECT merge_count, merged_urls, styled_at FROM pending_posts"
+            "SELECT merge_count, merged_urls, summary FROM pending_posts"
         ).fetchone()
         assert row["merge_count"] == 1
         assert row["merged_urls"] is None
-        assert row["styled_at"] is None
+        assert row["summary"] is None
 
     def test_migration_recorded(self, store):
         row = store._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         ).fetchone()
-        assert row["version"] == 9
+        assert row["version"] == 10
 
 
 # --- add_stories_to_store -------------------------------------------------
@@ -108,11 +108,10 @@ class TestAddStoriesToStore:
         titles = {r["title"] for r in rows}
         assert titles == {"Old1", "Old2", "Story A"}
 
-    def test_raw_insert_has_empty_body_and_null_styled_at(self, store):
+    def test_raw_insert_has_summary_null(self, store):
         store.add_stories_to_store([_story()], [])
-        row = store._conn.execute("SELECT body, styled_at FROM pending_posts").fetchone()
-        assert row["body"] == ""
-        assert row["styled_at"] is None
+        row = store._conn.execute("SELECT summary FROM pending_posts").fetchone()
+        assert row["summary"] is None
 
     def test_stores_raw_material_and_score_columns(self, store):
         bd = _bd()
@@ -349,28 +348,25 @@ class TestMergeIntoStoreRow:
 # --- set_styled_content ---------------------------------------------------
 
 
-class TestSetStyledContent:
-    def test_fills_body_title_and_styled_at(self, store):
+class TestMarkPostedStyled:
+    def test_writes_delivery_not_story(self, store):
         store.add_stories_to_store([_story()], [])
         rid = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
-        store.set_styled_content(rid, "Styled Title", "Styled body.")
+        store.mark_posted(rid, styled_title="Styled Title", styled_body="Styled body.")
         row = store._conn.execute("SELECT * FROM pending_posts WHERE id=?", (rid,)).fetchone()
         assert row["title"] == "Story A"
-        assert row["styled_title"] == "Styled Title"
-        assert row["body"] == "Styled body."
-        assert row["styled_at"] is not None
-        # styled_at must be valid UTC ISO-8601.
-        parsed = datetime.fromisoformat(row["styled_at"])
-        assert parsed.tzinfo is not None
-
-    def test_raw_marker_cleared_after_styling(self, store):
-        store.add_stories_to_store([_story()], [])
-        rid = store._conn.execute("SELECT id FROM pending_posts").fetchone()["id"]
-        store.set_styled_content(rid, "T", "B")
-        row = store._conn.execute(
-            "SELECT 1 FROM pending_posts WHERE body='' AND styled_at IS NULL"
+        assert "styled_title" not in row.keys()
+        d = store._conn.execute(
+            "SELECT styled_title, styled_body FROM deliveries WHERE post_id=?", (rid,)
         ).fetchone()
-        assert row is None
+        assert d["styled_title"] == "Styled Title"
+        assert d["styled_body"] == "Styled body."
+
+    def test_story_has_no_telegram_columns(self, store):
+        store.add_stories_to_store([_story()], [])
+        cols = {c["name"] for c in store._conn.execute("PRAGMA table_info(pending_posts)")}
+        for gone in ("body", "styled_title", "styled_at", "posted_at", "message_id"):
+            assert gone not in cols
 
 
 # --- evict_coldest --------------------------------------------------------
