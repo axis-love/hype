@@ -316,16 +316,18 @@ async def start_api(
     *,
     settings: SettingsStore | None = None,
 ) -> web.AppRunner | None:
-    """Start the API on the given port if HYPE_API_KEYS is set.
+    """Start the API on the given port.
 
-    Returns an AppRunner (for cleanup) or None if the API is disabled
-    (no keys configured). ``settings`` is the shared SettingsStore from
-    the main loop; if None, a new one is created from NEWS_DB.
+    Returns an AppRunner (for cleanup). Empty ``HYPE_API_KEYS`` still
+    starts the server; authenticated routes return 401.
+    ``settings`` is the shared SettingsStore from the main loop; if
+    None, a new one is created from NEWS_DB.
     """
     api_keys = os.getenv("HYPE_API_KEYS", "").strip()
     if not api_keys:
-        log.warning("HYPE_API_PORT set but HYPE_API_KEYS is empty — API disabled")
-        return None
+        log.warning(
+            "HYPE_API_KEYS is empty — API started, authenticated routes 401"
+        )
 
     app = create_api_app(store, api_keys, settings=settings)
     runner = web.AppRunner(app)

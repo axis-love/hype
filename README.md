@@ -241,8 +241,9 @@ older than configurable thresholds are pruned:
 Other agents (girllm hot takes, the blog writer) consume the same
 store instead of re-collecting. The API runs in-process on the
 scheduler's event loop (aiohttp) — no second DB connection, no
-separate process. Started automatically when `HYPE_API_PORT` is set
-and `HYPE_API_KEYS` is non-empty.
+separate process. Started automatically when `HYPE_API_PORT` is set,
+regardless of `HYPE_API_KEYS`; with empty keys every authenticated
+request gets 401.
 
 ### Deployment topology
 

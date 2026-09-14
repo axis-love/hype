@@ -644,6 +644,19 @@ class TestHealthz:
         finally:
             await client.close()
 
+    @pytest.mark.asyncio
+    async def test_empty_keys_healthz_ok_items_401(self, store):
+        """Empty HYPE_API_KEYS still serves; authenticated routes 401."""
+        app = _make_app(store, api_keys="")
+        client = await _get_client(app)
+        try:
+            health = await client.get("/healthz")
+            assert health.status == 200
+            items = await client.get("/api/v1/items")
+            assert items.status == 401
+        finally:
+            await client.close()
+
 
 # --- AC 5: port disabled + --once ------------------------------------------
 
