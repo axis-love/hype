@@ -65,7 +65,7 @@ def _story(title: str, url: str, upvotes: int = 100, hours_old: float = 2.0) -> 
 
 def _patch_pipeline(monkeypatch, cfg, stories, keep_ids):
     """Patch the collection/filter side of _run_generation deterministically."""
-    monkeypatch.setattr("newsbot.generation.load_config", lambda s: cfg)
+    monkeypatch.setattr("newsbot.generation.load_config", lambda s, env=None: cfg)
     monkeypatch.setattr("newsbot.generation._set_pre_merge_weights", lambda w: None)
 
     async def mock_collect_all(_cfg):

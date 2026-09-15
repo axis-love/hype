@@ -1,16 +1,14 @@
 """Local wall-clock helpers for slot-based scheduling.
 
 The schedule runs on local wall-clock time, not UTC intervals. Timezone is
-read from the ``NEWS_TZ`` environment variable on every call (default
-``Asia/Bangkok``), so operators can re-anchor the schedule without code
-changes. The pip ``tzdata`` package is a dependency: the slim Docker image
+``NEWS_TZ`` (default ``Asia/Bangkok``), supplied by Env.news_tz at the
+call site. The pip ``tzdata`` package is a dependency: the slim Docker image
 has no system zoneinfo database, and ``ZoneInfo`` raises
 ``ZoneInfoNotFoundError`` without it.
 """
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,9 +20,9 @@ DEFAULT_TZ = "Asia/Bangkok"
 DEFAULT_GEN_HOURS = "5,9,13,17,21"
 
 
-def local_now() -> datetime:
+def local_now(tz_name: str | None = None) -> datetime:
     """Current wall-clock time in ``NEWS_TZ`` (default Asia/Bangkok)."""
-    return datetime.now(ZoneInfo(os.getenv("NEWS_TZ", DEFAULT_TZ)))
+    return datetime.now(ZoneInfo(tz_name or DEFAULT_TZ))
 
 
 def gen_slots(env_str: str) -> list[int]:

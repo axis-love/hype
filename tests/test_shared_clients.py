@@ -81,9 +81,8 @@ async def test_github_and_rss_pass_timeout_and_headers_on_shared_client(monkeypa
 
     from newsbot.collectors import github, rss
 
-    monkeypatch.setenv("GITHUB_TOKEN", "gh_test_token")
     client = FakeClient()
-    await github.collect({"queries": ["llm"], "limit": 1}, client)
+    await github.collect({"queries": ["llm"], "limit": 1, "token": "gh_test_token"}, client)
     await rss.collect({"feeds": [{"name": "x", "url": "https://example.com/feed.xml"}]}, client)
 
     gh = [kw for url, kw in recorded if "api.github.com" in url]

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
@@ -41,6 +40,7 @@ from aiohttp import web
 from core.settings_store import SettingsStore, default_store
 from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore
+from newsbot.env import Env, parse_api_keys, resolve
 from newsbot.selection import select_for_consumer
 
 log = logging.getLogger(__name__)
@@ -60,25 +60,8 @@ _KEYS_KEY = web.AppKey("api_keys", dict[str, str])
 
 
 def _parse_api_keys(raw: str | None) -> dict[str, str]:
-    """Parse ``HYPE_API_KEYS`` env into a ``{token: consumer_name}`` dict.
-
-    Format: ``"girllm:abc123,blog:def456"``. Whitespace around entries
-    is trimmed. Entries without a colon are skipped (defensive — a
-    malformed entry shouldn't crash the whole API).
-    """
-    if not raw:
-        return {}
-    result: dict[str, str] = {}
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry or ":" not in entry:
-            continue
-        consumer, _, token = entry.partition(":")
-        consumer = consumer.strip()
-        token = token.strip()
-        if consumer and token:
-            result[token] = consumer
-    return result
+    """Parse ``HYPE_API_KEYS`` env into a ``{token: consumer_name}`` dict."""
+    return parse_api_keys(raw)
 
 
 def _resolve_consumer(request: web.Request) -> str:
@@ -257,7 +240,7 @@ def create_api_app(
     """
     keys = _parse_api_keys(api_keys)
     if settings is None:
-        settings = default_store(os.getenv("NEWS_DB", "data/newsbot.sqlite"))
+        settings = default_store(resolve(None).news_db)
 
     app = web.Application()
     app[_STORE_KEY] = store
@@ -275,6 +258,7 @@ async def start_api(
     port: int,
     *,
     settings: SettingsStore | None = None,
+    env: Env | None = None,
 ) -> web.AppRunner | None:
     """Start the API on the given port.
 
@@ -283,8 +267,9 @@ async def start_api(
     ``settings`` is the shared SettingsStore from the main loop; if
     None, a new one is created from NEWS_DB.
     """
-    api_keys = os.getenv("HYPE_API_KEYS", "").strip()
-    if not api_keys:
+    env = resolve(env)
+    api_keys = ",".join(f"{consumer}:{token}" for token, consumer in env.api_keys.items())
+    if not env.api_keys:
         log.warning(
             "HYPE_API_KEYS is empty — API started, authenticated routes 401"
         )

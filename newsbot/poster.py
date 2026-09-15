@@ -5,7 +5,6 @@ import asyncio
 import html as html_module
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -14,6 +13,7 @@ from core.settings_store import SettingsStore
 import newsbot.llm as llm
 from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore
+from newsbot.env import Env, resolve
 from newsbot.outcome import Outcome
 from newsbot.images import extract_article_media
 from newsbot.richmd import (
@@ -134,9 +134,12 @@ def _format_recap_html_fallback(
         lines.append(render_item(idx, item))
     return "\n".join(lines)
 
-async def deliver_one(store: NewsStore, settings: SettingsStore) -> Outcome:
+async def deliver_one(
+    store: NewsStore, settings: SettingsStore, env: Env | None = None,
+) -> Outcome:
     """Pick the hottest eligible store row, style it, deliver, mark posted."""
-    cfg = load_config(settings)
+    env = resolve(env)
+    cfg = load_config(settings, env)
     rows = store.list_store_rows("telegram")
     now = datetime.now(timezone.utc)
     profile = consumer_profile(cfg, "telegram")
@@ -192,7 +195,7 @@ async def deliver_one(store: NewsStore, settings: SettingsStore) -> Outcome:
     }))
     markdown = render_post(
         styled_title, styled_body, row.get("url") or "",
-        signature=signature_for(os.getenv("NEWS_CHANNEL_ID", "")),
+        signature=signature_for(env.news_channel_id),
     )
     html_fallback = format_post_message(styled_title, styled_body, row.get("url") or "")
     try:
@@ -207,20 +210,22 @@ async def deliver_one(store: NewsStore, settings: SettingsStore) -> Outcome:
     if media:
         blocks = render_post_blocks(
             styled_title, styled_body, row.get("url") or "",
-            signature=signature_for(os.getenv("NEWS_CHANNEL_ID", "")),
+            signature=signature_for(env.news_channel_id),
             media=media,
         )
         log.info("post id=%d carries %d media item(s)", row_id, len(media))
     return await _send_and_mark(
         store, row_id, markdown, html_fallback, blocks=blocks,
-        styled_title=styled_title, styled_body=styled_body,
+        styled_title=styled_title, styled_body=styled_body, env=env,
     )
 
 
-async def drain(store: NewsStore, settings: SettingsStore) -> Outcome:
+async def drain(
+    store: NewsStore, settings: SettingsStore, env: Env | None = None,
+) -> Outcome:
     """Drain pending posts until empty or below threshold. Healthy terminals -> OK."""
     while True:
-        result = await deliver_one(store, settings)
+        result = await deliver_one(store, settings, env)
         if result is Outcome.NOTHING_TO_DO or result is Outcome.BELOW_THRESHOLD:
             return Outcome.OK
         if result is not Outcome.OK:
@@ -236,9 +241,11 @@ async def _send_and_mark(
     blocks: list[dict[str, Any]] | None = None,
     styled_title: str | None = None,
     styled_body: str | None = None,
+    env: Env | None = None,
 ) -> Outcome:
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+    env = resolve(env)
+    bot_token = env.bot_token
+    chat_id = env.news_channel_id
     if not bot_token or not chat_id:
         log.info("dry-run: posting to stdout (no BOT_TOKEN/NEWS_CHANNEL_ID)")
         print(markdown)

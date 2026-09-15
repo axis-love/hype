@@ -4,10 +4,9 @@ def test_local_now_default_bangkok(monkeypatch):
     assert str(local_now().tzinfo) == "Asia/Bangkok"
 
 
-def test_local_now_env_override(monkeypatch):
-    monkeypatch.setenv("NEWS_TZ", "Asia/Makassar")
+def test_local_now_env_override():
     from newsbot.clock import local_now
-    assert str(local_now().tzinfo) == "Asia/Makassar"
+    assert str(local_now("Asia/Makassar").tzinfo) == "Asia/Makassar"
 
 
 def test_slot_keys():

@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,6 +17,7 @@ from newsbot.collectors import (
     github, hackernews, huggingface_papers, reddit, rss, trends,
 )
 from newsbot.config import load_config
+from newsbot.env import Env, resolve
 from newsbot.db import NewsStore
 from newsbot.dedupe import _set_pre_merge_weights, dedupe_and_merge, match_candidate_to_store
 import newsbot.llm as llm
@@ -135,7 +135,7 @@ class GenerationPipelineResult:
 
 
 async def _run_generation_pipeline(
-    store: NewsStore, cfg: dict[str, Any],
+    store: NewsStore, cfg: dict[str, Any], env: Env | None = None,
 ) -> GenerationPipelineResult | None:
     """Pure pipeline: collect → filter_seen → dedupe → score → LLM filter →
     store-match classification. NO DB writes, NO seen-marking.
@@ -222,7 +222,7 @@ async def _run_generation_pipeline(
     #    telegram) so a story arriving from a different source can merge
     #    into a recently-delivered row instead of being inserted as a
     #    duplicate (flow_001123).
-    merge_window_days = int(os.getenv("NEWS_MERGE_WINDOW_DAYS", "7"))
+    merge_window_days = resolve(env).merge_window_days
     store_rows = store.list_merge_target_rows("telegram", merge_window_days)
     items: list[dict[str, Any]] = []
     for item in final:
@@ -312,7 +312,9 @@ def _swap_reddit_link_post_url(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
-async def _run_generation(store: NewsStore, settings: SettingsStore) -> Outcome:
+async def _run_generation(
+    store: NewsStore, settings: SettingsStore, env: Env | None = None,
+) -> Outcome:
     """Generation cycle: collect → filter → score → LLM filter → store.
 
     v2 additive pipeline: digest fills the store with RAW scored stories
@@ -329,11 +331,12 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> Outcome:
             filter empty). Distinct from success so the scheduler can
             decide whether to advance the timestamp.
     """
-    cfg = load_config(settings)
+    env = resolve(env)
+    cfg = load_config(settings, env)
 
     # Run the pure pipeline (collect → filter → dedupe → score → LLM filter → classify).
     # No DB writes — the pipeline only reads the store for seen-filtering and classification.
-    pipeline = await _run_generation_pipeline(store, cfg)
+    pipeline = await _run_generation_pipeline(store, cfg, env)
     if pipeline is None:
         log.warning("generation pipeline produced nothing; keeping existing queue")
         return Outcome.NOTHING_TO_DO
@@ -413,7 +416,7 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> Outcome:
     now_utc = datetime.now(timezone.utc)
     post_rows = store.list_store_rows("telegram")
     temps = {r["id"]: current_temperature(r, cfg, now=now_utc) for r in post_rows}
-    cap = int(os.getenv("NEWS_STORE_CAP", "36"))
+    cap = env.store_cap
     evicted = store.evict_coldest(temps, cap=cap)
     if evicted:
         remaining_ids = {r["id"] for r in store.list_store_rows("telegram")}
@@ -428,19 +431,11 @@ async def _run_generation(store: NewsStore, settings: SettingsStore) -> Outcome:
     return Outcome.OK
 
 
-def _run_retention(store: NewsStore) -> None:
-    """Run retention cleanup using configurable ages from env vars.
-
-    Retention ages (days):
-      NEWS_RETENTION_POSTED_DAYS (default 30) — posted_posts cleanup
-      NEWS_RETENTION_SEEN_DAYS   (default 14)  — seen entries cleanup
-      NEWS_RETENTION_DIGEST_DAYS  (default 90)  — digests cleanup
-
-    Called on every generation cycle outcome (success, no-progress, failure)
-    so cleanup is not skipped when generation produces no new posts.
-    """
-    posted_days = int(os.getenv("NEWS_RETENTION_POSTED_DAYS", "30"))
-    seen_days = int(os.getenv("NEWS_RETENTION_SEEN_DAYS", "14"))
+def _run_retention(store: NewsStore, env: Env | None = None) -> None:
+    """Run retention cleanup using ages from Env."""
+    env = resolve(env)
+    posted_days = env.retention_posted_days
+    seen_days = env.retention_seen_days
     try:
         store.prune_delivered(max_age_days=posted_days)
         store.prune_seen(max_age_days=seen_days)

@@ -329,44 +329,13 @@ def _merged_urls_list(row: dict[str, Any]) -> list[str]:
     return [entry for entry in parsed if isinstance(entry, str)]
 
 
-def _row_raw_json(row: dict[str, Any]) -> dict[str, Any] | None:
-    """Parse a store row's raw_json (a JSON *string* in the DB) into a dict.
-
-    Tolerant: str or dict input, malformed JSON, and missing values all
-    degrade to None — never raises. Mirrors _merged_urls_list's tolerance
-    so match_candidate_to_store can consult row-side external_url without
-    a separate try/except at every call site.
-    """
-    raw = row.get("raw_json")
-    if not raw:
-        return None
-    if isinstance(raw, dict):
-        return raw
-    if isinstance(raw, str):
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return None
-        # json.loads can yield non-dict types (list, int, etc).
-        return parsed if isinstance(parsed, dict) else None
-    return None
-
-
 def _row_external_url_key(row: dict[str, Any]) -> str:
-    """Canonical key of the external article URL stored in a row's raw_json.
+    """Canonical key of the external article URL on a store row.
 
-    Store rows carry raw_json as a JSON *string* (dict only in-memory).
-    This helper parses it tolerantly (via _row_raw_json) and returns the
-    canonical URL of the linked article, or "" when absent/malformed.
-
-    Mirrors _external_url_key (candidate-side) so that a Reddit link post
-    whose raw_json.external_url is apple.com can match a store row whose
-    raw_json.external_url IS apple.com — cross-side identity.
+    Reads the external_url column (migration 11). Empty/malformed values
+    degrade to "".
     """
-    rj = _row_raw_json(row)
-    if rj is None:
-        return ""
-    external = str(rj.get("external_url") or "").strip()
+    external = str(row.get("external_url") or "").strip()
     if not external.startswith(("http://", "https://")):
         return ""
     return _canonical_url(external)

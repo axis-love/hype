@@ -418,7 +418,7 @@ class TestRunGenerationIntegration:
             "style_prompt": "",
         }
 
-        monkeypatch.setattr("newsbot.generation.load_config", lambda s: mock_cfg)
+        monkeypatch.setattr("newsbot.generation.load_config", lambda s, env=None: mock_cfg)
         monkeypatch.setattr("newsbot.generation._set_pre_merge_weights", lambda w: None)
 
         # Mock collect_all to return TWO items with tricky titles
@@ -554,7 +554,7 @@ class TestRunGenerationIntegration:
             "style_prompt": "",
         }
 
-        monkeypatch.setattr("newsbot.generation.load_config", lambda s: mock_cfg)
+        monkeypatch.setattr("newsbot.generation.load_config", lambda s, env=None: mock_cfg)
         monkeypatch.setattr("newsbot.generation._set_pre_merge_weights", lambda w: None)
 
         async def mock_collect_all(cfg):

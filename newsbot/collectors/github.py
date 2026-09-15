@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 import httpx
@@ -150,7 +149,7 @@ async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = Non
         "Accept": "application/vnd.github+json",
     }
     # Optional: use GITHUB_TOKEN to get higher rate limits (60/hr → 5000/hr)
-    github_token = os.getenv("GITHUB_TOKEN", "").strip()
+    github_token = str(config.get("token") or "").strip()
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
     timeout = httpx.Timeout(20.0)

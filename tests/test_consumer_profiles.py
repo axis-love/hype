@@ -296,9 +296,9 @@ class TestUnknownConsumer:
         coordinator = JobCoordinator()
 
         # Patch load_config to return a config without consumers.
-        bad_config = load_config(settings)
+        bad_config = dict(load_config(settings))
         bad_config.pop("consumers", None)
-        monkeypatch.setattr("newsbot.poster.load_config", lambda s: bad_config)
+        monkeypatch.setattr("newsbot.poster.load_config", lambda s, env=None: bad_config)
 
         with pytest.raises(ValueError, match="unknown consumer: telegram"):
             await deliver_one(store, settings)

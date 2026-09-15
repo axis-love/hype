@@ -42,6 +42,7 @@ class SettingsStore:
         self._conn.row_factory = sqlite3.Row
 
         self._init_db()
+        self.version = 0
 
     def _init_db(self) -> None:
         cur = self._conn.cursor()
@@ -88,6 +89,7 @@ class SettingsStore:
             """,
             (namespace, key, value_json, _utc_now_iso()),
         )
+        self.version += 1
 
     def set_json(self, namespace: str, key: str, value: Any) -> None:
         """Compatibility wrapper for callers that explicitly store JSON values."""
@@ -99,6 +101,7 @@ class SettingsStore:
             "DELETE FROM settings WHERE namespace=? AND key=?",
             (namespace, key),
         )
+        self.version += 1
 
     def list(self, namespace: str) -> Dict[str, Any]:
         rows = self._conn.execute(
