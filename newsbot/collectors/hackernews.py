@@ -18,17 +18,19 @@ import httpx
 
 from newsbot.collectors.base import Candidate, new_candidate, strip_html, truncate, to_iso_utc
 from newsbot.collectors._shared import get_shared_semaphore
+from newsbot.httpclient import owned_client
 
 log = logging.getLogger(__name__)
 
 HN_ALGOLIA_URL = "https://hn.algolia.com/api/v1/search"
+_HN_TIMEOUT = httpx.Timeout(15.0)
 
 
 async def _fetch_one(client: httpx.AsyncClient, *, params: dict[str, Any], source_name: str) -> list[Candidate]:
     sem = get_shared_semaphore()
     async with sem:
         try:
-            r = await client.get(HN_ALGOLIA_URL, params=params)
+            r = await client.get(HN_ALGOLIA_URL, params=params, timeout=_HN_TIMEOUT)
             if r.status_code >= 400:
                 log.warning("HN fetch failed url=%s status=%s", HN_ALGOLIA_URL, r.status_code)
                 return []
@@ -85,9 +87,7 @@ async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = Non
     else:
         requests.append({"tags": tags, "hitsPerPage": limit})
 
-    from newsbot.collectors.base import owned_client
-
-    async with owned_client(client, timeout=15.0, follow_redirects=True) as c:
+    async with owned_client(client, client_cls=httpx.AsyncClient, timeout=_HN_TIMEOUT, follow_redirects=True) as c:
         results = []
         for params in requests:
             results.extend(await _fetch_one(c, params=params, source_name=source_name))

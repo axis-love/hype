@@ -7,10 +7,9 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
-from core.log_sanitizer import redact_exception, redact_text
+from core.log_sanitizer import redact_exception
 from core.settings_store import SettingsStore
 import newsbot.llm as llm
 from newsbot.config import consumer_profile, load_config

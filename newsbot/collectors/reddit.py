@@ -377,7 +377,7 @@ async def _fetch_group(
 
 # --- Public entry point ---------------------------------------------------
 
-async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
+async def collect(config: dict[str, Any]) -> list[Candidate]:
     """Fetch Reddit candidates via batched multi-subreddit JSON API.
 
     *config* is the news.sources.reddit block. Subreddits are fetched in
@@ -385,6 +385,10 @@ async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = Non
     groups — Reddit throttles this host's IP on request bursts.
 
     Requires REDDIT_REFRESH_TOKEN env var. If unset, returns [] (no-op).
+
+    Does not take collect_all's shared httpx client: Reddit OAuth needs its
+    own auth client for the token endpoint (different headers than the
+    unauthenticated shared collector client).
     """
     refresh_token = os.environ.get("REDDIT_REFRESH_TOKEN", "").strip()
     if not refresh_token:

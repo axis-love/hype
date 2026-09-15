@@ -66,3 +66,21 @@ class JobCoordinator:
                 return result
         finally:
             self._running[kind] = False
+
+
+async def exclusive(
+    coordinator: JobCoordinator,
+    kind: JobKind,
+    fn: Callable[[], Awaitable[T]],
+    *,
+    timeout: float = 0,
+) -> Outcome:
+    """run_exclusive with Busy/timeout mapped to Outcome."""
+    try:
+        result = await coordinator.run_exclusive(kind, fn, timeout=timeout)
+    except Busy:
+        return Outcome.BUSY
+    except asyncio.TimeoutError:
+        log.error("%s timed out after %ss", kind.value, timeout)
+        return Outcome.FAILED
+    return result if isinstance(result, Outcome) else Outcome.OK

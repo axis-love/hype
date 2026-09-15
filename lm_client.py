@@ -1,7 +1,6 @@
 import asyncio
 import json
 import random
-import re
 from typing import Any, Dict, Optional, Tuple
 
 import httpx

@@ -16,7 +16,7 @@ class TestGitHubConcurrentQueries:
         """Multiple queries should execute concurrently."""
         call_times = []
 
-        async def mock_fetch_one(client, *, query, limit, sort):
+        async def mock_fetch_one(client, *, query, limit, sort, **kwargs):
             call_times.append(asyncio.get_event_loop().time())
             await asyncio.sleep(0.1)  # simulate network delay
             return [{"title": f"repo-{query}", "url": f"https://github.com/{query}", "source": "github"}]
@@ -35,7 +35,7 @@ class TestGitHubConcurrentQueries:
     @pytest.mark.asyncio
     async def test_partial_failure_does_not_discard_others(self):
         """If one query fails, results from others should still be returned."""
-        async def mock_fetch_one(client, *, query, limit, sort):
+        async def mock_fetch_one(client, *, query, limit, sort, **kwargs):
             if query == "fail":
                 raise RuntimeError("network error")
             return [{"title": f"repo-{query}", "url": f"https://github.com/{query}", "source": "github"}]

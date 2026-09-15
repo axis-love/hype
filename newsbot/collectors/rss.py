@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
 
 from newsbot.collectors.base import Candidate, new_candidate, strip_html, truncate, to_iso_utc
 from newsbot.collectors._shared import get_shared_semaphore
+from newsbot.httpclient import owned_client
 
 log = logging.getLogger(__name__)
 
@@ -49,9 +50,8 @@ async def _fetch_one(feed: dict[str, Any], client: httpx.AsyncClient | None = No
     sem = get_shared_semaphore()
     async with sem:
         try:
-            from newsbot.collectors.base import owned_client
-            async with owned_client(client, timeout=_RSS_TIMEOUT, follow_redirects=True) as c:
-                response = await c.get(url)
+            async with owned_client(client, client_cls=httpx.AsyncClient, timeout=_RSS_TIMEOUT, follow_redirects=True) as c:
+                response = await c.get(url, timeout=_RSS_TIMEOUT)
                 content = response.content
         except httpx.TimeoutException:
             log.warning("RSS fetch timed out for %s url=%s", source_name, url)

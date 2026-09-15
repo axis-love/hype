@@ -7,7 +7,6 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -60,7 +59,11 @@ async def collect_all(cfg: dict[str, Any]) -> list[dict[str, Any]]:
 
     async with httpx.AsyncClient(follow_redirects=True) as shared:
         for name, module in COLLECTORS.items():
-            if name in sources:
+            if name not in sources:
+                continue
+            if name == "reddit":
+                tasks.append((name, module.collect(sources[name])))
+            else:
                 tasks.append((name, module.collect(sources[name], shared)))
 
         if not tasks:
