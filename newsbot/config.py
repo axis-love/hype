@@ -10,11 +10,11 @@ any key via SQLite or the (future) admin path.
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 from core.settings_store import SettingsStore
 from newsbot.collectors.base import VALID_SOURCE_KEYS
+from newsbot.env import Env, resolve
 from newsbot.topics import (
     DEFAULT_TOPIC_PACKS,
     derive_config as _derive_topic_config,
@@ -106,48 +106,40 @@ DEFAULT_RECAP_PROMPT = (
 #
 # load_config returns config["consumers"] as a dict[consumer_name -> profile].
 
-def _consumer_profiles() -> dict[str, dict[str, Any]]:
-    """Build consumer profiles from env defaults.
-
-    telegram: mirrors today's env knobs (NEWS_TEMP_FLOOR etc.).
-    girllm: reads HYPE_CONSUMER_GIRLLM_* env with sane defaults
-            (floor 25, ratio 0.3, cooldown 2, max_candidates 5).
-    blog: reads HYPE_CONSUMER_BLOG_* env with sane defaults
-          (floor 55, ratio 0.8, cooldown 3, max_candidates 5).
-          Topics: science, new_research, ai.
-    """
-    tg_floor = float(os.getenv("NEWS_TEMP_FLOOR", "35"))
-    tg_ratio = float(os.getenv("NEWS_THRESHOLD_RATIO", "0.5"))
-    tg_cooldown = int(os.getenv("NEWS_TOPIC_COOLDOWN_MAX", "3"))
+def _consumer_profiles(env: Env | None = None) -> dict[str, dict[str, Any]]:
+    """Consumer profiles from Env (no process getenv)."""
+    env = resolve(env)
+    if env.consumers:
+        return env.consumers
     return {
         "telegram": {
             "channel": "telegram",
-            "floor": tg_floor,
-            "ratio": tg_ratio,
-            "merge_bonus": float(os.getenv("NEWS_MERGE_BONUS", "0.2")),
-            "merge_cap": float(os.getenv("NEWS_MERGE_CAP", "2.0")),
-            "cooldown_max": tg_cooldown,
-            "max_candidates": int(os.getenv("NEWS_MAX_CANDIDATES", "20")),
-            "topics": None,  # None = no topic filter (all topics)
+            "floor": env.temp_floor,
+            "ratio": env.threshold_ratio,
+            "merge_bonus": env.merge_bonus,
+            "merge_cap": env.merge_cap,
+            "cooldown_max": env.topic_cooldown_max,
+            "max_candidates": env.max_candidates,
+            "topics": None,
         },
         "girllm": {
             "channel": "girllm",
-            "floor": float(os.getenv("HYPE_CONSUMER_GIRLLM_FLOOR", "25")),
-            "ratio": float(os.getenv("HYPE_CONSUMER_GIRLLM_RATIO", "0.3")),
-            "merge_bonus": float(os.getenv("NEWS_MERGE_BONUS", "0.2")),
-            "merge_cap": float(os.getenv("NEWS_MERGE_CAP", "2.0")),
-            "cooldown_max": int(os.getenv("HYPE_CONSUMER_GIRLLM_COOLDOWN_MAX", "2")),
-            "max_candidates": int(os.getenv("HYPE_CONSUMER_GIRLLM_MAX_CANDIDATES", "5")),
+            "floor": 25.0,
+            "ratio": 0.3,
+            "merge_bonus": env.merge_bonus,
+            "merge_cap": env.merge_cap,
+            "cooldown_max": 2,
+            "max_candidates": 5,
             "topics": ["gaming", "gamedev", "ai"],
         },
         "blog": {
             "channel": "blog",
-            "floor": float(os.getenv("HYPE_CONSUMER_BLOG_FLOOR", "55")),
-            "ratio": float(os.getenv("HYPE_CONSUMER_BLOG_RATIO", "0.8")),
-            "merge_bonus": float(os.getenv("NEWS_MERGE_BONUS", "0.2")),
-            "merge_cap": float(os.getenv("NEWS_MERGE_CAP", "2.0")),
-            "cooldown_max": int(os.getenv("HYPE_CONSUMER_BLOG_COOLDOWN_MAX", "3")),
-            "max_candidates": int(os.getenv("HYPE_CONSUMER_BLOG_MAX_CANDIDATES", "5")),
+            "floor": 55.0,
+            "ratio": 0.8,
+            "merge_bonus": env.merge_bonus,
+            "merge_cap": env.merge_cap,
+            "cooldown_max": 3,
+            "max_candidates": 5,
             "topics": ["science", "new_research", "ai"],
         },
     }
@@ -182,7 +174,10 @@ DEFAULT_SOURCES: dict[str, Any] = {
 }
 
 
-def load_config(settings: SettingsStore) -> dict[str, Any]:
+_config_cache: tuple[int, int, dict[str, Any]] | None = None
+
+
+def load_config(settings: SettingsStore, env: Env | None = None) -> dict[str, Any]:
     """Read the 'news' namespace from SettingsStore and merge with defaults.
 
     Topic packs (newsbot/topics.py) are the source of truth for which
@@ -216,6 +211,14 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
     /sources and /topic surface this so the operator knows a /topic toggle
     is inert for those blocks.
     """
+    global _config_cache
+    ver = getattr(settings, "version", None)
+    if ver is not None and _config_cache is not None:
+        cached_id, cached_ver, cached_cfg = _config_cache
+        if cached_id == id(settings) and cached_ver == ver:
+            return cached_cfg
+    env = resolve(env)
+
     raw = settings.list("news") if hasattr(settings, "list") else {}
 
     # --- Topic packs: the source of truth for sources/boosts/keywords ---
@@ -282,10 +285,18 @@ def load_config(settings: SettingsStore) -> dict[str, Any]:
         "llm_max_tokens_digest": _as_int(raw.get("llm_max_tokens_digest"), DEFAULT_LLM["max_tokens_digest"], key="llm_max_tokens_digest"),
         "style_prompt": str(raw.get("style_prompt") or DEFAULT_STYLE_PROMPT),
         "recap_prompt": str(raw.get("recap_prompt") or DEFAULT_RECAP_PROMPT),
-        "consumers": _consumer_profiles(),
+        "consumers": _consumer_profiles(env),
     }
+    if "github" in sources:
+        gh = dict(sources["github"])
+        if env.github_token and not gh.get("token"):
+            gh["token"] = env.github_token
+        sources["github"] = gh
+        config["sources"] = sources
 
     _validate_config(config)
+    if ver is not None:
+        _config_cache = (id(settings), int(ver), config)
     return config
 
 

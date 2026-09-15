@@ -167,4 +167,4 @@ class TestRemovedAPIs:
         row = store._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert row["v"] == 10
+        assert row["v"] == 11

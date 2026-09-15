@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import timedelta, timezone
 from typing import Any
 
@@ -20,6 +19,7 @@ from newsbot.bot_commands import outcome_message
 from newsbot.clock import local_now
 from newsbot.config import load_config
 from newsbot.db import NewsStore
+from newsbot.env import Env, resolve
 from newsbot.generation import (
     GENERATION_TIMEOUT_SECONDS,
     _run_generation,
@@ -60,20 +60,22 @@ class AdminActions:
         settings: SettingsStore,
         coordinator: JobCoordinator,
         gen_hours: list[int],
+        env: Env | None = None,
     ) -> None:
         self._store = store
         self.settings = settings
         self.coordinator = coordinator
         self.gen_hours = gen_hours
+        self.env = resolve(env)
 
     async def digest(self) -> None:
         result = await exclusive(
             self.coordinator,
             JobKind.GENERATION,
-            lambda: _run_generation(self._store, self.settings),
+            lambda: _run_generation(self._store, self.settings, self.env),
             timeout=GENERATION_TIMEOUT_SECONDS,
         )
-        _run_retention(self._store)
+        _run_retention(self._store, self.env)
         msg = outcome_message("digest", result)
         if msg:
             raise RuntimeError(msg)
@@ -82,8 +84,8 @@ class AdminActions:
         """Dry-run generation through the lock; returns the report string."""
 
         async def _dry_run() -> str:
-            cfg = load_config(self.settings)
-            result = await _run_generation_pipeline(self._store, cfg)
+            cfg = load_config(self.settings, self.env)
+            result = await _run_generation_pipeline(self._store, cfg, self.env)
             if result is None:
                 return (
                     "Dry-run: pipeline produced nothing "
@@ -120,21 +122,21 @@ class AdminActions:
         result = await exclusive(
             self.coordinator,
             JobKind.POSTING,
-            lambda: deliver_one(self._store, self.settings),
+            lambda: deliver_one(self._store, self.settings, self.env),
         )
         msg = outcome_message("post", result)
         if msg:
             raise RuntimeError(msg)
 
     async def status(self) -> str:
-        cfg = load_config(self.settings)
+        cfg = load_config(self.settings, self.env)
         rows = self._store.list_store_rows("telegram")
         result, floor, ratio, _, _ = _pick_snapshot(self._store, cfg)
         last_gen_slot = self.settings.get("scheduler", "last_gen_slot", default="") or ""
         last_post_slot = self.settings.get("scheduler", "last_post_slot", default="") or ""
         last_summary_day = self.settings.get("scheduler", "last_summary_day", default="") or ""
         skip = _skip_label(self.coordinator.last_outcome.get(JobKind.POSTING))
-        tz_name = os.getenv("NEWS_TZ", "Asia/Bangkok")
+        tz_name = self.env.news_tz
         gen_status = "running" if self.coordinator.running(JobKind.GENERATION) else "idle"
         post_status = "running" if self.coordinator.running(JobKind.POSTING) else "idle"
         summary_status = "running" if self.coordinator.running(JobKind.SUMMARY) else "idle"
@@ -153,7 +155,7 @@ class AdminActions:
         )
 
     async def scores(self) -> str:
-        return _format_scores(self._store, load_config(self.settings))
+        return _format_scores(self._store, load_config(self.settings, self.env))
 
     async def store(self, arg: str) -> str:
         if arg.strip():
@@ -162,20 +164,20 @@ class AdminActions:
             except ValueError:
                 return f"Invalid id: {arg.strip()!r} — /store expects a row id number."
             return _format_store_detail(self._store, row_id)
-        return _format_store_browse(self._store, load_config(self.settings))
+        return _format_store_browse(self._store, load_config(self.settings, self.env))
 
     async def summary(self) -> None:
         result = await exclusive(
             self.coordinator,
             JobKind.SUMMARY,
-            lambda: _run_summary(self._store, self.settings, local_now()),
+            lambda: _run_summary(self._store, self.settings, local_now(self.env.news_tz), self.env),
         )
         msg = outcome_message("summary", result)
         if msg:
             raise RuntimeError(msg)
 
     async def preview(self) -> tuple[str, str, list[dict[str, Any]] | None]:
-        cfg = load_config(self.settings)
+        cfg = load_config(self.settings, self.env)
         result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(self._store, cfg)
         if result.reason == "empty":
             raise RuntimeError("Store is empty — run /digest first")
@@ -197,7 +199,7 @@ class AdminActions:
         if not body:
             raise RuntimeError("styler returned an empty body — check logs")
         url = row.get("url") or ""
-        signature = signature_for(os.getenv("NEWS_CHANNEL_ID", ""))
+        signature = signature_for(self.env.news_channel_id)
         markdown = render_post(title, body, url, signature)
         try:
             media = await asyncio.to_thread(extract_article_media, url)
@@ -218,7 +220,7 @@ class AdminActions:
         rows = self._store.list_posted_since("telegram", since_utc)
         if not rows:
             raise RuntimeError("nothing posted in the last 24h — nothing to recap")
-        cfg = load_config(self.settings)
+        cfg = load_config(self.settings, self.env)
         items = _recap_input_items(rows)
         sheet = _format_recap_input_sheet(items)
         result = await llm_daily_summary(
@@ -226,7 +228,7 @@ class AdminActions:
         )
         if not result:
             raise RuntimeError("recap LLM returned nothing — check logs")
-        chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+        chat_id = self.env.news_channel_id
         return (
             sheet,
             render_recap(

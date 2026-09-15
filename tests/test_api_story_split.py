@@ -82,7 +82,7 @@ class TestH15Schema:
                 assert gone not in pp
             assert "styled_title" in dd
             assert "styled_body" in dd
-            assert store.schema_version() == 10
+            assert store.schema_version() == 11
         finally:
             store.close()
 
@@ -116,7 +116,7 @@ class TestH15Migration:
 
         store = NewsStore(db_path)
         try:
-            assert store.schema_version() == 10
+            assert store.schema_version() == 11
             pp = store._conn.execute(
                 "SELECT title, summary FROM pending_posts WHERE id=1"
             ).fetchone()
@@ -134,7 +134,7 @@ class TestH15Migration:
 
             store2 = NewsStore(db_path)
             try:
-                assert store2.schema_version() == 10
+                assert store2.schema_version() == 11
                 n = store2._conn.execute(
                     "SELECT COUNT(*) AS n FROM schema_version WHERE version=10"
                 ).fetchone()["n"]

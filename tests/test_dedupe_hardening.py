@@ -27,7 +27,6 @@ from newsbot.dedupe import (
     _external_url_key,
     _merge_pair,
     _row_external_url_key,
-    _row_raw_json,
     dedupe_and_merge,
     match_candidate_to_store,
 )
@@ -261,30 +260,15 @@ class TestRowSideExternalUrl:
         assert hit is None
 
     def test_row_external_url_helper_tolerant(self):
-        """_row_external_url_key handles str, dict, None, malformed."""
-        # Dict input (in-memory).
+        """_row_external_url_key reads the column, not raw_json."""
+        assert _row_external_url_key(
+            {"external_url": "https://example.com/article"}
+        ) == _canonical_url("https://example.com/article")
+        assert _row_external_url_key({}) == ""
+        assert _row_external_url_key({"external_url": None}) == ""
+        assert _row_external_url_key({"external_url": "not-a-url"}) == ""
         assert _row_external_url_key(
             {"raw_json": {"external_url": "https://example.com/article"}}
-        ) == _canonical_url("https://example.com/article")
-
-        # String input (DB form).
-        assert _row_external_url_key(
-            {"raw_json": '{"external_url": "https://example.com/article"}'}
-        ) == _canonical_url("https://example.com/article")
-
-        # None / missing.
-        assert _row_external_url_key({}) == ""
-        assert _row_external_url_key({"raw_json": None}) == ""
-
-        # Malformed JSON string.
-        assert _row_external_url_key({"raw_json": "not json"}) == ""
-
-        # Non-dict JSON.
-        assert _row_external_url_key({"raw_json": "[1,2,3]"}) == ""
-
-        # Non-http external_url.
-        assert _row_external_url_key(
-            {"raw_json": {"external_url": "not-a-url"}}
         ) == ""
 
 

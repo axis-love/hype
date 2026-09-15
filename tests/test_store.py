@@ -91,7 +91,7 @@ class TestMigration4:
         row = store._conn.execute(
             "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
         ).fetchone()
-        assert row["version"] == 10
+        assert row["version"] == 11
 
 
 # --- add_stories_to_store -------------------------------------------------
@@ -201,7 +201,7 @@ class TestListStoreRows:
         store.add_stories_to_store([_story()], [])
         row = store.list_store_rows("telegram")[0]
         for key in (
-            "id", "title", "url", "snippet", "source_name", "raw_json", "category",
+            "id", "title", "url", "snippet", "source_name", "category",
             "source", "published_at", "upvotes", "comments", "stars", "reposts",
             "crosspost_count", "penalty", "lookback_hours", "score_at_queue",
             "engagement_score", "recency_at_queue", "source_weight", "topic_bonus",

@@ -388,6 +388,53 @@ def _migration_10(cur: sqlite3.Cursor) -> None:
     cur.execute("ALTER TABLE pending_posts DROP COLUMN message_id")
 
 
+def _parse_stored_raw_json(raw: Any) -> dict[str, Any] | None:
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _payload_columns_from_raw(raw: Any) -> tuple[str | None, int, float | None]:
+    parsed = _parse_stored_raw_json(raw)
+    if parsed is None:
+        return None, 0, None
+    ext = str(parsed.get("external_url") or "").strip() or None
+    is_self = 1 if parsed.get("is_self") else 0
+    weight = parsed.get("weight")
+    feed_weight: float | None
+    try:
+        feed_weight = float(weight) if weight is not None else None
+    except (TypeError, ValueError):
+        feed_weight = None
+    return ext, is_self, feed_weight
+
+
+def _backfill_payload_columns(cur: sqlite3.Cursor) -> None:
+    rows = cur.execute("SELECT id, raw_json FROM pending_posts").fetchall()
+    for row in rows:
+        ext, is_self, feed_weight = _payload_columns_from_raw(row["raw_json"])
+        cur.execute(
+            "UPDATE pending_posts SET external_url=?, is_self=?, feed_weight=? WHERE id=?",
+            (ext, is_self, feed_weight, row["id"]),
+        )
+
+
+@_migration(11, "Persist external_url, is_self, feed_weight from raw_json")
+def _migration_11(cur: sqlite3.Cursor) -> None:
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN external_url TEXT")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN is_self INTEGER")
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN feed_weight REAL")
+    _backfill_payload_columns(cur)
+
+
 class NewsStore:
     """CRUD wrapper for news-bot tables."""
 
@@ -719,6 +766,7 @@ class NewsStore:
                 contributing = story.get("contributing_urls") or []
                 seed_urls = [u for u in contributing if u and u != row_url]
                 merged_urls_json = json.dumps(seed_urls) if seed_urls else None
+                ext, is_self, feed_weight = _payload_columns_from_raw(raw_json if isinstance(raw_json, str) else story.get("raw_json"))
                 post_rows.append((
                     str(story.get("title") or "").strip(),
                     str(story.get("short_summary") or "").strip() or None,
@@ -748,6 +796,7 @@ class NewsStore:
                     bd.get("scored_at"),
                     bd.get("origin_topic"),
                     merged_urls_json,
+                    ext, is_self, feed_weight,
                 ))
             if post_rows:
                 cur.executemany(
@@ -759,8 +808,9 @@ class NewsStore:
                         crosspost_count, penalty, lookback_hours,
                         score_at_queue, engagement_score, recency_at_queue,
                         source_weight, topic_bonus, crosspost_bonus,
-                        matched_topics, scored_at, origin_topic, merged_urls
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        matched_topics, scored_at, origin_topic, merged_urls,
+                        external_url, is_self, feed_weight
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     post_rows,
                 )
@@ -792,12 +842,13 @@ class NewsStore:
         return len(post_rows)
 
     _STORE_SELECT = (
-        "id, title, summary, url, snippet, source_name, raw_json, category, "
+        "id, title, summary, url, snippet, source_name, category, "
         "source, published_at, upvotes, comments, stars, reposts, "
         "crosspost_count, penalty, lookback_hours, "
         "score_at_queue, engagement_score, recency_at_queue, "
         "source_weight, topic_bonus, crosspost_bonus, "
-        "matched_topics, scored_at, origin_topic, merge_count, merged_urls"
+        "matched_topics, scored_at, origin_topic, merge_count, merged_urls, "
+        "external_url, is_self, feed_weight"
     )
 
     def list_store_rows(self, channel: str) -> list[dict]:
@@ -950,6 +1001,10 @@ class NewsStore:
         cand_summary = str(candidate.get("short_summary") or "").strip()
         summary = stored_summary or cand_summary or None
 
+        cand_ext, _, cand_weight = _payload_columns_from_raw(candidate.get("raw_json"))
+        external_url = cand_ext or row["external_url"]
+        feed_weight = cand_weight if cand_weight is not None else row["feed_weight"]
+
         self._conn.execute(
             """
             UPDATE pending_posts SET
@@ -962,7 +1017,9 @@ class NewsStore:
                 penalty = ?, lookback_hours = ?,
                 score_at_queue = ?,
                 origin_topic = ?,
-                summary = ?
+                summary = ?,
+                external_url = ?,
+                feed_weight = ?
             WHERE id = ?
             """,
             (
@@ -975,6 +1032,8 @@ class NewsStore:
                 score_at_queue,
                 origin_topic,
                 summary,
+                external_url,
+                feed_weight,
                 row_id,
             ),
         )
@@ -1094,9 +1153,9 @@ class NewsStore:
         return dict(row) if row else None
 
     def get_story(self, row_id: int) -> dict[str, Any] | None:
-        """Return an engine story by id, delivered or not."""
+        """Return an engine story by id, delivered or not. Includes raw_json for /store <id>."""
         row = self._conn.execute(
-            f"SELECT {self._STORE_SELECT} FROM pending_posts WHERE id=?",
+            f"SELECT {self._STORE_SELECT}, raw_json FROM pending_posts WHERE id=?",
             (row_id,),
         ).fetchone()
         return dict(row) if row else None

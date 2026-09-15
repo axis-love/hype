@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -11,6 +10,7 @@ from core.settings_store import SettingsStore
 from newsbot.config import load_config
 from newsbot.clock import summary_day
 from newsbot.db import NewsStore
+from newsbot.env import Env, resolve
 import newsbot.llm as llm
 from newsbot.outcome import Outcome
 from newsbot.poster import _format_recap_html_fallback
@@ -65,7 +65,9 @@ def _format_recap_input_sheet(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime) -> Outcome:
+async def _run_summary(
+    store: NewsStore, settings: SettingsStore, now: datetime, env: Env | None = None,
+) -> Outcome:
     """Build and deliver the daily recap of the last 24h of posted news.
 
     Returns:
@@ -81,7 +83,7 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         log.info("daily summary: no posts in the last 24h — skipping day %s", day)
         return Outcome.NOTHING_TO_DO
 
-    cfg = load_config(settings)
+    cfg = load_config(settings, env)
     items = _recap_input_items(rows)
 
     try:
@@ -95,8 +97,9 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
         log.error("daily summary LLM returned nothing — will retry")
         return Outcome.FAILED
 
-    bot_token = os.getenv("BOT_TOKEN", "").strip()
-    chat_id = os.getenv("NEWS_CHANNEL_ID", "").strip()
+    env = resolve(env)
+    bot_token = env.bot_token
+    chat_id = env.news_channel_id
 
     # Build rich markdown recap + HTML fallback for sendRichMessage failure.
     markdown = render_recap(
@@ -125,7 +128,7 @@ async def _run_summary(store: NewsStore, settings: SettingsStore, now: datetime)
             return Outcome.FAILED
 
     try:
-        store.add_summary(day, markdown, os.getenv("LM_MODEL", ""), len(items))
+        store.add_summary(day, markdown, env.lm_model, len(items))
     except Exception as db_exc:
         # day UNIQUE constraint fires on a re-delivery — not an error for us.
         log.warning("daily summary already recorded for %s: %s", day, redact_exception(db_exc))

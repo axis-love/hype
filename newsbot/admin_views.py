@@ -222,6 +222,10 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
 
     lines.append(f"  Scored at: {row.get('scored_at') or '(unscored)'}")
     lines.append(f"  Lookback hours: {row.get('lookback_hours') or '?'}")
+    raw_json = row.get("raw_json")
+    if raw_json:
+        text = raw_json if isinstance(raw_json, str) else json.dumps(raw_json)
+        lines.append(f"  raw_json: {text[:400]}{'…' if len(text) > 400 else ''}")
 
     delivery = store.get_delivery(row_id, "telegram")
     if delivery is not None:

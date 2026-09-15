@@ -38,7 +38,7 @@ class TestMigrationApplies:
         row = store._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert row["v"] == 10
+        assert row["v"] == 11
 
     def test_deliveries_table_exists(self, store):
         """The deliveries table should exist after migration 7."""
@@ -119,7 +119,7 @@ class TestMigrationApplies:
         version_row = store2._conn.execute(
             "SELECT MAX(version) AS v FROM schema_version"
         ).fetchone()
-        assert version_row["v"] == 10
+        assert version_row["v"] == 11
 
         # Backfill: 3 posted rows should have 'telegram' deliveries.
         del_count = store2._conn.execute(
