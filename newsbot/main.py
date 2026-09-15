@@ -28,24 +28,13 @@ from newsbot.generation import (
     _run_generation,
     _run_retention,
 )
-from newsbot.jobs import Busy, JobCoordinator, JobKind
-from newsbot.llm import validate_llm_env
+from newsbot.jobs import JobCoordinator, JobKind, exclusive
+from newsbot.llm import aclose_clients, validate_llm_env
 from newsbot.outcome import Outcome
-from newsbot.poster import drain
+from newsbot.poster import deliver_one, drain
 from newsbot.recap import _run_summary
 
 log = logging.getLogger(__name__)
-
-
-async def _exclusive(coordinator: JobCoordinator, kind: JobKind, fn, *, timeout: float = 0) -> Outcome:
-    try:
-        result = await coordinator.run_exclusive(kind, fn, timeout=timeout)
-    except Busy:
-        return Outcome.BUSY
-    except asyncio.TimeoutError:
-        log.error("%s timed out after %ss", kind.value, timeout)
-        return Outcome.FAILED
-    return result if isinstance(result, Outcome) else Outcome.OK
 
 
 async def _scheduler_summary_iteration(
@@ -63,7 +52,7 @@ async def _scheduler_summary_iteration(
     last_summary_day = settings.get("scheduler", "last_summary_day", default="") or ""
     if last_summary_day == day:
         return Outcome.OK
-    result = await _exclusive(
+    result = await exclusive(
         coordinator, JobKind.SUMMARY, lambda: _run_summary(store, settings, now)
     )
     if result is Outcome.OK or result is Outcome.NOTHING_TO_DO:
@@ -92,7 +81,7 @@ async def _scheduler_gen_iteration(
     gen_success = False
     result = Outcome.FAILED
     try:
-        result = await _exclusive(
+        result = await exclusive(
             coordinator, JobKind.GENERATION,
             lambda: _run_generation(store, settings),
             timeout=timeout,
@@ -124,8 +113,6 @@ async def _scheduler_post_iteration(
     *,
     now: datetime | None = None,
 ) -> Outcome:
-    from newsbot.poster import deliver_one
-
     if now is None:
         now = local_now()
     slot = post_slot(now)
@@ -137,7 +124,7 @@ async def _scheduler_post_iteration(
     post_success = False
     result = Outcome.FAILED
     try:
-        result = await _exclusive(
+        result = await exclusive(
             coordinator, JobKind.POSTING, lambda: deliver_one(store, settings)
         )
         if result.consumes_slot:
@@ -230,25 +217,27 @@ async def _scheduled_loop(settings: SettingsStore) -> None:
             await api_runner.cleanup()
         if bot_handler:
             await bot_handler.close()
-        from newsbot.llm import aclose_clients
         await aclose_clients()
         store.close()
 
 
 async def _once_or_dry(store: NewsStore, settings: SettingsStore) -> int:
     coordinator = JobCoordinator()
-    result = await _exclusive(
-        coordinator, JobKind.GENERATION,
-        lambda: _run_generation(store, settings),
-        timeout=GENERATION_TIMEOUT_SECONDS,
-    )
-    _run_retention(store)
-    if result is Outcome.OK:
-        result = await _exclusive(
-            coordinator, JobKind.POSTING, lambda: drain(store, settings)
+    try:
+        result = await exclusive(
+            coordinator, JobKind.GENERATION,
+            lambda: _run_generation(store, settings),
+            timeout=GENERATION_TIMEOUT_SECONDS,
         )
-        return result.exit_code
-    return result.exit_code if result is Outcome.FAILED else 0
+        _run_retention(store)
+        if result is Outcome.OK:
+            result = await exclusive(
+                coordinator, JobKind.POSTING, lambda: drain(store, settings)
+            )
+            return result.exit_code
+        return result.exit_code if result is Outcome.FAILED else 0
+    finally:
+        await aclose_clients()
 
 
 def main() -> None:

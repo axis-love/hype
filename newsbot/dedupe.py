@@ -422,6 +422,11 @@ class _MergeGroup:
         )
 
     def finalize(self) -> dict[str, Any]:
+        """Write merged fields onto the representative dict.
+
+        Un-merged rows with None engagement become 0 here (HN already
+        emits None for 0 points). Scores are unaffected.
+        """
         keep = self.rep
         keep["source_name"] = " + ".join(sorted(self.source_names))
         for field in _ENG_FIELDS:

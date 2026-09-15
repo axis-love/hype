@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from core.log_sanitizer import redact_exception, redact_text, redact_url
+from newsbot.httpclient import owned_client
 from newsbot.richmd import RICH_MESSAGE_MAX_CHARS
 
 log = logging.getLogger(__name__)
@@ -329,9 +330,7 @@ async def post_digest(
     chunks = _split_for_telegram(text)
     results: list[dict[str, Any]] = []
 
-    from newsbot.collectors.base import owned_client
-
-    async with owned_client(client, timeout=30.0) as c:
+    async with owned_client(client, client_cls=httpx.AsyncClient, timeout=30.0) as c:
         for idx, chunk in enumerate(chunks):
             payload = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}
             try:
@@ -422,9 +421,7 @@ async def post_rich_message(
     # The URL contains the bot token — never log it directly.
     url = f"{BOT_API_BASE}/bot{bot_token}/sendRichMessage"
 
-    from newsbot.collectors.base import owned_client
-
-    async with owned_client(client, timeout=30.0) as c:
+    async with owned_client(client, client_cls=httpx.AsyncClient, timeout=30.0) as c:
         try:
             result = await _send_with_retry(c, url, payload, 0)
         except httpx.HTTPStatusError as exc:

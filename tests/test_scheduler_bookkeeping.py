@@ -215,7 +215,7 @@ class TestSchedulerPostIteration:
     async def test_success_consumes_slot(self, store, settings):
         coordinator = JobCoordinator()
 
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
             result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.OK
@@ -226,7 +226,7 @@ class TestSchedulerPostIteration:
         """Odd hours have no post slot — idle, nothing invoked."""
         coordinator = JobCoordinator()
 
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(
                 coordinator, store, settings, now=NOW.replace(hour=13),
             )
@@ -240,7 +240,7 @@ class TestSchedulerPostIteration:
         coordinator = JobCoordinator()
         settings.set("scheduler", "last_post_slot", "2026-08-16T14")
 
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.OK
@@ -251,7 +251,7 @@ class TestSchedulerPostIteration:
         """Failure (1) → retry within the hour; slot not consumed."""
         coordinator = JobCoordinator()
 
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.FAILED):
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.FAILED):
             result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.FAILED
@@ -283,7 +283,7 @@ class TestSchedulerPostIteration:
         """Code 4 (nothing hot enough) consumes the slot — healthy skip."""
         coordinator = JobCoordinator()
 
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.BELOW_THRESHOLD):
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.BELOW_THRESHOLD):
             result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.BELOW_THRESHOLD
@@ -293,10 +293,10 @@ class TestSchedulerPostIteration:
     async def test_exception_leaves_slot_unconsumed(self, store, settings):
         coordinator = JobCoordinator()
 
-        async def exploding_deliver():
+        async def exploding_deliver(*args, **kwargs):
             raise RuntimeError("Telegram down")
 
-        with patch("newsbot.poster.deliver_one", side_effect=exploding_deliver):
+        with patch("newsbot.main.deliver_one", side_effect=exploding_deliver):
             result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.FAILED
@@ -310,7 +310,7 @@ class TestSchedulerPostIteration:
         coordinator = JobCoordinator()
 
         # now = 15:30 odd hour → idle even though 14:00 slot was never consumed.
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(
                 coordinator, store, settings, now=NOW.replace(hour=15),
             )
@@ -318,7 +318,7 @@ class TestSchedulerPostIteration:
         assert not mock_deliver.called
 
         # next even hour fires exactly once, for the new slot.
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK):
             await _scheduler_post_iteration(
                 coordinator, store, settings, now=NOW.replace(hour=16),
             )
@@ -330,7 +330,7 @@ class TestSchedulerPostIteration:
         coordinator = JobCoordinator()
         settings.set("scheduler", "last_post_slot", "2026-08-16T14")
 
-        with patch("newsbot.poster.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
+        with patch("newsbot.main.deliver_one", new_callable=AsyncMock, return_value=Outcome.OK) as mock_deliver:
             result = await _scheduler_post_iteration(coordinator, store, settings, now=NOW)
 
         assert result == Outcome.OK

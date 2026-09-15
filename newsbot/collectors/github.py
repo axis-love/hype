@@ -25,8 +25,8 @@ from typing import Any
 import httpx
 
 from newsbot.collectors.base import Candidate, new_candidate, truncate, to_iso_utc
-
 from newsbot.collectors._shared import get_shared_semaphore
+from newsbot.httpclient import owned_client
 
 log = logging.getLogger(__name__)
 
@@ -66,12 +66,22 @@ def _is_suspicious(repo: dict[str, Any]) -> bool:
     return age_days <= SUSPICIOUS_AGE_DAYS
 
 
-async def _fetch_one(client: httpx.AsyncClient, *, query: str, limit: int, sort: str) -> list[Candidate]:
+async def _fetch_one(
+    client: httpx.AsyncClient,
+    *,
+    query: str,
+    limit: int,
+    sort: str,
+    headers: dict[str, str],
+    timeout: httpx.Timeout,
+) -> list[Candidate]:
     params = {"q": query, "sort": sort, "order": "desc", "per_page": limit}
     sem = get_shared_semaphore()
     async with sem:
         try:
-            r = await client.get(GITHUB_SEARCH_URL, params=params)
+            r = await client.get(
+                GITHUB_SEARCH_URL, params=params, headers=headers, timeout=timeout,
+            )
             if r.status_code >= 400:
                 log.warning("GitHub search failed query=%r status=%s", query, r.status_code)
                 return []
@@ -145,10 +155,8 @@ async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = Non
         headers["Authorization"] = f"Bearer {github_token}"
     timeout = httpx.Timeout(20.0)
 
-    from newsbot.collectors.base import owned_client
-
-    async with owned_client(client, headers=headers, timeout=timeout, follow_redirects=True) as c:
-        tasks = [_fetch_one(c, query=str(q).strip(), limit=limit, sort=sort)
+    async with owned_client(client, client_cls=httpx.AsyncClient, headers=headers, timeout=timeout, follow_redirects=True) as c:
+        tasks = [_fetch_one(c, query=str(q).strip(), limit=limit, sort=sort, headers=headers, timeout=timeout)
                  for q in queries if str(q).strip()]
         batches = await asyncio.gather(*tasks, return_exceptions=True)
         results = []

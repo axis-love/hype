@@ -1,6 +1,7 @@
 """Admin /status /scores /store /digest-dry formatters."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -8,8 +9,8 @@ from typing import Any
 from newsbot.config import consumer_profile, load_config
 from newsbot.db import NewsStore
 from newsbot.generation import GenerationPipelineResult
+from newsbot.scoring import current_temperature, merge_multiplier
 from newsbot.selection import select_for_consumer
-from newsbot.scoring import current_temperature
 
 log = logging.getLogger(__name__)
 
@@ -47,8 +48,6 @@ def _format_scores(store: NewsStore, config: dict[str, Any]) -> str:
     legacy rows (NULL score columns) have no reconstructable temperature
     and sink to the bottom marked 'score unavailable'.
     """
-    from newsbot.scoring import merge_multiplier
-
     result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, config)
     rows = [row for row in store.list_store_rows("telegram")]
     if not rows:
@@ -98,8 +97,6 @@ def _format_store_browse(store: NewsStore, config: dict[str, Any]) -> str:
     (source, published, signals, merge count, raw/styled flag, snippet
     excerpt). Capped to fit a sane Telegram message.
     """
-    from newsbot.scoring import merge_multiplier
-
     result, floor, ratio, merge_bonus, merge_cap = _pick_snapshot(store, config)
     rows = store.list_store_rows("telegram")
     if not rows:
@@ -209,7 +206,6 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
     merged_urls_raw = row.get("merged_urls")
     if merged_urls_raw:
         try:
-            import json
             merged = json.loads(merged_urls_raw) if isinstance(merged_urls_raw, str) else merged_urls_raw
             if isinstance(merged, list) and merged:
                 lines.append(f"  Merged URLs ({len(merged)}):")

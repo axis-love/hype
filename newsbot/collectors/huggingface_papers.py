@@ -18,10 +18,12 @@ import httpx
 
 from newsbot.collectors.base import Candidate, new_candidate, truncate
 from newsbot.collectors._shared import get_shared_semaphore
+from newsbot.httpclient import owned_client
 
 log = logging.getLogger(__name__)
 
 HF_DAILY_PAPERS_URL = "https://huggingface.co/api/daily_papers"
+_HF_TIMEOUT = httpx.Timeout(20.0)
 
 
 async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = None) -> list[Candidate]:
@@ -36,9 +38,8 @@ async def collect(config: dict[str, Any], client: httpx.AsyncClient | None = Non
     sem = get_shared_semaphore()
     async with sem:
         try:
-            from newsbot.collectors.base import owned_client
-            async with owned_client(client, timeout=20.0, follow_redirects=True) as c:
-                r = await c.get(HF_DAILY_PAPERS_URL)
+            async with owned_client(client, client_cls=httpx.AsyncClient, timeout=_HF_TIMEOUT, follow_redirects=True) as c:
+                r = await c.get(HF_DAILY_PAPERS_URL, timeout=_HF_TIMEOUT)
                 if r.status_code >= 400:
                     log.warning("HF Papers fetch failed url=%s status=%s", HF_DAILY_PAPERS_URL, r.status_code)
                     return []

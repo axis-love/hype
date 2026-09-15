@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from typing import Any
 
 from core.log_sanitizer import redact_exception
@@ -27,7 +27,7 @@ from newsbot.generation import (
     _run_retention,
 )
 from newsbot.images import extract_article_media
-from newsbot.jobs import Busy, JobCoordinator, JobKind
+from newsbot.jobs import Busy, JobCoordinator, JobKind, exclusive
 import newsbot.llm as llm
 from newsbot.outcome import Outcome
 from newsbot.poster import (
@@ -66,24 +66,9 @@ class AdminActions:
         self.coordinator = coordinator
         self.gen_hours = gen_hours
 
-    async def _exclusive(
-        self,
-        kind: JobKind,
-        fn,
-        *,
-        timeout: float = 0,
-    ) -> Outcome:
-        try:
-            result = await self.coordinator.run_exclusive(kind, fn, timeout=timeout)
-        except Busy:
-            return Outcome.BUSY
-        except asyncio.TimeoutError:
-            log.error("%s timed out after %ss", kind.value, timeout)
-            return Outcome.FAILED
-        return result if isinstance(result, Outcome) else Outcome.OK
-
     async def digest(self) -> None:
-        result = await self._exclusive(
+        result = await exclusive(
+            self.coordinator,
             JobKind.GENERATION,
             lambda: _run_generation(self._store, self.settings),
             timeout=GENERATION_TIMEOUT_SECONDS,
@@ -132,7 +117,8 @@ class AdminActions:
             )
 
     async def post(self) -> None:
-        result = await self._exclusive(
+        result = await exclusive(
+            self.coordinator,
             JobKind.POSTING,
             lambda: deliver_one(self._store, self.settings),
         )
@@ -179,7 +165,8 @@ class AdminActions:
         return _format_store_browse(self._store, load_config(self.settings))
 
     async def summary(self) -> None:
-        result = await self._exclusive(
+        result = await exclusive(
+            self.coordinator,
             JobKind.SUMMARY,
             lambda: _run_summary(self._store, self.settings, local_now()),
         )

@@ -28,6 +28,7 @@ import httpx
 
 from newsbot.collectors.base import Candidate, new_candidate, to_iso_utc
 from newsbot.collectors._shared import get_shared_semaphore
+from newsbot.httpclient import owned_client
 
 log = logging.getLogger(__name__)
 
@@ -109,9 +110,8 @@ async def _fetch_one_geo(geo: str, limit: int, client: httpx.AsyncClient | None 
     sem = get_shared_semaphore()
     async with sem:
         try:
-            from newsbot.collectors.base import owned_client
-            async with owned_client(client, timeout=_TRENDS_TIMEOUT, follow_redirects=True) as c:
-                response = await c.get(url)
+            async with owned_client(client, client_cls=httpx.AsyncClient, timeout=_TRENDS_TIMEOUT, follow_redirects=True) as c:
+                response = await c.get(url, timeout=_TRENDS_TIMEOUT)
                 content = response.content
         except httpx.TimeoutException:
             log.warning("Trends fetch timed out for geo=%s url=%s", geo, url)
