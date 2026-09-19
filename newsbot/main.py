@@ -247,7 +247,11 @@ def main() -> None:
 
     load_dotenv()
     configure_logging(process_name="newsbot")
-    env = Env.from_environ()
+    try:
+        env = Env.from_environ()
+    except ValueError as exc:
+        print(exc)
+        sys.exit(1)
     validate_llm_env(env)
 
     settings: SettingsStore = default_store(env.news_db)

@@ -39,7 +39,7 @@ from typing import Any
 
 import httpx
 
-from core.log_sanitizer import redact_exception, redact_text
+from core.log_sanitizer import redact_exception
 from core.settings_store import SettingsStore
 from newsbot.config import DEFAULT_RECAP_PROMPT, DEFAULT_STYLE_PROMPT, load_config
 from newsbot.outcome import Outcome
@@ -236,7 +236,7 @@ class BotCommandHandler:
         elif command == "/help":
             await self._send(chat_id, self._help_text())
         else:
-            await self._send(chat_id, f"Unknown command. Try /help")
+            await self._send(chat_id, "Unknown command. Try /help")
 
     def _help_text(self) -> str:
         return (

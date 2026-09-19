@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from core.log_sanitizer import redact_exception, redact_text, redact_url
+from core.log_sanitizer import redact_exception
 from newsbot.httpclient import owned_client
 from newsbot.richmd import RICH_MESSAGE_MAX_CHARS
 

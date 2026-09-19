@@ -215,7 +215,7 @@ class AdminActions:
         return markdown, format_post_message(title, body, url), blocks
 
     async def recap_preview(self) -> tuple[str, str, str]:
-        now = local_now()
+        now = local_now(self.env.news_tz)
         since_utc = (now.astimezone(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
         rows = self._store.list_posted_since("telegram", since_utc)
         if not rows:

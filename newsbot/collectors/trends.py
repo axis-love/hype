@@ -19,7 +19,6 @@ Config (under news.sources.trends):
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 from xml.etree import ElementTree as ET

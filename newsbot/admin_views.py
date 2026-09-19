@@ -6,10 +6,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from newsbot.config import consumer_profile, load_config
+from newsbot.config import consumer_profile
 from newsbot.db import NewsStore
 from newsbot.generation import GenerationPipelineResult
-from newsbot.scoring import current_temperature, merge_multiplier
+from newsbot.scoring import merge_multiplier
 from newsbot.selection import select_for_consumer
 
 log = logging.getLogger(__name__)
@@ -214,7 +214,7 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
                 if len(merged) > 5:
                     lines.append(f"    … ({len(merged)} total)")
         except Exception:
-            lines.append(f"  Merged URLs: (parse error)")
+            lines.append("  Merged URLs: (parse error)")
 
     snippet = row.get("snippet") or ""
     if snippet:
@@ -245,7 +245,7 @@ def _format_store_detail(store: NewsStore, row_id: int) -> str:
 def _format_dry_run_report(result: GenerationPipelineResult) -> str:
     """Format the /digest dry-run funnel report + per-item classification."""
     lines = [
-        f"Dry-run generation funnel:",
+        "Dry-run generation funnel:",
         f"  collected {result.collected}",
         f"  → unseen {result.unseen}",
         f"  → deduped {result.deduped}",

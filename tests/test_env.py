@@ -34,3 +34,19 @@ def test_from_environ_rejects_bad_int():
 def test_from_environ_parses_api_keys():
     env = Env.from_environ({"HYPE_API_KEYS": "a:x,b:y"})
     assert env.api_keys == {"x": "a", "y": "b"}
+
+
+def test_main_prints_one_line_on_env_parse_error(monkeypatch, capsys):
+    monkeypatch.setenv("HYPE_API_PORT", "abc")
+    monkeypatch.setattr("sys.argv", ["newsbot"])
+    monkeypatch.setattr("newsbot.main.load_dotenv", lambda: None)
+    monkeypatch.setattr("newsbot.main.configure_logging", lambda **_kw: None)
+    from newsbot.main import main
+
+    with pytest.raises(SystemExit) as ei:
+        main()
+    assert ei.value.code == 1
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "HYPE_API_PORT must be an integer" in text
+    assert text.count("\n") == 1

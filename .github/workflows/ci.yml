@@ -19,6 +19,9 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]" --constraint constraints.txt
 
+      - name: Pyflakes
+        run: python -m pyflakes newsbot core lm_client.py scripts
+
       - name: Run tests
         run: pytest tests/ -q
 
