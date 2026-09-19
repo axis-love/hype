@@ -9,6 +9,7 @@ any key via SQLite or the (future) admin path.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -174,7 +175,18 @@ DEFAULT_SOURCES: dict[str, Any] = {
 }
 
 
-_config_cache: tuple[int, int, dict[str, Any]] | None = None
+def _env_cache_key(env: Env) -> tuple[Any, ...]:
+    """Fingerprint Env fields that load_config actually reads."""
+    return (
+        env.github_token,
+        env.temp_floor,
+        env.threshold_ratio,
+        env.merge_bonus,
+        env.merge_cap,
+        env.topic_cooldown_max,
+        env.max_candidates,
+        json.dumps(env.consumers, sort_keys=True),
+    )
 
 
 def load_config(settings: SettingsStore, env: Env | None = None) -> dict[str, Any]:
@@ -211,13 +223,14 @@ def load_config(settings: SettingsStore, env: Env | None = None) -> dict[str, An
     /sources and /topic surface this so the operator knows a /topic toggle
     is inert for those blocks.
     """
-    global _config_cache
-    ver = getattr(settings, "version", None)
-    if ver is not None and _config_cache is not None:
-        cached_id, cached_ver, cached_cfg = _config_cache
-        if cached_id == id(settings) and cached_ver == ver:
-            return cached_cfg
     env = resolve(env)
+    ver = getattr(settings, "version", None)
+    env_key = _env_cache_key(env)
+    cached = getattr(settings, "_config_cache", None)
+    if ver is not None and cached is not None:
+        cached_ver, cached_env_key, cached_cfg = cached
+        if cached_ver == int(ver) and cached_env_key == env_key:
+            return cached_cfg
 
     raw = settings.list("news") if hasattr(settings, "list") else {}
 
@@ -296,7 +309,7 @@ def load_config(settings: SettingsStore, env: Env | None = None) -> dict[str, An
 
     _validate_config(config)
     if ver is not None:
-        _config_cache = (id(settings), int(ver), config)
+        setattr(settings, "_config_cache", (int(ver), env_key, config))
     return config
 
 
@@ -356,9 +369,7 @@ def _validate_config(config: dict[str, Any]) -> None:
         elif w <= 0:
             errors.append(f"source_weights['{src}'] must be > 0")
 
-    # topic_boost validation: keys should be known source names or topic keys,
-    # values must be numeric and non-negative.
-    valid_topic_keys = set(DEFAULT_TOPIC_BOOST.keys()) | set(config.get("source_weights", {}).keys())
+    # topic_boost validation: values must be numeric and non-negative.
     for key, val in (config.get("topic_boost") or {}).items():
         if not isinstance(val, (int, float)):
             errors.append(f"topic_boost['{key}'] must be numeric, got {type(val).__name__}")

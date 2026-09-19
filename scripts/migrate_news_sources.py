@@ -61,7 +61,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.settings_store import SettingsStore, SettingsStoreConfig
 from newsbot.topics import (
     DEFAULT_TOPIC_PACKS,
-    merge_packs,
     validate_topic_overrides,
 )
 

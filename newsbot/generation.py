@@ -4,14 +4,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-from core.log_sanitizer import redact_exception
 from core.settings_store import SettingsStore
 from newsbot.collectors import (
     github, hackernews, huggingface_papers, reddit, rss, trends,

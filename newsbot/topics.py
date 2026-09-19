@@ -15,7 +15,6 @@ Sources that are not topic-specific (HN front page) stay as they are.
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 

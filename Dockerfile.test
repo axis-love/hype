@@ -15,4 +15,5 @@ COPY tests/ /app/tests/
 COPY scripts/ /app/scripts/
 
 WORKDIR /app
+RUN python -m pyflakes newsbot core lm_client.py scripts
 USER appuser

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -243,6 +244,20 @@ class TestAdditiveGeneration:
         assert result == Outcome.OK
         rows = store.list_store_rows("telegram")
         assert len(rows) == 1 and rows[0]["merge_count"] == 2
+
+    async def test_sqlite_error_on_insert_returns_failed(self, store, monkeypatch, caplog):
+        """add_stories_to_store sqlite3.Error -> Outcome.FAILED, not NameError."""
+        new_story = _story("Fresh Story", "https://fresh.example.com/2", upvotes=300)
+        _patch_pipeline(monkeypatch, _make_cfg(), [new_story], keep_ids={"c001"})
+
+        def boom(*_a: Any, **_k: Any) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(store, "add_stories_to_store", boom)
+        caplog.set_level(logging.ERROR)
+        result = await _run_generation(store, MagicMock())
+        assert result == Outcome.FAILED
+        assert "merges already applied" in caplog.text
 
 
 # --- OQ-4: pipeline extraction + dry-run write-freedom -------------------
