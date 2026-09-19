@@ -320,7 +320,6 @@ Every item in the `GET /api/v1/items` response:
   "id": 42,
   "title": "Story title",
   "summary": "One factual English sentence from Pass A",
-  "snippet": "Collector excerpt (audit only; often empty)",
   "url": "https://example.com/story",
   "source_name": "r/gaming",
   "origin_topic": "gaming",

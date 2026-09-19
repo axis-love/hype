@@ -424,6 +424,31 @@ class TestItemsRanking:
         finally:
             await client.close()
 
+    @pytest.mark.asyncio
+    async def test_items_json_has_no_snippet_key(self, store):
+        """H17: GET /api/v1/items item JSON has summary, never snippet.
+
+        Collector excerpt stays on pending_posts.snippet for /store audit;
+        consumers read summary after GirlLM H15 step 1.
+        """
+        _seed_store(store, [
+            _story("Gaming", "https://g.example.com", origin_topic="gaming"),
+        ])
+        app = _make_app(store)
+        client = await _get_client(app)
+        try:
+            resp = await client.get(
+                "/api/v1/items",
+                headers={"Authorization": "Bearer secret-key"},
+            )
+            assert resp.status == 200
+            items = (await resp.json())["items"]
+            assert len(items) == 1
+            assert "summary" in items[0]
+            assert "snippet" not in items[0]
+        finally:
+            await client.close()
+
 
 # --- AC 3: POST deliveries idempotency + 404 -------------------------------
 

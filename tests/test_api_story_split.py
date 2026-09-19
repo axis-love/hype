@@ -320,5 +320,9 @@ class TestH15Docs:
         text = Path("README.md").read_text()
         assert "one-line summary from the LLM filter pass" not in text
         assert re.search(r'"summary"', text)
-        shape = text[text.index("### Item JSON shape"):]
+        start = text.index("### Item JSON shape")
+        rest = text[start:]
+        next_h = rest.find("\n### ", 1)
+        shape = rest if next_h < 0 else rest[:next_h]
         assert "summary" in shape
+        assert '"snippet"' not in shape
