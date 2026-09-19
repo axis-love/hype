@@ -140,7 +140,6 @@ async def _handle_items(request: web.Request) -> web.Response:
             "id": row_id,
             "title": str(row.get("title") or ""),
             "summary": str(row.get("summary") or ""),
-            "snippet": str(row.get("snippet") or ""),
             "url": str(row.get("url") or ""),
             "source_name": str(row.get("source_name") or ""),
             "origin_topic": str(row.get("origin_topic") or ""),
