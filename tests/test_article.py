@@ -194,6 +194,8 @@ async def test_writer_gets_source_text_and_no_engagement() -> None:
     for leak in ("7121", "7,121", "172", "upvote", "Signal"):
         assert leak not in lm.user
     assert "Never mention upvotes" in lm.system
+    assert "Never exceed 1000 characters" in lm.system
+    assert "entirely in the language the style instructions ask" in lm.system
     assert '{"posts":[{"id"' in lm.system  # JSON contract renders with single braces
 
 

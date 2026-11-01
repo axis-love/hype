@@ -4,6 +4,7 @@
 Usage (inside the news-bot container, against a DB snapshot):
     python scripts/replay_posts.py --db /tmp/snap.sqlite --limit 15 --out /tmp/replay.md
     python scripts/replay_posts.py --db /tmp/snap.sqlite --style-file new_style.txt
+    python scripts/replay_posts.py --db /tmp/snap.sqlite --limit 15 --until-id 1181  # same window again
 
 For each of the last N telegram deliveries it rebuilds the candidate from
 the stored row, fetches the article (newsbot.article), reruns Pass A on
@@ -43,7 +44,7 @@ from newsbot.summarizer import _assign_candidate_ids, llm_filter, llm_style_post
 QUERY = """
     SELECT d.id AS d_id, d.styled_title AS old_title, d.styled_body AS old_body, p.*
     FROM deliveries d JOIN pending_posts p ON p.id = d.post_id
-    WHERE d.channel = 'telegram'
+    WHERE d.channel = 'telegram' AND d.id <= ?
     ORDER BY d.delivered_at DESC, d.id DESC LIMIT ?
 """
 
@@ -74,7 +75,8 @@ def _candidate(row: dict[str, Any]) -> dict[str, Any]:
 async def replay(args: argparse.Namespace) -> str:
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
-    rows = [dict(r) for r in con.execute(QUERY, (args.limit,))]
+    until = args.until_id if args.until_id is not None else 2**62
+    rows = [dict(r) for r in con.execute(QUERY, (until, args.limit))]
     con.close()
 
     settings = SettingsStore(SettingsStoreConfig(db_path=Path(args.db)))
@@ -113,7 +115,7 @@ async def replay(args: argparse.Namespace) -> str:
             + ("" if new_summary else " · Pass A dropped it now (old summary used)"),
             f"New summary: {new_summary or row.get('summary')}",
             f"\nOLD: **{row['old_title']}**\n{row['old_body']}",
-            f"\nNEW: **{new['title']}**\n{new['body']}",
+            f"\nNEW ({len(new['body'])} chars): **{new['title']}**\n{new['body']}",
         ]
     await llm.aclose_clients()
     return "\n".join(out) + "\n"
@@ -123,6 +125,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", required=True, help="SQLite DB (use a snapshot)")
     ap.add_argument("--limit", type=int, default=15)
+    ap.add_argument("--until-id", type=int, help="newest deliveries.id to include (repeat a window)")
     ap.add_argument("--style-file", help="text file with the style prompt to try")
     ap.add_argument("--default-style", action="store_true", help="use config.DEFAULT_STYLE_PROMPT")
     ap.add_argument("--out", help="write markdown here instead of stdout")
