@@ -6,8 +6,9 @@ Pass A — filter:  take 30-80 scored candidates, ask the LLM to keep/drop,
                   reason,short_summary}]}.
 
 Pass B — style:   take the top 8 kept items and ask the LLM to write
-                  individual styled posts (one per item). Returns JSON
-                  {posts:[{title,body}]}.
+                  individual styled posts (one per item) from each item's
+                  source text. Engagement signals are NOT shown to the
+                  writer. Returns JSON {posts:[{title,body}]}.
 
 Both passes use response_format=json_object to force content output from
 reasoning models. Output is run through core.text_utils.strip_think to
@@ -32,9 +33,13 @@ FILTER_SYSTEM = (
     "unless it has extraordinary engagement (10K+ stars, 1K+ upvotes) AND is still "
     "actively discussed. For kept items, assign a category (e.g. 'AI / Coding', 'LLM', 'Game Dev', "
     "'VR/AR', 'Robotics', 'Research', 'Tools'), an importance score from 1 to 10, a "
-    "one-line reason, and a one-line short_summary. "
-    "title and short_summary MUST be in English regardless of the source language; "
-    "short_summary is one factual sentence, no opinion. "
+    "one-line reason, and a short_summary. "
+    "title and short_summary MUST be in English regardless of the source language. "
+    "short_summary is 1-3 factual sentences on what the item reports, with its key "
+    "specifics (who, what, names, numbers, versions, dates), taken from the Text when "
+    "one is given; with no Text, restate only what the title says, never guess. "
+    "Signals and Score inform keep/drop and importance only; never put engagement "
+    "(votes, comments, stars, popularity) into short_summary. "
     "Return STRICT JSON: {\"items\":[{\"id\":\"c001\",\"keep\":true,\"title\":...,"
     "\"category\":...,\"importance\":8,\"reason\":...,\"short_summary\":...}]}. "
     "Each item MUST include the 'id' field exactly as given in the input. "
@@ -45,17 +50,35 @@ FILTER_SYSTEM = (
 STYLE_SYSTEM = (
     "You write individual posts for a Telegram tech-news channel. "
     "You receive {n} selected news items. Write one post per item. "
-    "Return STRICT JSON: {{\"posts\":[{{\"id\":\"c001\",\"title\":\"...\",\"body\":\"...\"}}]}}. "
+    "Return STRICT JSON: {\"posts\":[{\"id\":\"c001\",\"title\":\"...\",\"body\":\"...\"}]}. "
     "Each post MUST include the 'id' field exactly as given in the input. "
     "Do NOT include a 'url' field — URLs are managed by the application. "
-    "The title is a short headline. The body is 2-4 sentences. "
+    "Write about the news itself: what happened, who did it, and the concrete "
+    "details (names, numbers, versions, dates, findings) from the Source text, then "
+    "why it matters when the source says or clearly implies it. "
+    "Use only facts present in the Title, Summary and Source text. Do not invent "
+    "details, quotes, reactions or consequences; if something is a leak, rumor or "
+    "report, say so. "
+    "Never mention upvotes, comments, stars, threads, popularity, how a community "
+    "reacted, or the site where the item was shared (Reddit, Hacker News, etc.). "
+    "The application attaches the source link. "
+    "Length follows the substance: 1-2 sentences when the source is thin (a leak, "
+    "a screenshot, a one-line announcement, no Source text); 3-5 sentences for a "
+    "typical story; up to 8 when the subject is complex and the Source text supports "
+    "it. Never pad. The title is a short headline stating the news. "
     "Do NOT use Markdown or HTML formatting in the body — the application "
     "handles all formatting. Write plain text only. "
     "Use the Published date to accurately describe timing — do not assume an item "
     "is new or 'just released' unless the date is recent. Do not use phrases like "
     "'finally dropped' or 'just launched' unless the published date confirms it. "
-    "Follow the style instructions exactly."
+    "Write in the language the style instructions ask for, and follow them for "
+    "voice and tone."
 )
+
+# Source text budget per item, in characters (the store keeps up to
+# article.MAX_TEXT_CHARS). Pass A sees up to max_candidates items at once.
+FILTER_TEXT_CHARS = 1500
+STYLE_TEXT_CHARS = 6000
 
 
 def _assign_candidate_ids(items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -110,7 +133,10 @@ def _format_candidate(item: dict[str, Any]) -> str:
         parts.append(f"   Published: {item['published_at']}")
     if item.get("url"):
         parts.append(f"   URL: {item['url']}")
-    if item.get("snippet"):
+    text = str(item.get("extracted_text") or "").strip()
+    if text:
+        parts.append(f"   Text: {text[:FILTER_TEXT_CHARS]}")
+    elif item.get("snippet"):
         parts.append(f"   Snippet: {item['snippet']}")
     parts.append(
         f"   Signals: upvotes={item.get('upvotes') or 0}, "
@@ -287,8 +313,12 @@ async def llm_style_posts(
 ) -> list[dict[str, Any]]:
     """Pass B: style individual posts from the filter output.
 
+    The writer sees title, published date, summary and source text
+    (extracted_text). Engagement signals are deliberately left out: given
+    a thin story, the model pads with vote counts.
+
     Returns a list of dicts with keys: title, body, category, importance, url,
-    plus the original engagement signals from the filter pass.
+    candidate_id.
     """
     if not items:
         return []
@@ -298,33 +328,19 @@ async def llm_style_posts(
     # Use _assign_missing_candidate_ids to avoid collisions with existing IDs.
     id_map = _assign_missing_candidate_ids(items)
 
-    def signal_line(item: dict[str, Any]) -> str:
-        bits = []
-        if item.get("stars"):
-            bits.append(f"{item['stars']:,} GitHub stars")
-        if item.get("upvotes"):
-            bits.append(f"{item['upvotes']:,} upvotes")
-        if item.get("comments"):
-            bits.append(f"{item['comments']:,} comments")
-        if int(item.get("crosspost_count") or 1) >= 2:
-            bits.append(f"cross-posted on {item.get('crosspost_count')} sources")
-        return ", ".join(bits) if bits else "n/a"
-
     def item_block(item: dict[str, Any]) -> str:
         cid = item.get("candidate_id", "c000")
         title = item.get("title") or "(untitled)"
         url = item.get("url") or ""
         summary = item.get("short_summary") or item.get("snippet") or ""
-        reason = item.get("reason") or ""
+        text = str(item.get("extracted_text") or "").strip()
         published = item.get("published_at") or ""
         lines = [f"[{cid}] Title: {title}"]
         if published:
             lines.append(f"   Published: {published}")
         if summary:
             lines.append(f"   Summary: {summary}")
-        if reason:
-            lines.append(f"   Why it matters: {reason}")
-        lines.append(f"   Signal: {signal_line(item)}")
+        lines.append(f"   Source text: {text[:STYLE_TEXT_CHARS] if text else '(none)'}")
         if url:
             lines.append(f"   URL: {url}")
         return "\n".join(lines)

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from core.settings_store import SettingsStore
+from newsbot.article import attach_extracted_text
 from newsbot.collectors import (
     github, hackernews, huggingface_papers, reddit, rss, trends,
 )
@@ -171,6 +172,10 @@ async def _run_generation_pipeline(
     sent_to_filter = len(top)
     if not top:
         return None
+
+    # 5b. Source text: read each candidate's article so Pass A summarizes
+    #     the story itself, and the store keeps the text for Pass B.
+    await attach_extracted_text(top)
 
     # 6. LLM filter.
     _assign_candidate_ids(top)

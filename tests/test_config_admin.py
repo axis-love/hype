@@ -35,7 +35,7 @@ class TestDefaultGenHours:
         import newsbot.main as main_mod
 
         # The import line in main.py references DEFAULT_GEN_HOURS.
-        src = open(main_mod.__file__).read()
+        src = open(main_mod.__file__, encoding="utf-8").read()
         assert "DEFAULT_GEN_HOURS" in src, "main.py must import DEFAULT_GEN_HOURS"
         # The stale hardcoded "5,17" default must be gone from the getenv call.
         assert 'os.getenv("NEWS_GEN_HOURS", "5,17")' not in src, (
@@ -271,7 +271,7 @@ class TestSourceKeyRegistry:
         """config.py must not re-declare a local _VALID_SOURCE_KEYS set —
         it imports VALID_SOURCE_KEYS from collectors/base."""
         import newsbot.config as config_mod
-        src = open(config_mod.__file__).read()
+        src = open(config_mod.__file__, encoding="utf-8").read()
         assert "_VALID_SOURCE_KEYS = {" not in src, (
             "config.py still hand-declares _VALID_SOURCE_KEYS — "
             "import VALID_SOURCE_KEYS from collectors/base.py instead"

@@ -39,9 +39,10 @@ log = logging.getLogger(__name__)
 def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
     """Shape a store row like a digest-time candidate for llm_style_posts.
 
-    The styler reads title/url/short_summary/published_at plus the
-    engagement signal fields. short_summary is the Pass A summary
-    persisted on the store row; snippet is collector excerpt only.
+    The styler reads title/url/short_summary/published_at and the
+    article source text. short_summary is the Pass A summary persisted on
+    the store row; snippet is collector excerpt only. Engagement fields
+    are not passed: the writer must describe the story, not its votes.
     """
     return {
         "candidate_id": f"s{row['id']:03d}",
@@ -49,11 +50,8 @@ def _row_to_styler_input(row: dict[str, Any]) -> dict[str, Any]:
         "url": row.get("url") or "",
         "short_summary": row.get("summary") or "",
         "snippet": row.get("snippet") or "",
+        "extracted_text": row.get("extracted_text") or "",
         "published_at": row.get("published_at") or "",
-        "upvotes": row.get("upvotes") or 0,
-        "comments": row.get("comments") or 0,
-        "stars": row.get("stars") or 0,
-        "crosspost_count": row.get("crosspost_count") or 1,
     }
 
 

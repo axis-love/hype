@@ -177,7 +177,7 @@ class TestMigration9:
         s2 = NewsStore(path)
         v2 = s2._conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()["v"]
         s2.close()
-        assert v1 == v2 == 11
+        assert v1 == v2 == 12
 
 
 class TestMatchUsesRawTitle:

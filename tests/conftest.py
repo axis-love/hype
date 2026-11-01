@@ -13,6 +13,19 @@ if str(ROOT) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
+def _no_article_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Generation reads each candidate's article page; tests never hit the
+    network. Candidates keep their collector raw_text as source text.
+    tests/test_article.py exercises the fetch path with its own client."""
+    import newsbot.article as article
+
+    async def _no_fetch(url, client):
+        return ""
+
+    monkeypatch.setattr(article, "fetch_article_text", _no_fetch)
+
+
+@pytest.fixture(autouse=True)
 def _clear_load_config_cache() -> Iterator[None]:
     """Drop the module-level load_config cache between tests.
 

@@ -15,9 +15,11 @@ migration mechanism that records applied versions in schema_version.
 
 Two layers (migration 10):
   1. Engine story (pending_posts): id, title, summary, url, snippet
-     (collector excerpt, audit only), score columns, topics.
-     ``title`` and ``summary`` are Pass A English and immutable after
-     insert (summary may fill once from NULL via merge).
+     (collector excerpt, audit only), extracted_text (article source
+     text, migration 12), score columns, topics.
+     ``title`` and ``summary`` are Pass A English. title is immutable
+     after insert; summary fills once from NULL via merge, or is replaced
+     together with extracted_text when a merge brings longer source text.
   2. Channel post (deliveries): what a channel published, any language.
      Consumers read layer 1 only. Pass B writes layer 2 only via
      ``mark_posted(..., styled_title=, styled_body=)``.
@@ -435,6 +437,11 @@ def _migration_11(cur: sqlite3.Cursor) -> None:
     _backfill_payload_columns(cur)
 
 
+@_migration(12, "Article source text on pending_posts")
+def _migration_12(cur: sqlite3.Cursor) -> None:
+    cur.execute("ALTER TABLE pending_posts ADD COLUMN extracted_text TEXT")
+
+
 class NewsStore:
     """CRUD wrapper for news-bot tables."""
 
@@ -797,6 +804,7 @@ class NewsStore:
                     bd.get("origin_topic"),
                     merged_urls_json,
                     ext, is_self, feed_weight,
+                    str(story.get("extracted_text") or "").strip() or None,
                 ))
             if post_rows:
                 cur.executemany(
@@ -809,8 +817,8 @@ class NewsStore:
                         score_at_queue, engagement_score, recency_at_queue,
                         source_weight, topic_bonus, crosspost_bonus,
                         matched_topics, scored_at, origin_topic, merged_urls,
-                        external_url, is_self, feed_weight
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        external_url, is_self, feed_weight, extracted_text
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     post_rows,
                 )
@@ -848,7 +856,7 @@ class NewsStore:
         "score_at_queue, engagement_score, recency_at_queue, "
         "source_weight, topic_bonus, crosspost_bonus, "
         "matched_topics, scored_at, origin_topic, merge_count, merged_urls, "
-        "external_url, is_self, feed_weight"
+        "external_url, is_self, feed_weight, extracted_text"
     )
 
     def list_store_rows(self, channel: str) -> list[dict]:
@@ -1001,6 +1009,17 @@ class NewsStore:
         cand_summary = str(candidate.get("short_summary") or "").strip()
         summary = stored_summary or cand_summary or None
 
+        # The row keeps the richer source: when the candidate brings longer
+        # article text, its text and the summary written from it replace
+        # the stored pair (e.g. a Reddit image post later merged with the
+        # article it was about).
+        stored_text = str(row["extracted_text"] or "").strip()
+        cand_text = str(candidate.get("extracted_text") or "").strip()
+        extracted_text = stored_text or None
+        if len(cand_text) > len(stored_text):
+            extracted_text = cand_text
+            summary = cand_summary or summary
+
         cand_ext, _, cand_weight = _payload_columns_from_raw(candidate.get("raw_json"))
         external_url = cand_ext or row["external_url"]
         feed_weight = cand_weight if cand_weight is not None else row["feed_weight"]
@@ -1019,7 +1038,8 @@ class NewsStore:
                 origin_topic = ?,
                 summary = ?,
                 external_url = ?,
-                feed_weight = ?
+                feed_weight = ?,
+                extracted_text = ?
             WHERE id = ?
             """,
             (
@@ -1034,6 +1054,7 @@ class NewsStore:
                 summary,
                 external_url,
                 feed_weight,
+                extracted_text,
                 row_id,
             ),
         )

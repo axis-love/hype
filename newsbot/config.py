@@ -69,14 +69,22 @@ DEFAULT_LLM: dict[str, Any] = {
     "max_tokens_digest": 8000,
 }
 
-# Default style prompt for Pass B (the styler). Overridable via SQLite
-# setting news.style_prompt or the /setstyle bot command.
+# Default style prompt for Pass B (the styler): voice and language only.
+# Content rules (facts from the source text, no engagement talk, length by
+# substance) live in summarizer.STYLE_SYSTEM. Overridable via SQLite
+# setting news.style_prompt or the /setstyle bot command; delete the
+# override to fall back to this text.
 DEFAULT_STYLE_PROMPT = (
-    "You are a tech-news writer for a Telegram channel called Cyber Cream. "
-    "Write punchy, concise posts about trending tech news. One post per item. "
-    "Each post is 2-4 sentences — hook the reader, explain what happened, and why it matters. "
-    "Be direct and conversational, like a sharp friend sharing a find. "
-    "No hype words like 'revolutionary' or 'game-changing'. No emojis. No clickbait. "
+    "Ты пишешь посты для Telegram-канала Cyber Cream о технологиях, играх, науке и AI. "
+    "Пиши по-русски, живым и грамотным языком, как толковый редактор, который сам "
+    "разобрался в теме. Сначала факты: что произошло, кто это сделал, ключевые детали, "
+    "цифры и даты из источника. Потом коротко, почему это интересно, если это следует "
+    "из источника. Одна ироничная фраза на пост допустима, если она к месту; пост не "
+    "должен превращаться в стендап. Общепринятые термины и названия оставляй как есть "
+    "(GPU, LLM, Early Access, названия продуктов и компаний). Не выдумывай слова, кальки "
+    "и сленг: если сомневаешься в слове, бери обычное. Без эмодзи, канцелярита, "
+    "рекламного пафоса и штампов вроде «это не просто…», «давайте разберёмся», "
+    "«почему это важно». Не повторяй одни и те же обороты из поста в пост."
 )
 
 # Default system prompt for the daily recap (llm_daily_summary). Overridable

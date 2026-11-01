@@ -82,7 +82,7 @@ class TestH15Schema:
                 assert gone not in pp
             assert "styled_title" in dd
             assert "styled_body" in dd
-            assert store.schema_version() == 11
+            assert store.schema_version() == 12
         finally:
             store.close()
 
@@ -116,7 +116,7 @@ class TestH15Migration:
 
         store = NewsStore(db_path)
         try:
-            assert store.schema_version() == 11
+            assert store.schema_version() == 12
             pp = store._conn.execute(
                 "SELECT title, summary FROM pending_posts WHERE id=1"
             ).fetchone()
@@ -134,7 +134,7 @@ class TestH15Migration:
 
             store2 = NewsStore(db_path)
             try:
-                assert store2.schema_version() == 11
+                assert store2.schema_version() == 12
                 n = store2._conn.execute(
                     "SELECT COUNT(*) AS n FROM schema_version WHERE version=10"
                 ).fetchone()["n"]
@@ -312,7 +312,7 @@ class TestH15Recap:
 class TestH15PassAPrompt:
     def test_filter_system_pins_english(self) -> None:
         assert "MUST be in English" in FILTER_SYSTEM
-        assert "short_summary is one factual sentence" in FILTER_SYSTEM
+        assert "short_summary is 1-3 factual sentences" in FILTER_SYSTEM
 
 
 class TestH15Docs:

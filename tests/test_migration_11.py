@@ -45,7 +45,7 @@ CREATE TABLE pending_posts(
 
 def test_migration_11_backfills_and_is_noop(tmp_path: Path):
     store = NewsStore(tmp_path / "m.sqlite")
-    assert store.schema_version() == 11
+    assert store.schema_version() == 12
     payload = {
         "external_url": "https://example.com/article",
         "is_self": True,
@@ -72,7 +72,7 @@ def test_migration_11_backfills_and_is_noop(tmp_path: Path):
 
     store.close()
     again = NewsStore(tmp_path / "m.sqlite")
-    assert again.schema_version() == 11
+    assert again.schema_version() == 12
     again.close()
 
 
@@ -125,7 +125,7 @@ def test_migration_11_upgrades_schema_10_raw_json_rows(tmp_path: Path):
     conn.close()
 
     store = NewsStore(db_path)
-    assert store.schema_version() == 11
+    assert store.schema_version() == 12
     n11 = store._conn.execute(
         "SELECT COUNT(*) AS n FROM schema_version WHERE version=11"
     ).fetchone()["n"]
@@ -171,7 +171,7 @@ def test_migration_11_upgrades_schema_10_raw_json_rows(tmp_path: Path):
     store.close()
 
     again = NewsStore(db_path)
-    assert again.schema_version() == 11
+    assert again.schema_version() == 12
     n11_again = again._conn.execute(
         "SELECT COUNT(*) AS n FROM schema_version WHERE version=11"
     ).fetchone()["n"]
