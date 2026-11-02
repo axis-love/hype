@@ -96,7 +96,7 @@ DEFAULT_STYLE_PROMPT = (
 # via SQLite setting news.recap_prompt or the /setrecap bot command.
 # Contract: STRICT JSON {"title": "..."} — headline only, no per-item summaries.
 # The application owns all layout and links (richmd.render_recap).
-# NOTE: If Anton has a custom /setrecap override from the OQ-1 era (asking
+# NOTE: If the operator has a custom /setrecap override from the OQ-1 era (asking
 # for {"title","items":[{"id","summary"}]}), it will override this default
 # until reset via /setrecap default. The new llm_daily_summary ignores the
 # "items" key in the LLM response — a stale prompt that asks for items won't

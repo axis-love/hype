@@ -73,3 +73,6 @@ dist/
 build/
 newsbot.egg-info/
 data/
+
+# Agent planning notes (kept on the host, not in the repo)
+.hermes/

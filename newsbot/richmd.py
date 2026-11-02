@@ -12,7 +12,7 @@ Four public renderers:
 
 Layout decision (2026-08-21): headings ARE used, deliberately. An earlier
 revision avoided headings because Telegram clients render them in
-client-specific document fonts. Anton probed the actual layouts live via
+client-specific document fonts. The actual layouts were probed live via
 sendRichMessage (H1–H6 ladders, dividers, collapsible blocks, H4 link
 lists) and approved the two shapes below — the readability win outweighs
 the font inconsistency. Do not re-reverse this without new live testing.
@@ -52,7 +52,7 @@ from urllib.parse import urlparse
 log = logging.getLogger(__name__)
 
 # Probed empirically on 2026-08-18 by sending oversized markdown to
-# Anton's DM via sendRichMessage and binary-searching the accepted length
+# a private chat via sendRichMessage and binary-searching the accepted length
 # between 4096 and 65536. The API accepted up to 32736 characters; 32800+
 # returned 400. We use 32736 (last accepted) as the safe limit.
 RICH_MESSAGE_MAX_CHARS = 32736
@@ -150,7 +150,7 @@ def render_post(title: str, body: str, url: str, signature: str = "") -> str:
 
     Top margin: none. A leading blank line is stripped by the rich
     renderer (verified live 2026-08-21), and a leading divider was tried
-    as a limiter line and rejected by Anton as looking awful. The H1
+    as a limiter line and rejected as looking awful. The H1
     starts the message — that's the approved look. Do not retry margins
     without new live testing. The <details> block is omitted when url is
     empty; the signature block is omitted when signature is empty (no
@@ -245,7 +245,7 @@ def render_post_blocks(
 
     GROUPING_NOTE: photos are wrapped in ONE slideshow block so Telegram
     groups them as a swipeable set; videos follow as separate blocks
-    (Anton's call 2026-08-21 after live tests 177–183: collage grouped
+    (decided 2026-08-21 after live tests 177–183: collage grouped
     but the slideshow shape is the approved one). Single photo posts skip
     the wrapper. Videos are never placed inside the slideshow.
     """

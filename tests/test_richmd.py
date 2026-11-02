@@ -304,7 +304,7 @@ class TestRenderRecap:
 #
 # Blocks layout (Bot API 10.2) — media leads the post. Photos are wrapped
 # in ONE slideshow block (verified live 2026-08-21: separate photo blocks
-# do NOT group; slideshow/collage do; Anton picked slideshow). Videos are
+# do NOT group; slideshow/collage do; slideshow was picked). Videos are
 # separate blocks after the slideshow. Then H1 title, divider, body
 # paragraph, collapsible Source, footer signature.
 
