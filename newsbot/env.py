@@ -72,6 +72,10 @@ def _consumers(
     blog_ratio: float,
     blog_cooldown: int,
     blog_max: int,
+    shorts_floor: float,
+    shorts_ratio: float,
+    shorts_cooldown: int,
+    shorts_max: int,
 ) -> dict[str, dict[str, Any]]:
     return {
         "telegram": {
@@ -103,6 +107,16 @@ def _consumers(
             "cooldown_max": blog_cooldown,
             "max_candidates": blog_max,
             "topics": ["science", "new_research", "ai"],
+        },
+        "shorts": {
+            "channel": "shorts",
+            "floor": shorts_floor,
+            "ratio": shorts_ratio,
+            "merge_bonus": merge_bonus,
+            "merge_cap": merge_cap,
+            "cooldown_max": shorts_cooldown,
+            "max_candidates": shorts_max,
+            "topics": ["gaming", "gamedev", "ai"],
         },
     }
 
@@ -170,6 +184,10 @@ class Env:
             blog_ratio=_float(env, "HYPE_CONSUMER_BLOG_RATIO", 0.8),
             blog_cooldown=_int(env, "HYPE_CONSUMER_BLOG_COOLDOWN_MAX", 3),
             blog_max=_int(env, "HYPE_CONSUMER_BLOG_MAX_CANDIDATES", 5),
+            shorts_floor=_float(env, "HYPE_CONSUMER_SHORTS_FLOOR", 40.0),
+            shorts_ratio=_float(env, "HYPE_CONSUMER_SHORTS_RATIO", 0.5),
+            shorts_cooldown=_int(env, "HYPE_CONSUMER_SHORTS_COOLDOWN_MAX", 2),
+            shorts_max=_int(env, "HYPE_CONSUMER_SHORTS_MAX_CANDIDATES", 10),
         )
         return cls(
             bot_token=_raw(env, "BOT_TOKEN", "").strip(),

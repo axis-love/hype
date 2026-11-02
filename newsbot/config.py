@@ -153,6 +153,16 @@ def _consumer_profiles(env: Env | None = None) -> dict[str, dict[str, Any]]:
             "max_candidates": 5,
             "topics": ["science", "new_research", "ai"],
         },
+        "shorts": {
+            "channel": "shorts",
+            "floor": 40.0,
+            "ratio": 0.5,
+            "merge_bonus": env.merge_bonus,
+            "merge_cap": env.merge_cap,
+            "cooldown_max": 2,
+            "max_candidates": 10,
+            "topics": ["gaming", "gamedev", "ai"],
+        },
     }
 
 

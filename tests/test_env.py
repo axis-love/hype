@@ -24,6 +24,7 @@ def test_from_environ_defaults():
     assert env.consumers["telegram"]["floor"] == 35.0
     assert env.consumers["girllm"]["floor"] == 25.0
     assert env.consumers["blog"]["floor"] == 55.0
+    assert env.consumers["shorts"]["floor"] == 40.0
 
 
 def test_from_environ_rejects_bad_int():

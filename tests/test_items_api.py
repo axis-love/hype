@@ -785,3 +785,109 @@ class TestPortInUseSurvival:
         assert "gen" in call_log
         assert "post" in call_log
         assert "summary" in call_log
+
+
+# --- H20 (flow_001715): article_text for the shorts consumer ---------------
+
+
+def _story_with_text(
+    title: str,
+    url: str,
+    extracted_text: str | None,
+    **bd_overrides,
+) -> dict:
+    """A story with (optionally) stored article source text."""
+    story = _story(title, url, **bd_overrides)
+    story["extracted_text"] = extracted_text
+    return story
+
+
+async def _get_shorts_items(store: NewsStore) -> list[dict]:
+    """Seed nothing; fetch items for the shorts key from the given store."""
+    app = _make_app(store, api_keys="shorts:shorts-key")
+    client = await _get_client(app)
+    try:
+        resp = await client.get(
+            "/api/v1/items?limit=10",
+            headers={"Authorization": "Bearer shorts-key"},
+        )
+        assert resp.status == 200, await resp.text()
+        return (await resp.json())["items"]
+    finally:
+        await client.close()
+
+
+class TestShortsArticleText:
+    """article_text on /api/v1/items: present for shorts, absent bare."""
+
+    @pytest.mark.asyncio
+    async def test_article_text_present_for_shorts(self, store):
+        story = _story_with_text(
+            "Gaming Story", "https://g.example.com/1", "Paragraph one."
+        )
+        _seed_store(store, [story])
+        items = await _get_shorts_items(store)
+        assert len(items) == 1
+        assert items[0]["article_text"] == "Paragraph one."
+
+    @pytest.mark.asyncio
+    async def test_article_text_null_when_none(self, store):
+        story = _story_with_text(
+            "Gaming Story", "https://g.example.com/1", None
+        )
+        _seed_store(store, [story])
+        items = await _get_shorts_items(store)
+        assert len(items) == 1
+        assert items[0]["article_text"] is None
+
+    @pytest.mark.asyncio
+    async def test_article_text_truncated_to_6000(self, store):
+        story = _story_with_text(
+            "Gaming Story", "https://g.example.com/1", "x" * 7000
+        )
+        _seed_store(store, [story])
+        items = await _get_shorts_items(store)
+        assert len(items[0]["article_text"]) == 6000
+
+    @pytest.mark.asyncio
+    async def test_article_text_key_absent_for_other_consumers(self, store):
+        """girllm gets the bare item shape — no article_text key at all."""
+        story = _story_with_text(
+            "Gaming Story", "https://g.example.com/1", "Paragraph one."
+        )
+        _seed_store(store, [story])
+        app = _make_app(store, api_keys="girllm:secret-key")
+        client = await _get_client(app)
+        try:
+            resp = await client.get(
+                "/api/v1/items",
+                headers={"Authorization": "Bearer secret-key"},
+            )
+            assert resp.status == 200
+            items = (await resp.json())["items"]
+            assert len(items) == 1
+            assert "article_text" not in items[0]
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_shorts_items_topic_filtered(self, store):
+        """Shorts only sees gaming/gamedev/ai rows."""
+        stories = [
+            _story("Gaming", "https://g.example.com", origin_topic="gaming"),
+            _story("Science", "https://s.example.com", origin_topic="science"),
+            _story("AI", "https://ai.example.com", origin_topic="ai"),
+        ]
+        _seed_store(store, stories)
+        app = _make_app(store, api_keys="shorts:shorts-key")
+        client = await _get_client(app)
+        try:
+            resp = await client.get(
+                "/api/v1/items?limit=10",
+                headers={"Authorization": "Bearer shorts-key"},
+            )
+            assert resp.status == 200
+            titles = {i["title"] for i in (await resp.json())["items"]}
+            assert titles == {"Gaming", "AI"}
+        finally:
+            await client.close()

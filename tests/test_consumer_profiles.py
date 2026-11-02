@@ -310,3 +310,71 @@ class TestUnknownConsumer:
         result = select_for_consumer([], [], girllm_profile, CFG, now=NOW)
         assert result.reason == "empty"
         assert result.row is None
+
+
+# --- H20: shorts consumer profile ------------------------------------------
+
+
+class TestShortsProfileDefaults:
+    """Shorts profile defaults (flow_001715): gaming/gamedev/ai video
+    page with a mid range floor."""
+
+    def test_channel_is_shorts(self):
+        assert _consumer_profiles()["shorts"]["channel"] == "shorts"
+
+    def test_topics_gaming_gamedev_ai(self):
+        assert _consumer_profiles()["shorts"]["topics"] == [
+            "gaming", "gamedev", "ai",
+        ]
+
+    def test_floor_default(self):
+        assert _consumer_profiles()["shorts"]["floor"] == 40.0
+
+    def test_ratio_default(self):
+        assert _consumer_profiles()["shorts"]["ratio"] == 0.5
+
+    def test_cooldown_default(self):
+        assert _consumer_profiles()["shorts"]["cooldown_max"] == 2
+
+    def test_max_candidates_default(self):
+        assert _consumer_profiles()["shorts"]["max_candidates"] == 10
+
+
+class TestShortsEnvOverrides:
+    """HYPE_CONSUMER_SHORTS_* env overrides, mirroring girllm/blog."""
+
+    def test_all_overrides_applied(self):
+        from newsbot.env import Env
+        env = Env.from_environ({
+            "HYPE_CONSUMER_SHORTS_FLOOR": "42.5",
+            "HYPE_CONSUMER_SHORTS_RATIO": "0.6",
+            "HYPE_CONSUMER_SHORTS_COOLDOWN_MAX": "1",
+            "HYPE_CONSUMER_SHORTS_MAX_CANDIDATES": "7",
+        })
+        profile = env.consumers["shorts"]
+        assert profile["floor"] == 42.5
+        assert profile["ratio"] == 0.6
+        assert profile["cooldown_max"] == 1
+        assert profile["max_candidates"] == 7
+
+    def test_defaults_without_env(self):
+        from newsbot.env import Env
+        profile = Env.from_environ({}).consumers["shorts"]
+        assert profile["floor"] == 40.0
+        assert profile["ratio"] == 0.5
+        assert profile["cooldown_max"] == 2
+        assert profile["max_candidates"] == 10
+
+    def test_rejects_bad_int(self):
+        from newsbot.env import Env
+        with pytest.raises(ValueError, match=(
+            "HYPE_CONSUMER_SHORTS_MAX_CANDIDATES must be an integer"
+        )):
+            Env.from_environ({"HYPE_CONSUMER_SHORTS_MAX_CANDIDATES": "x"})
+
+    def test_rejects_bad_float(self):
+        from newsbot.env import Env
+        with pytest.raises(ValueError, match=(
+            "HYPE_CONSUMER_SHORTS_FLOOR must be numeric"
+        )):
+            Env.from_environ({"HYPE_CONSUMER_SHORTS_FLOOR": "hot"})

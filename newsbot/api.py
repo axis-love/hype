@@ -48,6 +48,10 @@ log = logging.getLogger(__name__)
 # Default limit when the caller doesn't pass ?limit=N.
 _DEFAULT_LIMIT = 5
 
+# Caps article_text on the /api/v1/items response for the shorts
+# consumer. A video script needs the story's look, not the full essay.
+_ARTICLE_TEXT_MAX = 6000
+
 # Module-level clock — tests patch this to freeze time. Production
 # uses the real wall clock. (Same pattern as collectors' _sleep.)
 _now = lambda: datetime.now(timezone.utc)
@@ -151,6 +155,12 @@ async def _handle_items(request: web.Request) -> web.Response:
             "merge_count": int(row.get("merge_count") or 1),
             "collected_at": str(row.get("scored_at") or ""),
         })
+        if consumer == "shorts":
+            # Video-script consumers get the stored article source text
+            # (extracted_text, migration 12) beyond the one-line summary.
+            # Other consumers keep the payload bare.
+            article = str(row.get("extracted_text") or "").strip()
+            items[-1]["article_text"] = article[:_ARTICLE_TEXT_MAX] or None
 
     return web.json_response({"items": items})
 
