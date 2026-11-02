@@ -5,6 +5,7 @@ Usage (inside the news-bot container, against a DB snapshot):
     python scripts/replay_posts.py --db /tmp/snap.sqlite --limit 15 --out /tmp/replay.md
     python scripts/replay_posts.py --db /tmp/snap.sqlite --style-file new_style.txt
     python scripts/replay_posts.py --db /tmp/snap.sqlite --limit 15 --until-id 1181  # same window again
+    python scripts/replay_posts.py --db /tmp/snap.sqlite --until-id 1181 --filter-compare 3
 
 For each of the last N telegram deliveries it rebuilds the candidate from
 the stored row, fetches the article (newsbot.article), reruns Pass A on
@@ -14,6 +15,10 @@ poster.deliver_one does. It prints the old post next to the new one.
 Read-only: the DB opens with mode=ro; nothing is posted or written back.
 It DOES call the configured LLM (LM_BASE / LM_MODEL), once for Pass A and
 once per row for Pass B.
+
+--filter-compare N runs only Pass A, N times with the article text and N
+times without it (the old snippet-only input), and reports per post how
+often it was kept and why it was dropped. No Pass B.
 
 --style-file overrides the style prompt; default is the one in effect
 (settings override, else config.DEFAULT_STYLE_PROMPT). Pass
@@ -91,6 +96,8 @@ async def replay(args: argparse.Namespace) -> str:
     cands = [_candidate(r) for r in rows]
     _assign_candidate_ids(cands)
     await attach_extracted_text(cands)
+    if args.filter_compare:
+        return await filter_compare(cands, cfg, args.filter_compare)
     kept = await llm_filter(
         [dict(c) for c in cands], llm.build_lm_client("filter"),
         temperature=cfg["llm_temperature"], max_tokens=cfg["llm_max_tokens_filter"],
@@ -121,6 +128,40 @@ async def replay(args: argparse.Namespace) -> str:
     return "\n".join(out) + "\n"
 
 
+async def filter_compare(cands: list[dict[str, Any]], cfg: dict[str, Any], runs: int) -> str:
+    """Pass A only: keep rate and drop reasons with vs without article text."""
+    lm = llm.build_lm_client("filter")
+    modes = {"with text": cands, "without text": [{**c, "extracted_text": None} for c in cands]}
+    kept_n: dict[str, dict[str, int]] = {m: {} for m in modes}
+    reasons: dict[str, dict[str, list[str]]] = {m: {} for m in modes}
+    for mode, batch in modes.items():
+        for _ in range(runs):
+            dropped: list[dict[str, Any]] = []
+            kept = await llm_filter(
+                [dict(c) for c in batch], lm, dropped=dropped,
+                temperature=cfg["llm_temperature"], max_tokens=cfg["llm_max_tokens_filter"],
+            )
+            for k in kept:
+                kept_n[mode][k["candidate_id"]] = kept_n[mode].get(k["candidate_id"], 0) + 1
+            for d in dropped:
+                reasons[mode].setdefault(d["candidate_id"], []).append(d["reason"])
+    await llm.aclose_clients()
+
+    out = [f"# Pass A comparison: {len(cands)} posts, {runs} runs per mode\n",
+           "| post | source text | kept with text | kept without text |", "|---|---|---|---|"]
+    for c in cands:
+        cid, row = c["candidate_id"], c["_row"]
+        out.append(f"| d{row['d_id']} {row['title'][:60]} | {len(c.get('extracted_text') or '')} chars"
+                   f" | {kept_n['with text'].get(cid, 0)}/{runs} | {kept_n['without text'].get(cid, 0)}/{runs} |")
+    out.append("\n## Drop reasons")
+    for c in cands:
+        cid, row = c["candidate_id"], c["_row"]
+        for mode in modes:
+            for r in reasons[mode].get(cid, []):
+                out.append(f"- d{row['d_id']} ({mode}): {r}")
+    return "\n".join(out) + "\n"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", required=True, help="SQLite DB (use a snapshot)")
@@ -128,6 +169,8 @@ def main() -> None:
     ap.add_argument("--until-id", type=int, help="newest deliveries.id to include (repeat a window)")
     ap.add_argument("--style-file", help="text file with the style prompt to try")
     ap.add_argument("--default-style", action="store_true", help="use config.DEFAULT_STYLE_PROMPT")
+    ap.add_argument("--filter-compare", type=int, metavar="N",
+                    help="Pass A only, N runs with and N without article text")
     ap.add_argument("--out", help="write markdown here instead of stdout")
     args = ap.parse_args()
     report = asyncio.run(replay(args))

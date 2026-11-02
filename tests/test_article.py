@@ -213,3 +213,18 @@ def test_filter_line_shows_text_instead_of_snippet() -> None:
     assert f"Text: {PARA}" in line
     assert "SNIPPET" not in line
     assert "Snippet: SNIPPET" in _format_candidate({"title": "T", "snippet": "SNIPPET"})
+
+
+@pytest.mark.asyncio
+async def test_filter_reports_drop_reasons() -> None:
+    from newsbot.summarizer import llm_filter
+
+    class _LM:
+        async def generate(self, messages, **params):
+            return ('{"items":[{"id":"c001","keep":false,"reason":"pure drama"},'
+                    '{"id":"c002","keep":true,"short_summary":"S."}]}', "stop")
+
+    dropped: list = []
+    kept = await llm_filter([{"title": "A"}, {"title": "B"}], _LM(), dropped=dropped)
+    assert [k["title"] for k in kept] == ["B"]
+    assert dropped == [{"candidate_id": "c001", "title": "A", "reason": "pure drama"}]

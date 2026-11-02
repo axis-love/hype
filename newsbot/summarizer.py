@@ -44,7 +44,8 @@ FILTER_SYSTEM = (
     "\"category\":...,\"importance\":8,\"reason\":...,\"short_summary\":...}]}. "
     "Each item MUST include the 'id' field exactly as given in the input. "
     "Do NOT include a 'url' field — URLs are managed by the application. "
-    "Include every input item in the response, with keep=false for dropped ones."
+    "Include every input item in the response, with keep=false and a one-line "
+    "reason for dropped ones."
 )
 
 STYLE_SYSTEM = (
@@ -157,11 +158,14 @@ async def llm_filter(
     *,
     temperature: float = 0.4,
     max_tokens: int = 800,
+    dropped: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Pass A: ask the LLM to filter and annotate candidates.
 
     Returns the kept items (keep=true), merged with the original
     candidate's engagement fields so the digest writer has signals.
+    When *dropped* is a list, each dropped item is appended to it as
+    {"candidate_id", "title", "reason"} (used by scripts/replay_posts.py).
     """
     if not items:
         return []
@@ -231,6 +235,12 @@ async def llm_filter(
 
         if not entry.get("keep"):
             dropped_ids.add(cid)
+            reason = str(entry.get("reason") or "").strip()[:200]
+            log.info("LLM filter dropped %s (%s): %s",
+                     cid, str(id_map[cid].get("title") or "")[:80], reason)
+            if dropped is not None:
+                dropped.append({"candidate_id": cid,
+                                "title": id_map[cid].get("title"), "reason": reason})
             continue
 
         original = id_map[cid]
